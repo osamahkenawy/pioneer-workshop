@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Source Code Security Review - Pioneer Car Workshop Platform</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 32px; color: #1f2933; line-height: 1.45; }
+    h1, h2, h3, h4 { color: #102a43; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; }
+    th, td { border: 1px solid #bcccdc; padding: 8px; vertical-align: top; }
+    th { background: #f0f4f8; text-align: left; }
+    pre { background: #f5f7fa; border: 1px solid #d9e2ec; padding: 12px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+    .critical { color: #b00020; font-weight: 700; }
+    .high { color: #c2410c; font-weight: 700; }
+    .medium { color: #b7791f; font-weight: 700; }
+    .low { color: #2f855a; font-weight: 700; }
+    .info { color: #486581; font-weight: 700; }
+    .ok { color: #1a7f37; font-weight: 700; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:3px; color:#fff; font-size:12px; font-weight:700; }
+    .b-critical { background:#b00020; } .b-high { background:#c2410c; } .b-medium { background:#b7791f; }
+    .b-low { background:#2f855a; } .b-info { background:#486581; } .b-ok { background:#1a7f37; }
+    code { background:#eef2f7; padding:1px 4px; border-radius:3px; font-size:12px; }
+    .warn { background:#fff7ed; border-left:3px solid #f59e0b; }
+    .good { background:#f0fdf4; border-left:3px solid #16a34a; }
+    section { border-bottom: 1px solid #d9e2ec; padding-bottom: 18px; margin-bottom: 18px; }
+  </style>
+</head>
+<body>
+  <h1>Source Code Security Review Report</h1>
+  <h2>Pioneer Car Workshop Platform (car-workshop-backend + car-workshop-frontend)</h2>
+  <p><strong>Reviewed code:</strong> /home/edc1840/Music/Ethical VAPT/Pioneer_VAPT/car-workshop-backend-main/ (Express + MySQL + Socket.IO) and /home/edc1840/Music/Ethical VAPT/Pioneer_VAPT/car-workshop-frontend-main/ (React + Vite)</p>
+  <p><strong>Review date:</strong> 2026-08-17</p>
+  <p><strong>Method:</strong> Full manual review of authentication, authorization/RBAC, middleware, all route handlers, database layer, socket layer, uploads, webhooks, payments, deployment scripts; cross-checked line-by-line against the live findings in the companion VAPT report (Pioneer_VAPT_Report_2026-08-17.html).</p>
+  <p><strong>Scope note:</strong> This review covers the same codebase deployed to workshop.pioneeruae.com (verified by bundle hash/index.html identity). File:line references point into the reviewed source tree.</p>
+
+  <h2>Summary Table</h2>
+  <table>
+    <tr><th>ID</th><th>Severity</th><th>Finding</th><th>Key Location(s)</th></tr>
+    <tr><td>SR-01</td><td><span class="badge b-critical">CRITICAL</span></td><td>No output encoding of stored user text in frontend sinks (stored XSS)</td><td>MapView.jsx:193; WorkOrderDetail.jsx:288-314; JobAssignment.jsx:1271-1306; ServiceStatusPublic.jsx:151-187; backend stores raw</td></tr>
+    <tr><td>SR-02</td><td><span class="badge b-critical">CRITICAL</span></td><td>Default admin credentials seeded; no forced reset; deploy secrets public</td><td>01_seed_demo.sql; deploy/deploy-rhel.sh</td></tr>
+    <tr><td>SR-03</td><td><span class="badge b-high">HIGH</span></td><td>SSRF - webhook deliverWebhook() fetches arbitrary URLs</td><td>routes/webhooks.js deliverWebhook()</td></tr>
+    <tr><td>SR-04</td><td><span class="badge b-high">HIGH</span></td><td>No rate limiting on web/customer/super-admin auth routes</td><td>routes/auth.js, customer-auth.js, super-admin.js; lib/rate-limits.js used only in mechanic-app.js</td></tr>
+    <tr><td>SR-05</td><td><span class="badge b-high">HIGH</span></td><td>Unauthenticated /api/public/start-trial provisions workshops + sends email</td><td>routes/public-api.js</td></tr>
+    <tr><td>SR-06</td><td><span class="badge b-medium">MEDIUM</span></td><td>Unverified customer accounts usable end-to-end</td><td>routes/customer-auth.js; routes/customer-portal.js</td></tr>
+    <tr><td>SR-07</td><td><span class="badge b-medium">MEDIUM</span></td><td>Socket.IO rooms expose live mechanic GPS to any customer-role JWT</td><td>lib/socket.js:63-65; routes/mechanics.js:586-605</td></tr>
+    <tr><td>SR-08</td><td><span class="badge b-medium">MEDIUM</span></td><td>Weak service-status tokens + PII in public response</td><td>routes/service-status.js; customer-portal.js:246</td></tr>
+    <tr><td>SR-09</td><td><span class="badge b-medium">MEDIUM</span></td><td>JWT in localStorage (frontend) + token in JSON responses</td><td>frontend src/lib/api.js; auth.js; super-admin.js</td></tr>
+    <tr><td>SR-10</td><td><span class="badge b-medium">MEDIUM</span></td><td>No CSP / HSTS headers configured anywhere</td><td>server.js; nginx template in deploy-rhel.sh</td></tr>
+    <tr><td>SR-11</td><td><span class="badge b-low">LOW</span></td><td>Uploads: extension-only validation</td><td>routes/uploads.js:23-46</td></tr>
+    <tr><td>SR-12</td><td><span class="badge b-low">LOW</span></td><td>OTP via Math.random(); LOG_OTP_SECRET echo path</td><td>routes/mechanic-app.js; .env.example</td></tr>
+    <tr><td>SR-13</td><td><span class="badge b-low">LOW</span></td><td>Swagger UI exposed in production</td><td>server.js (swagger-ui-express mount)</td></tr>
+    <tr><td>SR-14</td><td><span class="badge b-info">INFO</span></td><td>CORS allow-list includes localhost:3000; socket.io origin '*'</td><td>server.js:83; lib/socket.js:39-44</td></tr>
+    <tr><td>SR-15</td><td><span class="badge b-info">INFO</span></td><td>Client-controlled financial fields; CSV formula injection; security-theater JS</td><td>customer-portal.js:206-208; JobAssignment.jsx:1226-1227; utils/securityProtection.js</td></tr>
+    <tr><td>SR-16</td><td><span class="badge b-info">INFO</span></td><td>sanitizeNotes() regex blocklist bypassable; only covers mechanic notes</td><td>routes/mechanics.js:38-52</td></tr>
+  </table>
+
+  <h2>Detailed Findings</h2>
+
+  <!-- SR-01 -->
+  <section>
+    <h3>SR-01 &mdash; Stored XSS: no output encoding at multiple frontend sinks (CRITICAL)</h3>
+    <p>Backend stores all free-text fields verbatim. The <code>xss</code> npm package is declared in <code>package.json</code> but never imported anywhere in the backend or frontend (grep confirms zero usage).</p>
+    <p><strong>Input path (no sanitization):</strong></p>
+    <pre class="warn">// routes/customer-portal.js:249-262 - INSERT stores customer_name, dropoff_address, description,
+// special_instructions, notes, item names exactly as submitted. No encoding, no validation.
+// routes/public-api.js - same for /api/public/enquiries (contact_name, message).
+// routes/work-orders.js - admin-created work orders accept recipient_name/address fields verbatim.</pre>
+    <p><strong>Sink 1 - admin live-map popups (verified live payload in work order #69):</strong></p>
+    <pre class="warn">// frontend src/components/MapView.jsx:193
+&lt;span dangerouslySetInnerHTML={{ __html: m.popup }} /&gt;
+// m.popup is an HTML string assembled from API data (customer_name, dropoff_address...) in
+// src/pages/JobAssignment.jsx buildMapMarkers() (lines ~1324-1345) and WorkOrderDetail.jsx:288-314.</pre>
+    <p><strong>Sink 2 - public tracking page (no auth required):</strong></p>
+    <pre class="warn">// frontend src/pages/ServiceStatusPublic.jsx:151-187
+// Leaflet bindPopup()/divIcon() interpolate order.mechanic_name, order.mechanic_phone,
+// order.customer_name, order.dropoff_address directly into HTML strings (innerHTML semantics).
+// Any visitor of /service-status/:token triggers execution.</pre>
+    <p><strong>Sink 3 - print job-assignment board:</strong></p>
+    <pre class="warn">// frontend src/pages/JobAssignment.jsx:1271-1305
+// HTML built by concatenation (recipient_name, mechanic_name, work_order_number) then:
+win.document.write(html); win.document.close();   // executes embedded scripts</pre>
+    <p><strong>Fix:</strong> sanitize on write (xss package is already installed) AND encode on read; replace <code>dangerouslySetInnerHTML</code>/string popups with React elements; purge stored payloads.</p>
+  </section>
+
+  <!-- SR-02 -->
+  <section>
+    <h3>SR-02 &mdash; Default credentials + committed deployment secrets (CRITICAL)</h3>
+    <pre class="warn">// src/migrations/post/01_seed_demo.sql (in public repo)
+INSERT INTO users ... ('admin', 'Demo@12345' ...);      // default admin password
+
+// deploy/deploy-rhel.sh (in public repo - repo is public, verified via GitHub API)
+DB_USER="root"
+DB_PASS="Root@12345"                     // hardcoded MySQL root password
+SERVER_IP="10.10.241.84"                 // internal server IP
+JWT_SECRET=rhel-staging-jwt-secret-$(date +%s)   // timestamp-derived secret
+// SMTP_* blank, but script writes .env with BACKEND_URL/FRONTEND_URL=http://{IP} (HTTP, no TLS)</pre>
+    <p>No password-change-on-first-login logic exists in routes/auth.js (login only checks bcrypt match). The JWT secret is derived from a deploy timestamp - the window is guessable if deployment time is known.</p>
+    <p><strong>Fix:</strong> private repos; rotate secrets; generate secrets at deploy time from <code>openssl rand</code>; force password change for seeded accounts; HTTPS everywhere.</p>
+  </section>
+
+  <!-- SR-03 -->
+  <section>
+    <h3>SR-03 &mdash; SSRF in webhook delivery (HIGH)</h3>
+    <pre class="warn">// routes/webhooks.js - deliverWebhook():
+const res = await fetch(endpoint.url, { method, headers, body, timeout: 10000 });
+// endpoint.url is attacker-supplied (admin creates webhook). No scheme allow-list,
+// no IP validation (RFC1918/link-local/loopback), no DNS-rebinding check, no redirect control.
+// Live proof: delivery log recorded HTTP 405 from <a href="https://url.uk.m.mimecastprotect.com/s/_i9fCGg4RU1AVLGfrHmXhB85RI">http://169.254.169.254/latest/meta-data/</a>.</pre>
+    <p><strong>Fix:</strong> deny-list private/metadata ranges (<a href="https://url.uk.m.mimecastprotect.com/s/lYcuCJl58fqK7Q5UKI34hyRvId">169.254.0.0/16</a>, <a href="https://url.uk.m.mimecastprotect.com/s/BLdVCKm48f24jrmckSBoh5YW_c">100.100.100.200</a>, 10/8, 172.16/12, 192.168/16, ::1, 127/8), HTTPS-only, validate resolved IP before and after redirects, egress proxy.</p>
+  </section>
+
+  <!-- SR-04 -->
+  <section>
+    <h3>SR-04 &mdash; Rate limiting missing on web/customer/super-admin auth (HIGH)</h3>
+    <pre class="warn">// lib/rate-limits.js defines mechanicLoginLimiter, mechanicOtpLimiter, mechanicPasswordResetLimiter.
+// routes/mechanic-app.js is the ONLY file importing them.
+// routes/auth.js (admin login, forgot-password), routes/customer-auth.js (register/login/forgot-password),
+// routes/super-admin.js:50 (super-admin login) have no limiter.
+// Live: 20 rapid /api/auth/login attempts &rarr; all 401, no 429, no delay.</pre>
+    <p><strong>Fix:</strong> apply limiter (per IP + per account) to all auth endpoints; lockout + captcha after N failures.</p>
+  </section>
+
+  <!-- SR-05 -->
+  <section>
+    <h3>SR-05 &mdash; Unauthenticated trial provisioning / email bombing (HIGH)</h3>
+    <pre class="warn">// routes/public-api.js - POST /api/public/start-trial
+// No auth, no captcha, no rate limit. Creates workshop + owner user + sends welcome email to
+// attacker-supplied address. Live: workshops #2 and #3 created with vapt-rt-known@probe.local.
+// Error differentiation (409 "already exists" vs 201) enables enumeration (VAPT FIND-012).</pre>
+    <p><strong>Fix:</strong> captcha + limiter; verify email before provisioning; cap trials per IP/email.</p>
+  </section>
+
+  <!-- SR-06 -->
+  <section>
+    <h3>SR-06 &mdash; Unverified customers get full portal access (MEDIUM)</h3>
+    <pre class="warn">// routes/customer-auth.js - register() creates user with email_verified=0 and issues sessions.
+// login() issues a JWT regardless of verification state (returns is_verified in the payload only).
+// routes/customer-portal.js:44-56 - middleware injects req.customer; nothing checks email_verified.
+// Live: is_verified=false session created work orders and read portal data (HTTP 200).</pre>
+    <p><strong>Fix:</strong> gate on <code>email_verified=1</code>; expire unverified sessions; require verification for write actions.</p>
+  </section>
+
+  <!-- SR-07 -->
+  <section>
+    <h3>SR-07 &mdash; Mechanic GPS broadcast to all workshop-room members incl. customers (MEDIUM)</h3>
+    <pre class="warn">// lib/socket.js:63-65 - any JWT with workshop_id joins "workshop:{id}" room (customers included)
+// routes/mechanics.js:596 - io.to(`workshop:${req.workshopId}`).emit('mechanic:location', {...lat,lng,phone...})
+// routes/mechanics.js:605 - io.to(`track:${token}`).emit(...)
+// Live customer JWT payload: {"role":"customer","workshop_id":1,...} - join capability confirmed.</pre>
+    <p><strong>Fix:</strong> role-check on join (admin/mechanic only); customers get <code>track:{token}</code> rooms only.</p>
+  </section>
+
+  <!-- SR-08 -->
+  <section>
+    <h3>SR-08 &mdash; Public tracking token weakness + PII exposure (MEDIUM)</h3>
+    <pre class="warn">// routes/customer-portal.js:246 - service_status_token = crypto.randomBytes(6).toString('hex').toUpperCase()
+//   &rarr; 48-bit, unguessable in practice, but legacy rows use 32-bit tokens (e.g. live A384F81275E8)
+// routes/api-v1.js:357 - 'TR' + 48-bit token (OK)
+// routes/service-status.js - GET /api/service-status/:token returns customer_name, addresses,
+//   mechanic_name, mechanic_phone, service_bay_name with NO authentication (public link only).</pre>
+    <p><strong>Fix:</strong> 128-bit tokens for new rows and migration of legacy; drop mechanic phone from the public response; rate limit the endpoint.</p>
+  </section>
+
+  <!-- SR-09 -->
+  <section>
+    <h3>SR-09 &mdash; JWTs in localStorage and in JSON responses (MEDIUM)</h3>
+    <pre class="warn">// routes/auth.js (login) returns token in JSON body; Set-Cookie also present (HttpOnly - good)
+// frontend src/lib/api.js:  const token = localStorage.getItem('auth_token');  // used as Bearer
+// frontend LoginPage.jsx: localStorage.setItem('auth_token', data.token)
+// frontend SuperAdminLogin.jsx: localStorage.setItem('superAdminToken', data.token)
+// Any XSS (SR-01) reads these keys directly - confirmed keys: auth_token, auth_workshop, crm_token,
+// crm_user, superAdminToken, lang.</pre>
+    <p><strong>Fix:</strong> HttpOnly cookie-only sessions; keep token out of JSON; short TTL + refresh rotation (mechanic-app already implements rotation - reuse that pattern for web).</p>
+  </section>
+
+  <!-- SR-10 -->
+  <section>
+    <h3>SR-10 &mdash; Missing security headers (CSP, HSTS) (MEDIUM)</h3>
+    <pre class="warn">// server.js - no helmet, no CSP, no HSTS anywhere in the app; nginx template in deploy-rhel.sh
+// sets none either. Live headers confirm: x-frame-options DENY + nosniff present (set somewhere in
+// prod nginx), but no CSP / HSTS / Referrer-Policy / Permissions-Policy / COOP / CORP.</pre>
+    <p><strong>Fix:</strong> add CSP (self-host Leaflet; note inline styles used), HSTS preload, Referrer-Policy, Permissions-Policy.</p>
+  </section>
+  <!-- SR-11 -->
+  <section>
+    <h3>SR-11 &mdash; Uploads: extension-only validation (LOW)</h3>
+    <pre class="warn">// routes/uploads.js:23-46
+const ALLOWED_IMAGE = /\.(jpg|jpeg|png|webp)$/i;
+fileFilter: (_req, file, cb) =&gt; {
+  if (!ALLOWED_IMAGE.test(file.originalname)) return cb(new Error('Only JPG, PNG, WEBP images are allowed'));
+  cb(null, true);
+}
+// No magic-byte/MIME inspection. Stored with original extension; S3 backup uploads attacker-chosen
+// originalname as the key and client-supplied mimetype (uploads.js:70-71).
+// Mitigations present: X-Content-Type-Options nosniff; SVG not allowed; filenames server-generated.</pre>
+    <p><strong>Fix:</strong> validate magic bytes (file-type package), re-encode images, serve with Content-Disposition attachment policy, restrict S3 object ACLs.</p>
+  </section>
+
+  <!-- SR-12 -->
+  <section>
+    <h3>SR-12 &mdash; Weak OTP generation + debug echo path (LOW)</h3>
+    <pre class="warn">// routes/mechanic-app.js - forgot-password:
+const otp = String(Math.floor(100000 + Math.random() * 900000));   // Math.random() - not crypto-safe
+
+// .env.example (public repo):
+LOG_OTP_SECRET=true
+// When true, the forgot-password response body includes the OTP ("_dev_otp") - if enabled in
+// production, anyone who can trigger the flow reads the OTP directly.
+// Note: mechanicOtpLimiter IS applied on this route (good).</pre>
+    <p><strong>Fix:</strong> crypto.randomInt(); force LOG_OTP_SECRET=false in production; short OTP TTL + max attempts.</p>
+  </section>
+
+  <!-- SR-13 -->
+  <section>
+    <h3>SR-13 &mdash; Swagger UI exposed in production (LOW)</h3>
+    <pre class="warn">// server.js:
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+// Live: GET /api/docs/ returns interactive documentation of all 393 endpoints with no auth.
+// Full spec also lives in src/swagger.yaml inside the PUBLIC repo (SR-02).</pre>
+    <p><strong>Fix:</strong> serve docs only for super-admin JWT or non-production environments.</p>
+  </section>
+
+  <!-- SR-14 -->
+  <section>
+    <h3>SR-14 &mdash; CORS allow-list includes localhost:3000; socket.io wildcard origin (INFO)</h3>
+    <pre class="warn">// server.js:83
+app.use(cors({ origin: config.frontendUrl === '*' ? true : [config.frontendUrl, 'http://localhost:3000'], credentials: true }));
+// lib/socket.js:39-44
+const io = new Server(httpServer, { cors: { origin: '*', methods: ['GET','POST'] } });
+// REST CORS is otherwise correct (live check: no ACAO for evil origins).</pre>
+    <p><strong>Fix:</strong> remove localhost from prod allow-list; pin socket.io origins to the real frontend domains.</p>
+  </section>
+
+  <!-- SR-15 -->
+  <section>
+    <h3>SR-15 &mdash; Client-controlled financials; CSV formula injection; security theater (INFO)</h3>
+    <pre class="warn">// routes/customer-portal.js:206-208 - service_fee, cash_amount, discount accepted from the client
+// without bounds or price lookup &rarr; customers can set arbitrary amounts on their own orders
+// (affects reports/revenue KPIs).
+
+// frontend JobAssignment.jsx:1226-1227 - CSV esc() only doubles quotes; cells beginning with
+// = + - @ are exported as-is &rarr; spreadsheet formula injection for admins who export.
+
+// frontend src/utils/securityProtection.js - right-click/copy disabling is client-side only,
+// trivially bypassed; no real security value (UX cost).</pre>
+    <p><strong>Fix:</strong> server-side pricing engine; strip formula prefixes on export; remove or repurpose the protection script.</p>
+  </section>
+
+  <!-- SR-16 -->
+  <section>
+    <h3>SR-16 &mdash; sanitizeNotes() blocklist bypassable and incomplete (INFO)</h3>
+    <pre class="warn">// routes/mechanics.js:38-52 - sanitizeNotes() strips script/style tags, on*="" (quoted only) and
+// case-sensitive 'javascript:'. Bypasses: unquoted handlers (&lt;img src=x onerror=alert(1)&gt;),
+// 'JavaScript:' mixed case, event handlers via other syntax. Only applied to mechanic notes -
+// customer/work-order fields have no sanitization at all (SR-01).</pre>
+    <p><strong>Fix:</strong> use the xss package (already in dependencies) or an allow-list encoder; apply consistently at the write boundary for ALL free-text fields.</p>
+  </section>
+
+  <h2>Positive Code Review Results (verified good practice)</h2>
+  <table>
+    <tr><th>Area</th><th>Details</th></tr>
+    <tr><td>SQL injection resistance</td><td>Every query uses parameterized placeholders (<code>query(sql, params)</code> / <code>execute(sql, params)</code>); dynamic ORDER BY columns are whitelisted (e.g. super-admin.js:420-427, customer-portal.js:90-92); LIMIT/OFFSET parsed via Math.max/Math.min/parseInt (api-v1.js:260-261). No string-concatenated user input found in SQL.</td></tr>
+    <tr><td>Auth middleware freshness</td><td>middleware/auth.js:37-87 reloads the user from DB on every request (token cannot persist role changes or deactivation); workshop_id is taken from the DB row, not the token.</td></tr>
+    <tr><td>Super-admin RBAC</td><td>super-admin.js:20-47 and super-admin-enhanced.js:14-33: token type check (super_admin) + active DB lookup + fresh permissions on every request. Regular admin JWT gets 403 (verified live).</td></tr>
+    <tr><td>Tenant isolation</td><td>Customer portal scopes every query by customer_id AND workshop_id (customer-portal.js:81-82, 132, 300-303); vehicles verified to belong to the customer (customer-portal.js:213-217); api-v1 requires API-key permission per route (api-v1.js:257, 304, 339).</td></tr>
+    <tr><td>Refresh-token security (mechanic app)</td><td>mechanic-app.js: refresh tokens stored hashed (sha256), rotated on use, revoked on reuse detection (replay protection). Access TTL 12h, refresh 30d - reasonable.</td></tr>
+    <tr><td>Stripe webhook verification</td><td>stripe.js:1145-1171 verifies signature via <code>stripe.webhooks.constructEvent</code> with raw body mounted before express.json (server.js:85-91); rejects missing secret/signature. No unsigned event processing.</td></tr>
+    <tr><td>Session cookie attributes</td><td>auth_token cookie set with HttpOnly, Secure, SameSite=Lax (verified live).</td></tr>
+    <tr><td>Mechanic-app rate limits</td><td>mechanicLoginLimiter / mechanicOtpLimiter / mechanicPasswordResetLimiter applied to mechanic-app auth flows.</td></tr>
+    <tr><td>JWT secrets not weak by default</td><td>config.js requires JWT_SECRET from env; common-weak-secret probing failed against the live JWT (good).</td></tr>
+    <tr><td>Password storage</td><td>bcryptjs with salt rounds used consistently (auth.js, customer-auth.js, super-admin.js, mechanic-app.js).</td></tr>
+    <tr><td>Error handling</td><td>Route handlers use try/catch with generic 500 messages; no stack traces exposed in responses (checked live).</td></tr>
+    <tr><td>Nginx hardening (live)</td><td>X-Frame-Options: DENY and nosniff present; socket.io proxied properly; client_max_body_size 50M.</td></tr>
+  </table>
+
+  <h2>Code Hygiene / Maintenance Notes</h2>
+  <ul>
+    <li><code>xss</code> package installed but unused - either use it (recommended) or remove it.</li>
+    <li>Duplicate super-admin implementations (super-admin.js vs super-admin-enhanced.js) - keep one RBAC path to avoid drift.</li>
+    <li>Multiple `"all permissions"` shortcuts (<code>perms.all</code>, <code>perms.super_admin</code>, <code>perms.platform_owner</code> in middleware/auth.js:141) - confirm no non-super-admin account can receive these flags.</li>
+    <li>Swagger spec duplicated in swagger.yaml (served at /api/docs) and exposed publicly - keep in sync or remove from prod.</li>
+    <li>`.env.example` documents LOG_OTP_SECRET default true - flip default to false.</li>
+    <li>Email templates build HTML with template literals interpolating user-controlled workshop/owner names (super-admin-enhanced.js:723-732, 1082-1090) - encode these to prevent email-header/HTML injection.</li>
+  </ul>
+
+  <h2>Addendum - Follow-up Assessment (2026-08-17): deployment surface beyond this codebase</h2>
+  <p>Live testing of the additional targets (<code>two.pioneeruae.com</code>, <code>one.pioneeruae.com</code>, <code>staging.pioneeruae.com</code>, and raw <code>68.178.171.205:3000</code>) found deployment-level issues. Full evidence is in the VAPT report (findings T2-001..T2-007). Code-relevant notes for the owner:</p>
+  <ul>
+    <li><strong>An unrelated Next.js application ("One Mobility Group") runs exposed on TCP 3000</strong> with live API routes (<code>/api/hello</code>, <code>/api/contact</code>), no nginx/WAF, no TLS, and no security headers. It is not part of this codebase and should be firewalled/removed or brought behind the same hardening as the rest.</li>
+    <li><strong><code>LOG_OTP_SECRET</code> is confirmed OFF in production</strong> - live <code>POST /api/mechanic-app/forgot-password</code> returns no <code>_dev_otp</code> (mechanic-app.js:455-464 would add it if the env var were <code>'true'</code>). Keep it disabled; also flip the <code>.env.example</code> default from <code>true</code> to <code>false</code>.</li>
+    <li><strong>Client bundles of all four related sites were scanned</strong> (two.pioneeruae.com ~508 KB of chunks, One Mobility Group :3000, staging 595 KB, Mwasalat default-vhost 664 KB): no API keys, secrets, tokens, or credentials found in any bundle.</li>
+    <li><strong>No real files exposed behind the SPA fallback:</strong> <code>/.git/HEAD</code>, <code>/.env*</code>, <code><a href="https://url.uk.m.mimecastprotect.com/s/-DTyCLn4ZHRQJY4fYTDWhyHSpi">/backup.zip</a></code>, <code>/db.sql</code>, <code>/package.json</code> all return HTTP 200 but with the same fallback HTML - no source or secret files are reachable via nginx on the marketing hosts.</li>
+    <li><strong>Deployment hygiene:</strong> wildcard DNS + wildcard TLS cert (<code>*.pioneeruae.com</code>), public staging host, and a default vhost serving an unrelated brand's staging SPA - see T2-004, T2-005, T2-006.</li>
+  </ul>
+
+  <p><em>Companion document: Pioneer_VAPT_Report_2026-08-17.html (live verification evidence for the above).</em></p>
+</body>
+</html>
+

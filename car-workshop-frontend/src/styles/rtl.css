@@ -1,0 +1,367 @@
+/* RTL Layout Support for Arabic */
+
+/* Global RTL Styles */
+[dir="rtl"] {
+  text-align: right;
+}
+
+[dir="rtl"] body {
+  font-family: 'Segoe UI', 'Tahoma', 'Geneva', 'Arial', sans-serif;
+  direction: rtl;
+}
+
+/* Sidebar RTL Adjustments */
+[dir="rtl"] .staff-wrapper.rtl .sidebar {
+  left: auto;
+  right: 0;
+  border-left: none;
+  border-right: 1px solid #e2e8f0;
+}
+
+[dir="rtl"] .staff-wrapper.rtl.sidebar-open .sidebar {
+  transform: translateX(0);
+}
+
+[dir="rtl"] .staff-wrapper.rtl.sidebar-closed .sidebar {
+  transform: translateX(100%);
+}
+
+[dir="rtl"] .staff-wrapper.rtl .sidebar-nav-link {
+  padding: 12px 16px 12px 12px;
+}
+
+[dir="rtl"] .staff-wrapper.rtl .sidebar-nav-link svg {
+  margin-left: 12px;
+  margin-right: 0;
+}
+
+/* Content Area RTL */
+[dir="rtl"] .staff-wrapper.rtl .main-content {
+  margin-left: 0;
+  margin-right: 280px;
+}
+
+[dir="rtl"] .staff-wrapper.rtl.sidebar-closed .main-content {
+  margin-right: 0;
+}
+
+/* Topbar RTL */
+[dir="rtl"] .custom-topbar {
+  left: 0 !important;
+  right: var(--sidebar-width) !important;
+}
+
+[dir="rtl"] .custom-topbar.sidebar-closed {
+  right: 0 !important;
+  left: 0 !important;
+}
+
+/* topbar-left and topbar-actions keep their natural LTR order in RTL */
+
+[dir="rtl"] .menu-toggle {
+  margin-left: 15px;
+  margin-right: 0;
+}
+
+[dir="rtl"] .lang-switcher {
+  margin-left: 15px;
+  margin-right: 0;
+}
+
+[dir="rtl"] .lang-toggle svg {
+  margin-left: 6px;
+  margin-right: 0;
+}
+
+/* Form Elements RTL */
+[dir="rtl"] .form-group label {
+  text-align: right;
+}
+
+[dir="rtl"] input, [dir="rtl"] select, [dir="rtl"] textarea {
+  text-align: right;
+  padding: 10px 13px 10px 40px;
+}
+
+[dir="rtl"] .search-input-wrapper svg {
+  left: auto;
+  right: 13px;
+}
+
+/* Button RTL */
+[dir="rtl"] .btn-icon svg {
+  margin-left: 8px;
+  margin-right: 0;
+}
+
+[dir="rtl"] .btn-icon.icon-right {
+  flex-direction: row-reverse;
+}
+
+[dir="rtl"] .btn-icon.icon-right svg {
+  margin-left: 0;
+  margin-right: 8px;
+}
+
+/* Table RTL */
+[dir="rtl"] .data-table {
+  direction: rtl;
+}
+
+[dir="rtl"] .data-table th {
+  text-align: right;
+}
+
+[dir="rtl"] .data-table td {
+  text-align: right;
+}
+
+[dir="rtl"] .data-table .actions-cell {
+  text-align: center;
+}
+
+/* Card RTL */
+[dir="rtl"] .metric-card {
+  text-align: right;
+}
+
+[dir="rtl"] .metric-icon {
+  margin-left: 12px;
+  margin-right: 0;
+}
+
+[dir="rtl"] .metric-trend {
+  text-align: left;
+}
+
+/* Navigation RTL */
+[dir="rtl"] .nav-item svg {
+  margin-left: 12px;
+  margin-right: 0;
+}
+
+[dir="rtl"] .nav-section-title {
+  text-align: right;
+}
+
+/* Dashboard Widgets RTL */
+[dir="rtl"] .widget-header {
+  text-align: right;
+}
+
+[dir="rtl"] .widget-header .view-all {
+  left: 0;
+  right: auto;
+}
+
+[dir="rtl"] .widget-header .view-all svg {
+  margin-left: 0;
+  margin-right: 6px;
+  transform: rotate(180deg);
+}
+
+/* WorkOrder Form RTL */
+[dir="rtl"] .step-indicator {
+  direction: rtl;
+}
+
+[dir="rtl"] .step-indicator .step-line {
+  transform: scaleX(-1);
+}
+
+[dir="rtl"] .form-navigation {
+  flex-direction: row-reverse;
+}
+
+[dir="rtl"] .form-navigation .btn:first-child {
+  margin-left: 10px;
+  margin-right: 0;
+}
+
+/* Modal RTL */
+[dir="rtl"] .modal-header {
+  text-align: right;
+}
+
+[dir="rtl"] .modal-close {
+  left: 20px;
+  right: auto;
+}
+
+/* Status Pills RTL */
+[dir="rtl"] .status-pill svg {
+  margin-left: 6px;
+  margin-right: 0;
+}
+
+/* Flex Layout RTL Adjustments */
+[dir="rtl"] .flex-end {
+  justify-content: flex-start !important;
+}
+
+[dir="rtl"] .flex-start {
+  justify-content: flex-end !important;
+}
+
+[dir="rtl"] .ml-auto {
+  margin-left: 0 !important;
+  margin-right: auto !important;
+}
+
+[dir="rtl"] .mr-auto {
+  margin-right: 0 !important;
+  margin-left: auto !important;
+}
+
+/* Typography RTL */
+[dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3, 
+[dir="rtl"] h4, [dir="rtl"] h5, [dir="rtl"] h6 {
+  text-align: right;
+}
+
+[dir="rtl"] .text-left {
+  text-align: right !important;
+}
+
+[dir="rtl"] .text-right {
+  text-align: left !important;
+}
+
+/* Charts RTL (for Chart.js) */
+[dir="rtl"] .chart-container {
+  direction: ltr; /* Keep charts in LTR for proper rendering */
+}
+
+/* Language Switcher RTL */
+[dir="rtl"] .lang-dropdown {
+  left: 0;
+  right: auto;
+}
+
+/* Notification Bell RTL */
+[dir="rtl"] .notification-bell .badge {
+  left: -6px;
+  right: auto;
+}
+
+[dir="rtl"] .notification-dropdown {
+  left: 0;
+  right: auto;
+}
+
+/* Avatar RTL */
+[dir="rtl"] .avatar-name {
+  margin-left: 0;
+  margin-right: 10px;
+}
+
+/* Progress Bar RTL */
+[dir="rtl"] .progress-bar {
+  direction: ltr; /* Keep progress bars LTR for consistency */
+}
+
+/* Tooltip RTL */
+[dir="rtl"] .tooltip {
+  text-align: center; /* Center tooltips regardless of direction */
+}
+
+/* Mobile Responsive RTL */
+@media (max-width: 768px) {
+  [dir="rtl"] .staff-wrapper.rtl .sidebar {
+    transform: translateX(100%);
+  }
+  
+  [dir="rtl"] .staff-wrapper.rtl.sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+  
+  [dir="rtl"] .custom-topbar {
+    right: 0;
+    left: auto;
+  }
+  
+  [dir="rtl"] .content-area {
+    margin-right: 0;
+  }
+}
+
+/* WorkOrders Page RTL */
+[dir="rtl"] .order-filters {
+  direction: rtl;
+}
+
+[dir="rtl"] .filter-group label {
+  text-align: right;
+}
+
+[dir="rtl"] .order-grid .order-card {
+  text-align: right;
+}
+
+/* Dashboard Grid RTL */
+[dir="rtl"] .metrics-row {
+  direction: rtl;
+}
+
+[dir="rtl"] .dashboard-grid {
+  direction: rtl;
+}
+
+/* Map Components RTL */
+[dir="rtl"] .map-controls {
+  left: 10px;
+  right: auto;
+}
+
+[dir="rtl"] .map-info-box {
+  text-align: right;
+}
+
+/* Search Results RTL */
+[dir="rtl"] .search-result-item {
+  text-align: right;
+  padding: 10px 14px 10px 40px;
+}
+
+[dir="rtl"] .search-result-icon {
+  left: auto;
+  right: 14px;
+}
+
+/* Step Bar RTL */
+[dir="rtl"] .step-bar {
+  direction: rtl;
+}
+
+[dir="rtl"] .step-connector {
+  transform: scaleX(-1);
+}
+
+/* Fixes for specific components */
+[dir="rtl"] .iconoir-react {
+  /* Flip icons that need RTL adjustment */
+}
+
+[dir="rtl"] .arrow-right {
+  transform: rotate(180deg);
+}
+
+[dir="rtl"] .arrow-left {
+  transform: rotate(180deg);
+}
+
+/* Currency and Numbers - Keep LTR */
+[dir="rtl"] .currency,
+[dir="rtl"] .amount,
+[dir="rtl"] .number {
+  direction: ltr;
+  text-align: left;
+}
+
+/* Email and URLs - Keep LTR */
+[dir="rtl"] .email,
+[dir="rtl"] .url,
+[dir="rtl"] .phone {
+  direction: ltr;
+  text-align: left;
+}

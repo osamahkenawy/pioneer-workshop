@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 350">
+  <defs>
+    <filter id="stepShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="15" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="500" height="350" fill="#f8fafc" rx="16"/>
+  
+  <!-- Registration form card -->
+  <rect x="100" y="30" width="300" height="290" rx="12" fill="#fff" filter="url(#stepShadow)"/>
+  
+  <!-- Header -->
+  <rect x="100" y="30" width="300" height="50" rx="12" fill="#244066"/>
+  <rect x="100" y="65" width="300" height="15" fill="#244066"/>
+  <text x="250" y="60" font-size="14" fill="#fff" text-anchor="middle" font-weight="600">Create Your Account</text>
+  
+  <!-- Form fields -->
+  <text x="130" y="110" font-size="10" fill="#666">Company Name</text>
+  <rect x="130" y="118" width="240" height="36" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="145" y="141" font-size="11" fill="#999">Enter your company name</text>
+  
+  <text x="130" y="175" font-size="10" fill="#666">Email Address</text>
+  <rect x="130" y="183" width="240" height="36" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="145" y="206" font-size="11" fill="#999">you@company.com</text>
+  
+  <text x="130" y="240" font-size="10" fill="#666">Password</text>
+  <rect x="130" y="248" width="240" height="36" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="145" y="271" font-size="11" fill="#999">••••••••••</text>
+  
+  <!-- Button -->
+  <rect x="130" y="295" width="240" height="40" rx="8" fill="#f2421b"/>
+  <text x="250" y="320" font-size="12" fill="#fff" text-anchor="middle" font-weight="600">Start Free Trial →</text>
+  
+  <!-- Decorative elements -->
+  <circle cx="60" cy="100" r="30" fill="#244066" opacity="0.1"/>
+  <circle cx="440" cy="280" r="40" fill="#f2421b" opacity="0.1"/>
+</svg>
+
+

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 350">
+  <!-- Background decorative -->
+  <circle cx="200" cy="300" r="200" fill="#244066" opacity="0.05"/>
+  
+  <!-- Person with laptop illustration -->
+  <!-- Desk -->
+  <rect x="80" y="270" width="240" height="12" rx="4" fill="#244066" opacity="0.2"/>
+  <rect x="100" y="282" width="8" height="50" fill="#244066" opacity="0.15"/>
+  <rect x="292" y="282" width="8" height="50" fill="#244066" opacity="0.15"/>
+  
+  <!-- Laptop -->
+  <rect x="130" y="200" width="140" height="85" rx="6" fill="#244066"/>
+  <rect x="138" y="208" width="124" height="70" rx="3" fill="#3a5a8a"/>
+  
+  <!-- Screen content -->
+  <rect x="145" y="215" width="50" height="8" rx="2" fill="#fff" opacity="0.8"/>
+  <rect x="145" y="230" width="110" height="4" rx="1" fill="#fff" opacity="0.3"/>
+  <rect x="145" y="240" width="90" height="4" rx="1" fill="#fff" opacity="0.3"/>
+  <rect x="145" y="255" width="45" height="15" rx="3" fill="#f2421b"/>
+  <rect x="195" y="255" width="45" height="15" rx="3" fill="#fff" opacity="0.2"/>
+  
+  <!-- Laptop base -->
+  <path d="M120,285 L280,285 L290,295 L110,295 Z" fill="#1a3050"/>
+  
+  <!-- Person (simplified) -->
+  <!-- Head -->
+  <circle cx="200" cy="120" r="35" fill="#f2421b" opacity="0.15"/>
+  <circle cx="200" cy="120" r="30" fill="#fcd5ce"/>
+  
+  <!-- Hair -->
+  <path d="M175,105 Q175,80 200,80 Q225,80 225,105" fill="#244066"/>
+  
+  <!-- Face features -->
+  <circle cx="190" cy="115" r="3" fill="#244066"/>
+  <circle cx="210" cy="115" r="3" fill="#244066"/>
+  <path d="M195,130 Q200,135 205,130" fill="none" stroke="#244066" stroke-width="2" stroke-linecap="round"/>
+  
+  <!-- Body -->
+  <path d="M170,155 Q200,145 230,155 L240,200 L160,200 Z" fill="#244066"/>
+  
+  <!-- Arms -->
+  <path d="M165,165 Q140,180 130,220" fill="none" stroke="#fcd5ce" stroke-width="12" stroke-linecap="round"/>
+  <path d="M235,165 Q260,180 270,220" fill="none" stroke="#fcd5ce" stroke-width="12" stroke-linecap="round"/>
+  
+  <!-- Decorative elements -->
+  <circle cx="60" cy="100" r="15" fill="#f2421b" opacity="0.2"/>
+  <circle cx="340" cy="150" r="20" fill="#244066" opacity="0.1"/>
+  <circle cx="320" cy="80" r="10" fill="#22c55e" opacity="0.2"/>
+  
+  <!-- Floating icons -->
+  <rect x="50" y="180" width="30" height="30" rx="6" fill="#22c55e" opacity="0.2"/>
+  <text x="65" y="200" font-size="14" text-anchor="middle">📊</text>
+  
+  <rect x="320" y="200" width="30" height="30" rx="6" fill="#f2421b" opacity="0.2"/>
+  <text x="335" y="220" font-size="14" text-anchor="middle">💼</text>
+  
+  <rect x="300" y="250" width="30" height="30" rx="6" fill="#244066" opacity="0.1"/>
+  <text x="315" y="270" font-size="14" text-anchor="middle">✉️</text>
+</svg>
+
+

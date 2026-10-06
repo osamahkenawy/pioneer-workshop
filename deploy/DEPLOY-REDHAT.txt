@@ -1,0 +1,513 @@
+================================================================================
+  CAR WORKSHOP PLATFORM — DEPLOYMENT GUIDE (Red Hat Enterprise Linux)
+  Server  : EDCDCMWSSTG01  (10.10.241.84)
+  User    : osamah.kenawy
+  Access  : CyberArk PAM → Guacamole web terminal
+  Date    : 2026-07-24
+================================================================================
+
+OVERVIEW
+--------
+  Frontend  → React/Vite SPA  → served by Nginx as static files
+  Backend   → Node.js/Express → managed by PM2 on port 4000
+  Database  → MySQL 8
+  Reverse   → Nginx proxies /api/, /socket.io/, /uploads/ to backend
+  Proxy
+
+GitHub Repos
+  Backend  : https://github.com/osamahkenawy/car-workshop-backend.git
+  Frontend : https://github.com/osamahkenawy/car-workshop-frontend.git
+
+
+================================================================================
+PART 1 — ONE-TIME SERVER SETUP  (run only the first time)
+================================================================================
+
+-- 1.0  Get root / elevated access ------------------------------------------
+
+  OPTION A — Drop into a root shell (easiest, recommended):
+    sudo -i
+    # You are now root. Prompt changes from $ to #
+    # Type  exit  to go back to your normal user
+
+  OPTION B — Run a single command as root:
+    sudo <command>
+    e.g.  sudo dnf install -y nginx
+
+  OPTION C — Switch to root using su (needs root password, often disabled):
+    su -
+    # Enter root password when prompted
+
+  CHECK — See what sudo rights you have:
+    sudo -l
+    # Look for (ALL) ALL or (ALL : ALL) ALL — means full root access
+
+  IF SUDO IS DENIED:
+    Your account may not be in the wheel group (RHEL equivalent of sudoers).
+    Ask your sysadmin to run:
+      usermod -aG wheel osamah.kenawy
+    Then log out and back in via CyberArk for the change to take effect.
+
+  NOTE: All commands in this guide that start with "sudo" should be run
+        while logged in as osamah.kenawy. Do NOT run everything as root
+        permanently — use sudo per-command or sudo -i for a root session
+        and exit when done.
+
+
+-- 1.1  Check OS and current user ------------------------------------------
+
+  cat /etc/redhat-release
+  whoami
+  sudo whoami          # should print: root
+
+  If sudo asks for a password, enter your CyberArk-managed password.
+  If you do not have sudo, ask the sysadmin to add you to /etc/sudoers.
+
+
+-- 1.2  Update system packages -----------------------------------------------
+
+  sudo dnf update -y
+
+
+-- 1.3  Install Git -----------------------------------------------------------
+
+  sudo dnf install -y git
+  git --version
+
+
+-- 1.4  Install Node.js 20 (via NodeSource) ----------------------------------
+
+  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+  sudo dnf install -y nodejs
+  node -v      # should print v20.x.x
+  npm -v
+
+
+-- 1.5  Install PM2 globally -------------------------------------------------
+
+  sudo npm install -g pm2
+  pm2 -v
+
+
+-- 1.6  Install Nginx --------------------------------------------------------
+
+  sudo dnf install -y nginx
+  sudo systemctl enable nginx
+  sudo systemctl start nginx
+  sudo systemctl status nginx
+
+
+-- 1.7  Install MySQL 8 ------------------------------------------------------
+
+  Step A — Add the MySQL 8 repo:
+    sudo dnf install -y https://dev.mysql.com/get/mysql80-community-release-el9-1.noarch.rpm
+    sudo dnf install -y mysql-community-server
+
+  Step B — Start and enable MySQL:
+    sudo systemctl enable mysqld
+    sudo systemctl start mysqld
+
+  Step C — Get the temporary root password printed in the log:
+    sudo grep 'temporary password' /var/log/mysqld.log
+
+  Step D — Secure MySQL and set a new root password:
+    sudo mysql_secure_installation
+    (Follow prompts: change root password, remove anonymous users,
+     disallow remote root login, remove test DB, reload privilege tables)
+
+  Step E — Verify login:
+    mysql -u root -p
+    EXIT;
+
+  NOTE: Replace DB_PASSWORD in .env with the password you set here.
+
+
+-- 1.8  Create app directories -----------------------------------------------
+
+  sudo mkdir -p /var/www/car-workshop/backend
+  sudo mkdir -p /var/www/car-workshop/frontend
+  sudo chown -R osamah.kenawy:osamah.kenawy /var/www/car-workshop
+
+
+-- 1.9  Configure firewall ---------------------------------------------------
+
+  sudo firewall-cmd --permanent --add-service=http
+  sudo firewall-cmd --permanent --add-service=https
+  sudo firewall-cmd --permanent --add-port=4000/tcp   # optional direct access
+  sudo firewall-cmd --reload
+  sudo firewall-cmd --list-all
+
+
+-- 1.10  Configure SELinux for Nginx reverse proxy ---------------------------
+
+  SELinux on RHEL blocks Nginx from connecting to backend by default.
+  Run this to allow it:
+
+  sudo setsebool -P httpd_can_network_connect 1
+
+  Also allow Nginx to serve the /var/www directory:
+    sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend
+
+  If you hit SELinux denials later, check:
+    sudo ausearch -c nginx | tail -30
+    sudo tail -50 /var/log/audit/audit.log | grep denied
+
+
+-- 1.11  Configure Nginx ------------------------------------------------------
+
+  Create the config file:
+
+    sudo tee /etc/nginx/conf.d/car-workshop.conf > /dev/null << 'EOF'
+    server {
+        listen 80;
+        server_name 10.10.241.84;
+
+        # Frontend SPA
+        root /var/www/car-workshop/frontend;
+        index index.html;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # Backend API
+        location /api/ {
+            proxy_pass         http://127.0.0.1:4000/api/;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade           $http_upgrade;
+            proxy_set_header   Connection        'upgrade';
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_read_timeout 120s;
+        }
+
+        # Socket.IO
+        location /socket.io/ {
+            proxy_pass         http://127.0.0.1:4000/socket.io/;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade    $http_upgrade;
+            proxy_set_header   Connection "upgrade";
+            proxy_set_header   Host       $host;
+        }
+
+        # Uploaded files
+        location /uploads/ {
+            proxy_pass       http://127.0.0.1:4000/uploads/;
+            proxy_set_header Host $host;
+        }
+
+        client_max_body_size 50M;
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+    }
+    EOF
+
+  Test and reload:
+    sudo nginx -t
+    sudo systemctl reload nginx
+
+
+================================================================================
+PART 2 — DEPLOY BACKEND
+================================================================================
+
+-- 2.1  Clone the repository -------------------------------------------------
+
+  cd /var/www/car-workshop
+  git clone https://github.com/osamahkenawy/car-workshop-backend.git backend
+  cd backend
+
+
+-- 2.2  Install dependencies -------------------------------------------------
+
+  npm install --omit=dev
+
+
+-- 2.3  Create the .env file -------------------------------------------------
+
+  nano /var/www/car-workshop/backend/.env
+
+  Paste and fill in the values below:
+
+  ----------------------------------------------------------------
+  NODE_ENV=production
+  PORT=4000
+  BACKEND_URL=http://10.10.241.84
+  BASE_URL=http://10.10.241.84
+  FRONTEND_URL=http://10.10.241.84
+
+  # Database
+  DB_HOST=localhost
+  DB_PORT=3306
+  DB_USER=root
+  DB_PASSWORD=YOUR_MYSQL_ROOT_PASSWORD_HERE
+  DB_NAME=car_workshop
+
+  # JWT
+  JWT_SECRET=CHANGE-THIS-TO-A-LONG-RANDOM-STRING-64-CHARS
+  JWT_EXPIRES_IN=7d
+  MECHANIC_ACCESS_TTL_SHORT=12h
+  MECHANIC_REFRESH_TTL_DAYS=30
+  API_KEY_PREFIX=cw_
+
+  # SMTP (leave blank if not configured yet)
+  SMTP_HOST=
+  SMTP_PORT=587
+  SMTP_SECURE=false
+  SMTP_USER=
+  SMTP_PASSWORD=
+  SMTP_FROM=no-reply@workshop.pioneeruae.com
+  SMTP_FROM_NAME=Car Workshop Platform
+
+  # SMS (leave blank to skip)
+  SMS_PROVIDER=
+  TWILIO_ACCOUNT_SID=
+  TWILIO_AUTH_TOKEN=
+  TWILIO_FROM_NUMBER=
+
+  # Web Push VAPID keys (generate with: npx web-push generate-vapid-keys)
+  VAPID_PUBLIC_KEY=
+  VAPID_PRIVATE_KEY=
+  VAPID_SUBJECT=mailto:admin@workshop.pioneeruae.com
+
+  # Firebase (leave blank to skip)
+  FIREBASE_SERVICE_ACCOUNT_JSON=
+  FIREBASE_PROJECT_ID=
+
+  # AWS S3 (leave blank to use local ./uploads folder)
+  AWS_S3_BUCKET=
+  AWS_REGION=me-central-1
+  AWS_ACCESS_KEY_ID=
+  AWS_SECRET_ACCESS_KEY=
+
+  # Stripe
+  STRIPE_SECRET_KEY=
+  STRIPE_WEBHOOK_SECRET=
+
+  # Routing
+  OSRM_URL=https://router.project-osrm.org
+
+  # Cron
+  CRON_TZ=Asia/Dubai
+  VAT_ENABLED=true
+  VAT_RATE=5.0
+  PAST_DUE_SUSPEND_AFTER_DAYS=7
+  LOG_OTP_SECRET=false
+  ----------------------------------------------------------------
+
+  Save with: Ctrl+O  Enter  Ctrl+X
+
+
+-- 2.4  Create MySQL database and run migrations -----------------------------
+
+  mysql -u root -p << 'SQL'
+  CREATE DATABASE IF NOT EXISTS car_workshop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  SQL
+
+  mysql -u root -p car_workshop < /var/www/car-workshop/backend/src/migrations/car_workshop.sql
+
+  # Run any post-migration patches (if they exist):
+  for f in /var/www/car-workshop/backend/src/migrations/post/*.sql; do
+    echo "Running $f..."
+    mysql -u root -p car_workshop < "$f"
+  done
+
+
+-- 2.5  Start backend with PM2 ----------------------------------------------
+
+  cd /var/www/car-workshop/backend
+
+  pm2 start src/server.js \
+    --name car-workshop-backend \
+    --max-memory-restart 512M
+
+  pm2 status
+  pm2 logs car-workshop-backend --lines 50     # check for errors
+
+  Save PM2 process list and enable on boot:
+    pm2 save
+    pm2 startup systemd -u osamah.kenawy --hp /home/osamah.kenawy
+    # Copy-paste the generated 'sudo env PATH=...' command and run it
+
+
+-- 2.6  Test backend is running ---------------------------------------------
+
+  curl http://127.0.0.1:4000/health
+  # Expected: {"success":true,"service":"car-workshop-backend","status":"ok",...}
+
+
+================================================================================
+PART 3 — DEPLOY FRONTEND
+================================================================================
+
+-- 3.1  Clone and build the frontend ----------------------------------------
+
+  cd /tmp
+  git clone https://github.com/osamahkenawy/car-workshop-frontend.git frontend-src
+  cd frontend-src
+
+
+-- 3.2  Set the API URL for production --------------------------------------
+
+  Create a .env.production file:
+
+    echo "VITE_API_URL=http://10.10.241.84/api" > .env.production
+
+  NOTE: If the frontend uses a different env variable name, check
+        src/lib/ or src/utils/ for the axios base URL and update accordingly.
+
+
+-- 3.3  Install dependencies and build --------------------------------------
+
+  npm install
+  npm run build
+  # Build output will be in the /tmp/frontend-src/dist/ folder
+
+
+-- 3.4  Deploy build to Nginx web root -------------------------------------
+
+  sudo rm -rf /var/www/car-workshop/frontend/*
+  sudo cp -r /tmp/frontend-src/dist/. /var/www/car-workshop/frontend/
+  sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend   # SELinux
+  ls /var/www/car-workshop/frontend/   # should list index.html, assets/, etc.
+
+
+-- 3.5  Reload Nginx --------------------------------------------------------
+
+  sudo nginx -t && sudo systemctl reload nginx
+
+
+================================================================================
+PART 4 — VERIFY DEPLOYMENT
+================================================================================
+
+  1. Open a browser and navigate to:
+       http://10.10.241.84
+
+  2. Check backend API directly:
+       curl http://10.10.241.84/api/health
+       curl http://10.10.241.84/api/docs     # Swagger UI
+
+  3. Check PM2 process status:
+       pm2 status
+       pm2 logs car-workshop-backend --lines 100
+
+  4. Check Nginx status:
+       sudo systemctl status nginx
+       sudo tail -50 /var/log/nginx/error.log
+
+  5. Check MySQL:
+       mysql -u root -p -e "SHOW TABLES;" car_workshop
+
+
+================================================================================
+PART 5 — FUTURE UPDATES (re-deploy after code changes)
+================================================================================
+
+-- Update Backend -----------------------------------------------------------
+
+  cd /var/www/car-workshop/backend
+  git pull origin main
+  npm install --omit=dev
+  pm2 restart car-workshop-backend
+  pm2 logs car-workshop-backend --lines 30
+
+
+-- Update Frontend ----------------------------------------------------------
+
+  cd /tmp/frontend-src
+  git pull origin main
+  npm install
+  npm run build
+  sudo rm -rf /var/www/car-workshop/frontend/*
+  sudo cp -r dist/. /var/www/car-workshop/frontend/
+  sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend
+  sudo systemctl reload nginx
+
+
+-- If /tmp/frontend-src was deleted, re-clone first:
+
+  rm -rf /tmp/frontend-src
+  git clone https://github.com/osamahkenawy/car-workshop-frontend.git /tmp/frontend-src
+
+
+================================================================================
+PART 6 — TROUBLESHOOTING
+================================================================================
+
+PROBLEM: curl http://127.0.0.1:4000/health returns "Connection refused"
+  → Backend is not running.
+    pm2 logs car-workshop-backend --lines 100
+    Check for missing .env values or DB connection errors.
+
+PROBLEM: Nginx returns 502 Bad Gateway
+  → Backend is down or not listening on port 4000.
+    pm2 status
+    pm2 restart car-workshop-backend
+
+PROBLEM: Nginx returns 403 Forbidden on frontend
+  → SELinux is blocking file access.
+    sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend
+    sudo setsebool -P httpd_can_network_connect 1
+
+PROBLEM: MySQL "Access denied for user 'root'"
+  → Wrong password in .env.
+    Verify: mysql -u root -p  (enter password manually)
+    Then update DB_PASSWORD in .env and restart:  pm2 restart car-workshop-backend
+
+PROBLEM: "Cannot find package 'swagger-ui-express'"
+  → Run npm install in the backend directory.
+    cd /var/www/car-workshop/backend && npm install --omit=dev
+
+PROBLEM: PM2 process is not running after server reboot
+  → PM2 startup was not saved correctly.
+    pm2 startup systemd -u osamah.kenawy --hp /home/osamah.kenawy
+    Run the printed command, then: pm2 save
+
+PROBLEM: Port 80 not accessible from outside
+  → Firewall is blocking it.
+    sudo firewall-cmd --list-all
+    sudo firewall-cmd --permanent --add-service=http && sudo firewall-cmd --reload
+    Also check if the organisation's network firewall allows port 80 to 10.10.241.84.
+
+PROBLEM: Frontend loads but API calls fail (CORS or 404)
+  → Check VITE_API_URL is set correctly in .env.production before building.
+  → Check Nginx proxy_pass for /api/ is correct.
+    sudo nginx -t
+    sudo tail -30 /var/log/nginx/error.log
+
+
+================================================================================
+PART 7 — USEFUL COMMANDS REFERENCE
+================================================================================
+
+  pm2 status                              # list all processes
+  pm2 logs car-workshop-backend           # live logs
+  pm2 restart car-workshop-backend        # restart backend
+  pm2 stop car-workshop-backend           # stop backend
+  pm2 delete car-workshop-backend         # remove from PM2
+  pm2 monit                               # CPU/memory monitor
+
+  sudo systemctl status nginx             # nginx status
+  sudo systemctl reload nginx             # reload config (no downtime)
+  sudo systemctl restart nginx            # full restart
+  sudo nginx -t                           # test config syntax
+
+  sudo systemctl status mysqld            # mysql status
+  mysql -u root -p                        # mysql console
+
+  sudo tail -f /var/log/nginx/access.log  # nginx access log
+  sudo tail -f /var/log/nginx/error.log   # nginx error log
+  sudo journalctl -u nginx -f             # systemd nginx journal
+  sudo journalctl -xe                     # general system errors
+
+  df -h                                   # disk usage
+  free -h                                 # memory usage
+  top                                     # process monitor
+
+
+================================================================================
+END OF GUIDE
+================================================================================

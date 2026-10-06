@@ -1,0 +1,816 @@
+/* ══════════════════════════════════════════════════════════════
+   Reports Dashboard — Professional Analytics UI
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Page Container ──────────────────────────────────────────── */
+.rpt-page {
+  padding: 1.5rem 2rem 2.5rem;
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+/* ── Header — Gradient Banner ────────────────────────────────── */
+.rpt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 28px;
+  margin-bottom: 24px;
+  background: linear-gradient(135deg, #14284d 0%, #1e3a6b 40%, #3a6fb5 100%);
+  border-radius: 18px;
+  color: #fff;
+  box-shadow: 0 8px 32px rgba(36, 64, 102, 0.22);
+  flex-wrap: wrap;
+  position: relative;
+  overflow: hidden;
+}
+
+.rpt-header::before {
+  content: '';
+  position: absolute;
+  top: -40%;
+  right: -5%;
+  width: 260px;
+  height: 260px;
+  background: radial-gradient(circle, rgba(255,255,255,0.06) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.rpt-header::after {
+  content: '';
+  position: absolute;
+  bottom: -30%;
+  left: 10%;
+  width: 180px;
+  height: 180px;
+  background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.rpt-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  z-index: 1;
+}
+
+.rpt-header-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.rpt-header-text h1 {
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: #fff;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.rpt-header-text p {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.65);
+  margin: 3px 0 0;
+}
+
+.rpt-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  position: relative;
+  z-index: 1;
+}
+
+.rpt-header-actions .filter-date {
+  border-radius: 10px;
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  padding: 8px 12px;
+  font-size: 0.84rem;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  transition: all 0.2s;
+  backdrop-filter: blur(6px);
+}
+
+.rpt-header-actions .filter-date::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.rpt-header-actions .filter-date:focus {
+  border-color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+.rpt-date-sep {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* ── Period Selector (inside header) ─────────────────────────── */
+.rpt-period-select {
+  appearance: none;
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 8px 32px 8px 14px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.6)' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E") no-repeat right 10px center;
+  cursor: pointer;
+  transition: all 0.2s;
+  backdrop-filter: blur(6px);
+}
+
+.rpt-period-select option {
+  background: #1e3a6b;
+  color: #fff;
+}
+
+.rpt-period-select:focus {
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+/* ── Header Buttons ──────────────────────────────────────────── */
+.rpt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  backdrop-filter: blur(6px);
+}
+
+.rpt-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.rpt-btn-accent {
+  background: rgba(242, 66, 27, 0.9);
+  border-color: transparent;
+}
+
+.rpt-btn-accent:hover {
+  background: #159fd9;
+  box-shadow: 0 4px 16px rgba(242, 66, 27, 0.35);
+}
+
+/* ── Tabs — Modern Pill Navigation ───────────────────────────── */
+.rpt-tabs-wrap {
+  position: relative;
+  margin-bottom: 24px;
+}
+
+.rpt-tabs-wrap::before,
+.rpt-tabs-wrap::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 32px;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 14px;
+}
+
+.rpt-tabs-wrap::before {
+  left: 0;
+  background: linear-gradient(to right, #fff 30%, transparent);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.rpt-tabs-wrap::after {
+  right: 0;
+  background: linear-gradient(to left, #fff 30%, transparent);
+}
+
+.rpt-tabs-wrap.scrolled-start::before {
+  opacity: 1;
+}
+
+.rpt-tabs-wrap.scrolled-end::after {
+  opacity: 0;
+}
+
+.rpt-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 5px;
+  background: #fff;
+  border-radius: 14px;
+  border: 1.5px solid var(--gray-100);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  -webkit-overflow-scrolling: touch;
+}
+
+.rpt-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.rpt-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--gray-400);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  position: relative;
+}
+
+.rpt-tab:hover {
+  color: var(--gray-700);
+  background: var(--gray-50);
+}
+
+.rpt-tab.active {
+  background: linear-gradient(135deg, #1e3a6b 0%, #3a6fb5 100%);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 3px 10px rgba(36, 64, 102, 0.2);
+}
+
+.rpt-tab .rpt-tab-icon {
+  opacity: 0.55;
+  transition: opacity 0.2s;
+  flex-shrink: 0;
+}
+
+.rpt-tab.active .rpt-tab-icon {
+  opacity: 1;
+}
+
+/* ── KPI Cards ───────────────────────────────────────────────── */
+.rpt-kpi-grid {
+  display: grid;
+  /* 240px, not 220: after 40px padding, the 46px icon and its 14px gap, a
+     220px card left only ~120px for the figure, so a six-figure currency
+     value was clipped by the card's overflow:hidden. */
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.rpt-kpi-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border: 1px solid rgba(226, 232, 240, 0.7);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.rpt-kpi-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--gray-200), var(--gray-100));
+  border-radius: 16px 16px 0 0;
+  transition: background 0.3s;
+}
+
+.rpt-kpi-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
+  border-color: rgba(36, 64, 102, 0.12);
+}
+
+.rpt-kpi-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: transform 0.3s;
+}
+
+.rpt-kpi-card:hover .rpt-kpi-icon {
+  transform: scale(1.1);
+}
+
+.rpt-kpi-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.rpt-kpi-value {
+  font-size: 1.28rem;
+  font-weight: 700;
+  color: var(--gray-800);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  /* The card clips its overflow to keep the rounded top bar, so an unusually
+     large figure must wrap rather than be silently cut mid-number. */
+  overflow-wrap: anywhere;
+}
+
+.rpt-kpi-label {
+  font-size: 0.76rem;
+  color: var(--gray-400);
+  font-weight: 500;
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rpt-kpi-sub {
+  font-size: 0.75rem;
+  color: var(--gray-400);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--gray-200);
+}
+
+/* ── Chart Cards ─────────────────────────────────────────────── */
+.rpt-chart-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.7);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: box-shadow 0.3s;
+}
+
+.rpt-chart-card:hover {
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.06);
+}
+
+.rpt-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.rpt-chart-header h4 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--gray-800);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rpt-chart-header h4::before {
+  content: '';
+  width: 4px;
+  height: 18px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #1e3a6b, #3a6fb5);
+  flex-shrink: 0;
+}
+
+/* ── Chart Row (Side-by-Side) ────────────────────────────────── */
+.rpt-chart-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ── Table Cards ─────────────────────────────────────────────── */
+.rpt-table-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.7);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  overflow-x: auto;
+}
+
+.rpt-table-card .od-items-table,
+.rpt-table-card table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.rpt-table-card thead th {
+  background: var(--gray-50);
+  padding: 12px 16px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1.5px solid var(--gray-100);
+  text-align: start;
+  white-space: nowrap;
+}
+
+.rpt-table-card thead th:first-child {
+  border-radius: 10px 0 0 0;
+}
+
+.rpt-table-card thead th:last-child {
+  border-radius: 0 10px 0 0;
+}
+
+.rpt-table-card tbody td {
+  padding: 12px 16px;
+  font-size: 0.88rem;
+  color: var(--gray-700);
+  border-bottom: 1px solid var(--gray-100);
+  transition: background 0.15s;
+}
+
+.rpt-table-card tbody tr {
+  transition: background 0.15s;
+}
+
+.rpt-table-card tbody tr:hover {
+  background: rgba(36, 64, 102, 0.02);
+}
+
+.rpt-table-card tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Table card scrollbar */
+.rpt-table-card::-webkit-scrollbar {
+  height: 6px;
+}
+
+.rpt-table-card::-webkit-scrollbar-track {
+  background: var(--gray-50);
+  border-radius: 3px;
+}
+
+.rpt-table-card::-webkit-scrollbar-thumb {
+  background: var(--gray-300);
+  border-radius: 3px;
+}
+
+.rpt-table-card::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-400);
+}
+
+/* ── Loading State ───────────────────────────────────────────── */
+.rpt-loading {
+  display: grid;
+  gap: 16px;
+}
+
+.rpt-loading .skeleton-pulse {
+  border-radius: 16px;
+}
+
+/* ── Empty State — Modern Illustrated ────────────────────────── */
+.rpt-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 24px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.8) 0%, #fff 100%);
+  border-radius: 20px;
+  border: 2px dashed var(--gray-200);
+}
+
+.rpt-empty-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(36, 64, 102, 0.08) 0%, rgba(58, 111, 181, 0.04) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-300);
+  margin-bottom: 20px;
+}
+
+.rpt-empty h3 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--gray-700);
+}
+
+.rpt-empty p {
+  color: var(--gray-400);
+  font-size: 0.88rem;
+  margin: 0;
+  max-width: 360px;
+}
+
+/* ── ServiceBay Heatmap Grid ───────────────────────────────────────── */
+.rpt-bay-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.rpt-bay-card {
+  border-radius: 14px;
+  padding: 18px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  transition: all 0.25s;
+  cursor: default;
+}
+
+.rpt-bay-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.rpt-bay-card strong {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+}
+
+.rpt-bay-card span {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+/* ── Section Spacing ─────────────────────────────────────────── */
+.rpt-section > * + .rpt-chart-card,
+.rpt-section > * + .rpt-table-card,
+.rpt-section > * + .rpt-chart-row {
+  margin-top: 20px;
+}
+
+/* ── Schedule Form Card ──────────────────────────────────────── */
+.rpt-schedule-form {
+  background: #fff;
+  border-radius: 16px;
+  border: 1.5px solid var(--gray-200);
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.rpt-schedule-form h4 {
+  margin: 0 0 18px;
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--gray-800);
+}
+
+.rpt-schedule-form label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--gray-500);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rpt-schedule-form input,
+.rpt-schedule-form select {
+  width: 100%;
+  border: 1.5px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.88rem;
+  color: var(--gray-700);
+  transition: all 0.2s;
+}
+
+.rpt-schedule-form input:focus,
+.rpt-schedule-form select:focus {
+  border-color: #1e3a6b;
+  box-shadow: 0 0 0 3px rgba(36, 64, 102, 0.1);
+  outline: none;
+}
+
+/* ── Status Badge ────────────────────────────────────────────── */
+.rpt-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.rpt-badge-active {
+  background: rgba(22, 163, 74, 0.1);
+  color: #16a34a;
+}
+
+.rpt-badge-paused {
+  background: rgba(220, 38, 38, 0.08);
+  color: #dc2626;
+}
+
+/* ── Export Buttons (inside chart/table cards) ────────────────── */
+.rpt-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1.5px solid var(--gray-200);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--gray-500);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.rpt-export-btn:hover {
+  border-color: #1e3a6b;
+  color: #1e3a6b;
+  background: rgba(36, 64, 102, 0.04);
+}
+
+/* ── Action Buttons (inside schedule table) ──────────────────── */
+.rpt-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border: 1.5px solid var(--gray-200);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--gray-600);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.rpt-action-btn:hover {
+  border-color: #1e3a6b;
+  color: #1e3a6b;
+  background: rgba(36, 64, 102, 0.04);
+  transform: translateY(-1px);
+}
+
+.rpt-action-btn.danger {
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.rpt-action-btn.danger:hover {
+  background: #fef2f2;
+  border-color: #dc2626;
+}
+
+.rpt-action-btn.success {
+  background: #16a34a;
+  color: #fff;
+  border-color: transparent;
+}
+
+.rpt-action-btn.success:hover {
+  background: #15803d;
+  box-shadow: 0 3px 10px rgba(22, 163, 74, 0.25);
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .rpt-chart-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .rpt-page {
+    padding: 1rem;
+  }
+
+  .rpt-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: 20px;
+  }
+
+  .rpt-header-actions {
+    flex-wrap: wrap;
+  }
+
+  .rpt-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .rpt-tabs {
+    padding: 4px;
+    gap: 2px;
+    flex-wrap: wrap;
+  }
+
+  .rpt-tab {
+    padding: 8px 12px;
+    font-size: 0.78rem;
+  }
+
+  .rpt-tabs-wrap::before,
+  .rpt-tabs-wrap::after {
+    display: none;
+  }
+
+  .rpt-bay-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .rpt-chart-card,
+  .rpt-table-card {
+    padding: 16px;
+    border-radius: 14px;
+  }
+}
+
+@media (max-width: 480px) {
+  .rpt-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rpt-bay-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── RTL Support ─────────────────────────────────────────────── */
+[dir="rtl"] .rpt-chart-header h4::before {
+  order: 1;
+}
+
+[dir="rtl"] .rpt-header-icon {
+  order: 0;
+}
+
+[dir="rtl"] .rpt-kpi-card {
+  direction: rtl;
+}
+
+[dir="rtl"] .rpt-table-card thead th {
+  text-align: start;
+}
+
+[dir="rtl"] .rpt-tabs {
+  direction: rtl;
+}
+
+[dir="rtl"] .rpt-header {
+  direction: rtl;
+}
+
+/* ── Animations ──────────────────────────────────────────────── */
+@keyframes rptFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.rpt-section {
+  animation: rptFadeIn 0.35s ease-out;
+}

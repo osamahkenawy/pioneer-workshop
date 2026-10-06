@@ -1,0 +1,142 @@
+/* PhoneInput.css */
+
+.phone-input-wrap {
+  display: flex;
+  align-items: stretch;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.phone-input-wrap:focus-within {
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+}
+
+.phone-code-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border: none;
+  border-right: 1.5px solid #e2e8f0;
+  background: #f8fafc;
+  padding: 0 10px;
+  cursor: pointer;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.15s ease;
+}
+
+.phone-code-btn:hover {
+  background: #f1f5f9;
+}
+
+.phone-flag {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.phone-code-text {
+  white-space: nowrap;
+}
+
+.phone-number-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  padding: 11px 13px;
+  font-size: 14px;
+  color: #1e293b;
+  background: transparent;
+  font-family: inherit;
+}
+
+.phone-number-input::placeholder {
+  color: #cbd5e1;
+}
+
+/* Dropdown panel — rendered via portal into document.body, positioned inline */
+.phone-dropdown {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.16);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.phone-search {
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  outline: none;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  color: #1e293b;
+  font-family: inherit;
+}
+
+.phone-search::placeholder {
+  color: #cbd5e1;
+}
+
+.phone-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.phone-list::-webkit-scrollbar {
+  width: 6px;
+}
+.phone-list::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 10px;
+}
+
+.phone-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  color: #334155;
+}
+
+.phone-option:hover {
+  background: #f8fafc;
+}
+
+.phone-option.active {
+  background: #fff7ed;
+  color: #ea580c;
+  font-weight: 600;
+}
+
+.phone-option-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phone-option-code {
+  flex-shrink: 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.phone-option.active .phone-option-code {
+  color: #ea580c;
+}

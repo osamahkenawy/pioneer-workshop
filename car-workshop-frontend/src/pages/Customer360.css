@@ -1,0 +1,274 @@
+/**
+ * Customer360.css — scoped styles for the Customer 360 screen.
+ *
+ * Deliberately its own stylesheet rather than more classes in CRMPages.css.
+ * That file is shared by seven pages, and this screen wants a different card
+ * treatment (softer radius, label-above-value metrics, a timeline rail) that
+ * would either fight the shared rules or leak into pages that did not ask for
+ * it.
+ *
+ * Every class is prefixed .c360- for the same reason.
+ */
+
+.c360 {
+  --c360-ink:        #000000;
+  --c360-ink-soft:   #4a4a4a;
+  --c360-ink-faint:  #6f6f6f;
+  --c360-rule:       #e6eaf1;
+  --c360-rule-soft:  #f1f4f8;
+  --c360-surface:    #ffffff;
+  --c360-blue:       #2563eb;
+  --c360-blue-wash:  #eaf1fe;
+  --c360-green:      #17734f;
+  --c360-green-wash: #e7f3ec;
+  --c360-amber:      #b26a00;
+  --c360-amber-wash: #fdf1e0;
+  --c360-violet:     #6d4aa8;
+  --c360-violet-wash:#f1ecfa;
+  --c360-teal:       #0d6273;
+  --c360-teal-wash:  #e2eff1;
+  --c360-radius:     14px;
+  --c360-shadow:     0 1px 2px rgba(22, 35, 59, .04), 0 8px 24px -18px rgba(22, 35, 59, .18);
+
+  color: var(--c360-ink);
+}
+
+/* ── Back link + page title ─────────────────────────────────── */
+.c360-back {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: 0; padding: 4px 0; cursor: pointer;
+  color: var(--c360-ink-soft); font-size: 14px;
+}
+.c360-back:hover { color: var(--c360-blue); }
+.c360-back:focus-visible { outline: 2px solid var(--c360-blue); outline-offset: 3px; border-radius: 4px; }
+
+.c360-title {
+  font-size: 30px; font-weight: 700; letter-spacing: -.02em;
+  margin: 6px 0 20px; color: var(--c360-ink);
+}
+
+/* ── Identity card ─────────────────────────────────────────── */
+.c360-card {
+  background: var(--c360-surface);
+  border: 1px solid var(--c360-rule);
+  border-radius: var(--c360-radius);
+  box-shadow: var(--c360-shadow);
+}
+
+.c360-identity {
+  display: flex; align-items: center; gap: 16px;
+  padding: 20px 22px; margin-bottom: 18px;
+}
+.c360-avatar {
+  width: 56px; height: 56px; border-radius: 50%; flex: none;
+  background: var(--c360-blue); color: #fff;
+  display: grid; place-items: center;
+  font-size: 18px; font-weight: 600; letter-spacing: .02em;
+}
+.c360-identity-main { min-width: 0; flex: 1; }
+.c360-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.c360-name { font-size: 21px; font-weight: 700; letter-spacing: -.01em; margin: 0; }
+.c360-pill {
+  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+  background: var(--c360-green-wash); color: var(--c360-green); white-space: nowrap;
+}
+.c360-contact {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 14px; color: var(--c360-ink-soft);
+}
+.c360-contact span { display: inline-flex; align-items: center; gap: 6px; }
+.c360-contact svg { color: var(--c360-ink-faint); flex: none; }
+
+.c360-kebab {
+  width: 36px; height: 36px; border-radius: 9px; flex: none;
+  background: #fff; border: 1px solid var(--c360-rule); cursor: pointer;
+  display: grid; place-items: center; color: var(--c360-ink-soft);
+}
+.c360-kebab:hover { background: var(--c360-rule-soft); }
+.c360-kebab:focus-visible { outline: 2px solid var(--c360-blue); outline-offset: 2px; }
+
+/* ── Metric cards: label above value ───────────────────────── */
+.c360-metrics {
+  display: grid; gap: 16px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+.c360-metric {
+  background: var(--c360-surface); border: 1px solid var(--c360-rule);
+  border-radius: var(--c360-radius); box-shadow: var(--c360-shadow);
+  padding: 18px 20px; display: flex; align-items: flex-start; gap: 14px;
+}
+.c360-metric-icon {
+  width: 46px; height: 46px; border-radius: 12px; flex: none;
+  display: grid; place-items: center;
+}
+.c360-metric-body { min-width: 0; }
+.c360-metric-label {
+  font-size: 11px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--c360-ink-faint); margin: 0 0 4px;
+}
+.c360-metric-value {
+  font-size: 23px; font-weight: 700; letter-spacing: -.02em; margin: 0;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.15;
+}
+.c360-metric-sub { font-size: 12.5px; margin: 4px 0 0; font-weight: 500; }
+
+/* ── Preferences strip ─────────────────────────────────────── */
+.c360-prefs {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px; padding: 18px 22px; margin-bottom: 18px;
+}
+@media (max-width: 760px) { .c360-prefs { grid-template-columns: 1fr; } }
+.c360-prefs-block + .c360-prefs-block {
+  border-inline-start: 1px solid var(--c360-rule); padding-inline-start: 24px;
+}
+@media (max-width: 760px) {
+  .c360-prefs-block + .c360-prefs-block {
+    border-inline-start: 0; padding-inline-start: 0;
+    border-top: 1px solid var(--c360-rule); padding-top: 16px;
+  }
+}
+.c360-prefs-label {
+  font-size: 11px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--c360-ink-faint); margin: 0 0 10px;
+}
+.c360-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.c360-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 9px; font-size: 13.5px; font-weight: 500;
+  background: #fff; border: 1px solid var(--c360-rule); color: var(--c360-ink-soft);
+  cursor: pointer; transition: background .12s, border-color .12s;
+}
+.c360-chip:hover { border-color: #c9d2e0; background: var(--c360-rule-soft); }
+.c360-chip:focus-visible { outline: 2px solid var(--c360-blue); outline-offset: 2px; }
+.c360-chip.is-on {
+  background: var(--c360-green); border-color: var(--c360-green); color: #fff; font-weight: 600;
+}
+.c360-chip.is-on svg { color: #fff; }
+.c360-chip.is-quiet { background: var(--c360-blue-wash); border-color: #c9dcfb; color: var(--c360-blue); }
+.c360-consent-note { font-size: 12px; color: var(--c360-ink-faint); margin: 10px 0 0; max-width: 44ch; }
+.c360-state {
+  display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 8px;
+  font-size: 13px; font-weight: 600;
+}
+.c360-state.on  { background: var(--c360-green-wash); color: var(--c360-green); }
+.c360-state.off { background: var(--c360-rule-soft); color: var(--c360-ink-faint); }
+
+/* ── Two-column body ───────────────────────────────────────── */
+.c360-body {
+  display: grid; gap: 18px; align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+}
+@media (max-width: 1080px) { .c360-body { grid-template-columns: 1fr; } }
+
+.c360-panel-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 16px 20px; border-bottom: 1px solid var(--c360-rule-soft);
+}
+.c360-panel-title {
+  font-size: 11.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--c360-ink-faint); margin: 0;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.c360-panel-tools { margin-inline-start: auto; display: flex; gap: 8px; align-items: center; }
+.c360-select {
+  font-size: 13px; padding: 7px 10px; border-radius: 8px;
+  border: 1px solid var(--c360-rule); background: #fff; color: var(--c360-ink);
+}
+.c360-icon-btn {
+  width: 34px; height: 34px; border-radius: 8px; flex: none;
+  background: #fff; border: 1px solid var(--c360-rule); cursor: pointer;
+  display: grid; place-items: center; color: var(--c360-ink-soft);
+}
+.c360-icon-btn:hover { background: var(--c360-rule-soft); }
+.c360-icon-btn:focus-visible { outline: 2px solid var(--c360-blue); outline-offset: 2px; }
+
+/* ── Timeline ──────────────────────────────────────────────── */
+.c360-timeline { padding: 18px 20px 8px; position: relative; }
+.c360-event { position: relative; padding-inline-start: 48px; padding-bottom: 22px; }
+.c360-event:last-child { padding-bottom: 6px; }
+/* The rail is drawn per-event so it stops cleanly at the last one. */
+.c360-event::before {
+  content: ''; position: absolute; inset-inline-start: 17px; top: 34px; bottom: -4px;
+  width: 2px; background: var(--c360-rule);
+}
+.c360-event:last-child::before { display: none; }
+.c360-event-badge {
+  position: absolute; inset-inline-start: 0; top: 0;
+  width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center;
+}
+.c360-event-when { font-size: 12.5px; color: var(--c360-ink-faint); }
+.c360-event-title { font-size: 15px; font-weight: 600; margin: 1px 0 0; }
+.c360-event-detail { font-size: 13.5px; color: var(--c360-ink-soft); margin: 3px 0 0; }
+.c360-event-by { font-size: 12px; color: var(--c360-ink-faint); margin: 3px 0 0; }
+.c360-event-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+.c360-tag {
+  font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 6px;
+  background: var(--c360-rule-soft); color: var(--c360-ink-soft);
+}
+.c360-tag.money { background: var(--c360-green-wash); color: var(--c360-green); }
+.c360-tag.info  { background: var(--c360-blue-wash);  color: var(--c360-blue); }
+.c360-tag.score { background: var(--c360-teal-wash);  color: var(--c360-teal); }
+
+/* ── Side panels ───────────────────────────────────────────── */
+.c360-side { display: grid; gap: 18px; }
+.c360-rows { padding: 6px 0; }
+.c360-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 20px; width: 100%; text-align: start;
+  background: none; border: 0; border-bottom: 1px solid var(--c360-rule-soft);
+  cursor: pointer; color: inherit;
+}
+.c360-row:last-child { border-bottom: 0; }
+.c360-row:hover { background: var(--c360-rule-soft); }
+.c360-row:focus-visible { outline: 2px solid var(--c360-blue); outline-offset: -2px; }
+.c360-thumb {
+  width: 62px; height: 44px; border-radius: 9px; flex: none;
+  background: var(--c360-blue-wash); color: var(--c360-blue);
+  display: grid; place-items: center;
+}
+.c360-row-main { min-width: 0; flex: 1; }
+.c360-row-title {
+  font-size: 14px; font-weight: 600; margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.c360-row-meta { font-size: 12.5px; color: var(--c360-ink-faint); margin: 2px 0 0; }
+.c360-row-chevron { color: var(--c360-ink-faint); flex: none; }
+
+.c360-empty { padding: 18px 20px; font-size: 13.5px; color: var(--c360-ink-faint); }
+.c360-panel-foot { padding: 12px 20px; border-top: 1px solid var(--c360-rule-soft); }
+.c360-link {
+  font-size: 13.5px; font-weight: 500; color: var(--c360-blue);
+  text-decoration: none; display: inline-flex; align-items: center; gap: 5px;
+}
+.c360-link:hover { text-decoration: underline; }
+
+/* ── Banner ────────────────────────────────────────────────── */
+.c360-banner {
+  padding: 11px 16px; border-radius: 10px; font-size: 14px;
+  margin-bottom: 16px; border: 1px solid;
+}
+.c360-banner.ok    { background: var(--c360-green-wash); border-color: #bcdccb; color: var(--c360-green); }
+.c360-banner.error { background: #fdecea; border-color: #f2c4bd; color: #9c2c1a; }
+
+/* ── Dark theme, so the page is not a white slab in dark mode ─ */
+@media (prefers-color-scheme: dark) {
+  .c360:not([data-theme='light']) {
+    --c360-ink:        #e6eaf2;
+    --c360-ink-soft:   #a6b0c1;
+    --c360-ink-faint:  #7c869a;
+    --c360-rule:       #27303f;
+    --c360-rule-soft:  #1d2530;
+    --c360-surface:    #151b25;
+    --c360-blue:       #6aa4f5;
+    --c360-blue-wash:  #16243a;
+    --c360-green:      #5cbf94;
+    --c360-green-wash: #14281f;
+    --c360-amber:      #e0a061;
+    --c360-amber-wash: #2a2013;
+    --c360-violet:     #a98ee0;
+    --c360-violet-wash:#221c33;
+    --c360-teal:       #58b3c2;
+    --c360-teal-wash:  #122a30;
+  }
+}

@@ -1,0 +1,317 @@
+/* ═══════════════════════════════════════════════════════════
+   Wallet & COD — Professional Finance Dashboard
+   Prefix: wlt-
+   ═══════════════════════════════════════════════════════════ */
+
+.wlt-page { padding: 24px; }
+
+/* ── Stats Grid ────────────────────────────────────────── */
+.wlt-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.wlt-stat-card {
+  background: #fff;
+  border: 1px solid #f1f5f9;
+  border-radius: 14px;
+  padding: 18px 20px;
+  transition: transform 0.2s, box-shadow 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.wlt-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+}
+.wlt-stat-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+}
+.wlt-stat-card.orange::before  { background: #f97316; }
+.wlt-stat-card.blue::before    { background: #3b82f6; }
+.wlt-stat-card.green::before   { background: #16a34a; }
+.wlt-stat-card.red::before     { background: #ef4444; }
+.wlt-stat-card.slate::before   { background: #64748b; }
+.wlt-stat-card.purple::before  { background: #8b5cf6; }
+
+.wlt-stat-row { display: flex; align-items: center; gap: 14px; }
+.wlt-stat-icon {
+  width: 46px; height: 46px;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.wlt-stat-body { flex: 1; min-width: 0; }
+.wlt-stat-val {
+  font-size: 22px; font-weight: 800; color: #1e293b;
+  display: block; line-height: 1.2;
+}
+.wlt-stat-lbl {
+  font-size: 11px; color: #94a3b8; text-transform: uppercase;
+  letter-spacing: 0.05em; font-weight: 600; margin-top: 2px;
+}
+
+/* ── Tabs ──────────────────────────────────────────────── */
+.wlt-tabs {
+  display: flex; gap: 0; margin-bottom: 20px;
+  border-bottom: 2px solid #f1f5f9;
+}
+.wlt-tab {
+  padding: 10px 20px; font-size: 13px; font-weight: 600;
+  color: #94a3b8; cursor: pointer; border: none; background: none;
+  position: relative; transition: color 0.2s;
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+}
+.wlt-tab:hover { color: #1e293b; }
+.wlt-tab.active { color: #f97316; }
+.wlt-tab.active::after {
+  content: ''; position: absolute; bottom: -2px; left: 0; right: 0;
+  height: 2px; background: #f97316; border-radius: 2px 2px 0 0;
+}
+.wlt-tab-badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+  background: #f1f5f9; color: #64748b; font-weight: 700;
+}
+.wlt-tab.active .wlt-tab-badge { background: #fff7ed; color: #f97316; }
+
+/* ── Table Card ────────────────────────────────────────── */
+.wlt-table-card {
+  background: #fff;
+  border: 1px solid #f1f5f9;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.wlt-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.wlt-table { width: 100%; border-collapse: collapse; min-width: 600px; }
+.wlt-table thead th {
+  padding: 11px 16px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: #94a3b8; background: #fafbfc; border-bottom: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+.wlt-table tbody td {
+  padding: 12px 16px; font-size: 13px; color: #334155;
+  border-bottom: 1px solid #f8fafc;
+}
+.wlt-table tbody tr { transition: background 0.15s; }
+.wlt-table tbody tr:hover { background: #fafbfc; }
+.wlt-table tbody tr:last-child td { border-bottom: none; }
+
+/* ── Badges ────────────────────────────────────────────── */
+.wlt-badge {
+  display: inline-block; padding: 2px 9px; border-radius: 6px;
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+
+/* ── Amounts ───────────────────────────────────────────── */
+.wlt-amount-credit { font-weight: 700; color: #16a34a; white-space: nowrap; }
+.wlt-amount-debit  { font-weight: 700; color: #dc2626; white-space: nowrap; }
+.wlt-amount-orange { font-weight: 700; color: #f97316; white-space: nowrap; }
+.wlt-muted { color: #94a3b8; font-size: 12px; }
+.wlt-bold  { font-weight: 700; color: #1e293b; }
+
+/* ── Empty State ───────────────────────────────────────── */
+.wlt-empty {
+  text-align: center; padding: 60px 20px; color: #94a3b8;
+}
+.wlt-empty-icon {
+  width: 56px; height: 56px; border-radius: 16px;
+  background: #f8fafc; display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 14px; color: #cbd5e1;
+}
+.wlt-empty-title { font-size: 15px; font-weight: 700; color: #64748b; margin-bottom: 4px; }
+.wlt-empty-sub   { font-size: 12px; color: #94a3b8; }
+
+/* ── COD Collect Button ────────────────────────────────── */
+.wlt-btn-collect {
+  padding: 6px 14px; border-radius: 8px;
+  border: 1px solid #3b82f6; background: #eff6ff;
+  color: #2563eb; font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s; white-space: nowrap;
+}
+.wlt-btn-collect:hover {
+  background: #dbeafe; transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(37,99,235,0.15);
+}
+
+/* ── Pagination ────────────────────────────────────────── */
+.wlt-pagination {
+  padding: 14px; display: flex; justify-content: center;
+  gap: 6px; border-top: 1px solid #f1f5f9;
+}
+.wlt-page-btn {
+  width: 32px; height: 32px; border-radius: 8px;
+  border: 1px solid #e2e8f0; background: #fff;
+  color: #64748b; cursor: pointer; font-size: 12px;
+  font-weight: 600; transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.wlt-page-btn:hover { border-color: #f97316; color: #f97316; }
+.wlt-page-btn.active {
+  background: #f97316; color: #fff; border-color: #f97316;
+}
+
+/* ── Modal ─────────────────────────────────────────────── */
+.wlt-modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  animation: wltFadeIn 0.2s ease;
+}
+.wlt-modal {
+  background: #fff; border-radius: 18px;
+  padding: 0; width: 100%; max-width: 440px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+  animation: wltSlideUp 0.25s ease;
+  overflow: hidden;
+}
+.wlt-modal-header {
+  padding: 22px 28px 0;
+}
+.wlt-modal-title {
+  font-size: 18px; font-weight: 800; color: #1e293b; margin: 0 0 4px;
+}
+.wlt-modal-sub {
+  font-size: 13px; color: #64748b; margin: 0 0 20px;
+}
+.wlt-modal-body {
+  padding: 0 28px 24px;
+}
+.wlt-field { margin-bottom: 16px; }
+.wlt-field-label {
+  display: block; font-size: 12px; font-weight: 700;
+  color: #475569; margin-bottom: 6px;
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+.wlt-field-input {
+  width: 100%; padding: 10px 14px; border-radius: 10px;
+  border: 1.5px solid #e2e8f0; background: #fafbfc;
+  color: #1e293b; font-size: 14px; font-weight: 500;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-sizing: border-box;
+}
+.wlt-field-input:focus {
+  outline: none; border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249,115,22,0.1);
+}
+.wlt-modal-footer {
+  padding: 16px 28px; background: #fafbfc;
+  border-top: 1px solid #f1f5f9;
+  display: flex; gap: 10px; justify-content: flex-end;
+}
+.wlt-btn-cancel {
+  padding: 10px 20px; border-radius: 10px;
+  border: 1.5px solid #e2e8f0; background: #fff;
+  color: #64748b; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s;
+}
+.wlt-btn-cancel:hover { border-color: #cbd5e1; color: #475569; }
+.wlt-btn-primary {
+  padding: 10px 24px; border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  color: #fff; font-size: 13px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(249,115,22,0.3);
+}
+.wlt-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(249,115,22,0.4);
+}
+.wlt-btn-primary:disabled {
+  opacity: 0.6; cursor: not-allowed; transform: none;
+  box-shadow: 0 2px 8px rgba(249,115,22,0.15);
+}
+.wlt-btn-blue {
+  padding: 10px 24px; border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: #fff; font-size: 13px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(37,99,235,0.3);
+}
+.wlt-btn-blue:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(37,99,235,0.4);
+}
+.wlt-btn-blue:disabled {
+  opacity: 0.6; cursor: not-allowed; transform: none;
+}
+
+/* ── Info banner inside modal ──────────────────────────── */
+.wlt-modal-info {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 10px;
+  background: #eff6ff; border: 1px solid #dbeafe;
+  margin-bottom: 20px;
+}
+.wlt-modal-info-icon {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: #dbeafe; display: flex; align-items: center; justify-content: center;
+  color: #2563eb; flex-shrink: 0;
+}
+.wlt-modal-info-text { font-size: 13px; color: #1e40af; font-weight: 600; }
+.wlt-modal-info-text strong { color: #1e3a8a; }
+
+/* ── Success/Error Messages ────────────────────────────── */
+.wlt-msg {
+  padding: 10px 16px; border-radius: 10px; font-size: 13px;
+  font-weight: 600; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.wlt-msg.success { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.wlt-msg.error   { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+
+/* ── Loading ───────────────────────────────────────────── */
+.wlt-loading {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 300px; color: #94a3b8; font-size: 14px;
+  flex-direction: column; gap: 12px;
+}
+.wlt-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid #f1f5f9; border-top-color: #f97316;
+  animation: wltSpin 0.7s linear infinite;
+}
+
+/* ── Animations ────────────────────────────────────────── */
+@keyframes wltFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes wltSlideUp {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wltSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .wlt-page { padding: 16px; }
+  .wlt-stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .wlt-stat-card { padding: 14px 16px; }
+  .wlt-stat-icon { width: 38px; height: 38px; }
+  .wlt-stat-val { font-size: 18px; }
+  .wlt-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .wlt-tab { padding: 10px 14px; font-size: 12px; }
+  .wlt-table thead th, .wlt-table tbody td { padding: 10px 12px; }
+  .wlt-modal { max-width: 95vw; }
+  .wlt-modal-header, .wlt-modal-body { padding-left: 20px; padding-right: 20px; }
+  .wlt-modal-footer { padding: 14px 20px; }
+}
+@media (max-width: 480px) {
+  .wlt-stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .wlt-stat-card { padding: 12px; border-radius: 10px; }
+  .wlt-stat-icon { width: 34px; height: 34px; border-radius: 9px; }
+  .wlt-stat-val { font-size: 16px; }
+  .wlt-stat-lbl { font-size: 10px; }
+}

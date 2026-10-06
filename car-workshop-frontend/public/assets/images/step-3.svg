@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 350">
+  <defs>
+    <filter id="stepShadow3" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="15" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="500" height="350" fill="#f8fafc" rx="16"/>
+  
+  <!-- Dashboard preview card -->
+  <rect x="50" y="25" width="400" height="300" rx="12" fill="#fff" filter="url(#stepShadow3)"/>
+  
+  <!-- Header -->
+  <rect x="50" y="25" width="400" height="45" rx="12" fill="#244066"/>
+  <rect x="50" y="55" width="400" height="15" fill="#244066"/>
+  <circle cx="80" cy="47" r="12" fill="#fff" opacity="0.9"/>
+  <text x="100" y="52" font-size="12" fill="#fff" font-weight="600">Pioneer CRM</text>
+  <rect x="380" y="38" width="55" height="20" rx="5" fill="#f2421b"/>
+  <text x="407" y="52" font-size="8" fill="#fff" text-anchor="middle">+ New Deal</text>
+  
+  <!-- Stats row -->
+  <rect x="70" y="85" width="90" height="55" rx="8" fill="#e8f4fc"/>
+  <text x="115" y="105" font-size="8" fill="#666" text-anchor="middle">Total Leads</text>
+  <text x="115" y="125" font-size="18" fill="#244066" text-anchor="middle" font-weight="700">156</text>
+  
+  <rect x="170" y="85" width="90" height="55" rx="8" fill="#fff3f0"/>
+  <text x="215" y="105" font-size="8" fill="#666" text-anchor="middle">Active Deals</text>
+  <text x="215" y="125" font-size="18" fill="#f2421b" text-anchor="middle" font-weight="700">24</text>
+  
+  <rect x="270" y="85" width="90" height="55" rx="8" fill="#e8fce8"/>
+  <text x="315" y="105" font-size="8" fill="#666" text-anchor="middle">Won Deals</text>
+  <text x="315" y="125" font-size="18" fill="#22c55e" text-anchor="middle" font-weight="700">12</text>
+  
+  <rect x="370" y="85" width="65" height="55" rx="8" fill="#f8fafc"/>
+  <text x="402" y="105" font-size="8" fill="#666" text-anchor="middle">Revenue</text>
+  <text x="402" y="125" font-size="14" fill="#244066" text-anchor="middle" font-weight="700">$48K</text>
+  
+  <!-- Mini pipeline -->
+  <text x="70" y="160" font-size="10" fill="#244066" font-weight="600">Pipeline Overview</text>
+  
+  <rect x="70" y="170" width="80" height="60" rx="6" fill="#e8f4fc"/>
+  <text x="110" y="190" font-size="8" fill="#666" text-anchor="middle">Qualified</text>
+  <text x="110" y="215" font-size="14" fill="#244066" text-anchor="middle" font-weight="700">8</text>
+  
+  <rect x="160" y="170" width="80" height="60" rx="6" fill="#fff3f0"/>
+  <text x="200" y="190" font-size="8" fill="#666" text-anchor="middle">Proposal</text>
+  <text x="200" y="215" font-size="14" fill="#f2421b" text-anchor="middle" font-weight="700">6</text>
+  
+  <rect x="250" y="170" width="80" height="60" rx="6" fill="#fef3c7"/>
+  <text x="290" y="190" font-size="8" fill="#666" text-anchor="middle">Negotiation</text>
+  <text x="290" y="215" font-size="14" fill="#f59e0b" text-anchor="middle" font-weight="700">4</text>
+  
+  <rect x="340" y="170" width="95" height="60" rx="6" fill="#e8fce8"/>
+  <text x="387" y="190" font-size="8" fill="#666" text-anchor="middle">Won 🎉</text>
+  <text x="387" y="215" font-size="14" fill="#22c55e" text-anchor="middle" font-weight="700">$32K</text>
+  
+  <!-- Recent activity -->
+  <text x="70" y="255" font-size="10" fill="#244066" font-weight="600">Recent Activity</text>
+  
+  <rect x="70" y="265" width="365" height="22" rx="4" fill="#f8fafc"/>
+  <circle cx="85" cy="276" r="6" fill="#22c55e"/>
+  <text x="100" y="280" font-size="9" fill="#666">Deal "Enterprise Package" moved to Won - $15,000</text>
+  
+  <rect x="70" y="292" width="365" height="22" rx="4" fill="#f8fafc"/>
+  <circle cx="85" cy="303" r="6" fill="#f2421b"/>
+  <text x="100" y="307" font-size="9" fill="#666">New lead assigned: Tech Solutions Inc.</text>
+  
+  <!-- Success indicator -->
+  <circle cx="465" cy="50" r="20" fill="#22c55e"/>
+  <text x="465" y="56" font-size="16" fill="#fff" text-anchor="middle">✓</text>
+</svg>
+
+

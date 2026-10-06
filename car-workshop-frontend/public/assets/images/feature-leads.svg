@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <defs>
+    <filter id="cardShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="15" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="600" height="400" fill="#f8fafc" rx="16"/>
+  
+  <!-- Card 1 - Lead card -->
+  <rect x="40" y="30" width="250" height="150" rx="12" fill="#fff" filter="url(#cardShadow)"/>
+  <circle cx="80" cy="70" r="20" fill="#e8f4fc"/>
+  <rect x="110" y="60" width="80" height="12" rx="3" fill="#244066"/>
+  <rect x="110" y="78" width="120" height="8" rx="2" fill="#999"/>
+  <rect x="60" y="105" width="60" height="24" rx="6" fill="#22c55e" opacity="0.2"/>
+  <text x="75" y="122" font-size="10" fill="#22c55e" font-weight="600">Hot</text>
+  <rect x="130" y="105" width="60" height="24" rx="6" fill="#244066" opacity="0.1"/>
+  <rect x="200" y="105" width="60" height="24" rx="6" fill="#f2421b" opacity="0.1"/>
+  <rect x="60" y="145" width="200" height="20" rx="4" fill="#f2421b"/>
+  <text x="130" y="160" font-size="10" fill="#fff" text-anchor="middle" font-weight="600">Convert to Deal →</text>
+  
+  <!-- Card 2 -->
+  <rect x="40" y="200" width="250" height="120" rx="12" fill="#fff" filter="url(#cardShadow)"/>
+  <circle cx="80" cy="240" r="20" fill="#fff3f0"/>
+  <rect x="110" y="230" width="100" height="12" rx="3" fill="#244066"/>
+  <rect x="110" y="248" width="140" height="8" rx="2" fill="#999"/>
+  <rect x="60" y="280" width="50" height="20" rx="5" fill="#f59e0b" opacity="0.2"/>
+  <text x="72" y="294" font-size="9" fill="#f59e0b" font-weight="600">Warm</text>
+  
+  <!-- Card 3 -->
+  <rect x="310" y="80" width="250" height="180" rx="12" fill="#fff" filter="url(#cardShadow)"/>
+  <rect x="330" y="100" width="100" height="14" rx="3" fill="#244066"/>
+  
+  <!-- Funnel visualization -->
+  <polygon points="380,140 520,140 500,180 400,180" fill="#244066" opacity="0.8"/>
+  <polygon points="400,185 500,185 485,220 415,220" fill="#244066" opacity="0.6"/>
+  <polygon points="415,225 485,225 475,255 425,255" fill="#f2421b" opacity="0.8"/>
+  
+  <text x="450" y="165" font-size="10" fill="#fff" text-anchor="middle">New: 45</text>
+  <text x="450" y="207" font-size="10" fill="#fff" text-anchor="middle">Qualified: 28</text>
+  <text x="450" y="245" font-size="10" fill="#fff" text-anchor="middle">Won: 12</text>
+  
+  <!-- Stats -->
+  <rect x="330" y="270" width="70" height="50" rx="8" fill="#e8f4fc"/>
+  <text x="365" y="295" font-size="18" fill="#244066" text-anchor="middle" font-weight="700">85</text>
+  <text x="365" y="310" font-size="8" fill="#666" text-anchor="middle">Total Leads</text>
+  
+  <rect x="410" y="270" width="70" height="50" rx="8" fill="#fff3f0"/>
+  <text x="445" y="295" font-size="18" fill="#f2421b" text-anchor="middle" font-weight="700">67%</text>
+  <text x="445" y="310" font-size="8" fill="#666" text-anchor="middle">Conversion</text>
+  
+  <rect x="490" y="270" width="70" height="50" rx="8" fill="#e8fce8"/>
+  <text x="525" y="295" font-size="18" fill="#22c55e" text-anchor="middle" font-weight="700">$24K</text>
+  <text x="525" y="310" font-size="8" fill="#666" text-anchor="middle">Pipeline</text>
+</svg>
+
+

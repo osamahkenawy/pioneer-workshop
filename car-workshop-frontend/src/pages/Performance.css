@@ -1,0 +1,273 @@
+/* ═══════════════════════════════════════════════════════════
+   Performance — SLA & Mechanic Performance Dashboard
+   Prefix: perf-
+   ═══════════════════════════════════════════════════════════ */
+
+.perf-page { padding: 24px; }
+
+/* ── Stats Grid ────────────────────────────────────────── */
+.perf-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.perf-stat-card {
+  background: #fff;
+  border: 1px solid #f1f5f9;
+  border-radius: 14px;
+  padding: 18px 20px;
+  transition: transform 0.2s, box-shadow 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.perf-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+}
+.perf-stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+.perf-stat-card.primary::before { background: #f97316; }
+.perf-stat-card.success::before { background: #16a34a; }
+.perf-stat-card.warning::before { background: #d97706; }
+.perf-stat-card.info::before    { background: #667eea; }
+.perf-stat-card.danger::before  { background: #ef4444; }
+.perf-stat-card-row { display: flex; align-items: center; gap: 14px; }
+.perf-stat-icon {
+  width: 46px; height: 46px;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.perf-stat-body { flex: 1; }
+.perf-stat-val { font-size: 22px; font-weight: 800; color: #1e293b; display: block; }
+.perf-stat-lbl { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.perf-stat-change {
+  font-size: 11px; font-weight: 600; margin-top: 4px;
+  display: flex; align-items: center; gap: 3px;
+}
+.perf-stat-change.up { color: #16a34a; }
+.perf-stat-change.down { color: #ef4444; }
+
+/* ── Tabs ──────────────────────────────────────────────── */
+.perf-tabs {
+  display: flex; gap: 0; margin-bottom: 20px;
+  border-bottom: 2px solid #f1f5f9;
+}
+.perf-tab {
+  padding: 10px 20px; font-size: 13px; font-weight: 600;
+  color: #94a3b8; cursor: pointer; border: none; background: none;
+  position: relative; transition: color 0.2s;
+  display: flex; align-items: center; gap: 6px;
+}
+.perf-tab:hover { color: #1e293b; }
+.perf-tab.active { color: #f97316; }
+.perf-tab.active::after {
+  content: ''; position: absolute; bottom: -2px; left: 0; right: 0;
+  height: 2px; background: #f97316; border-radius: 2px 2px 0 0;
+}
+
+/* ── Chart Cards ───────────────────────────────────────── */
+.perf-charts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+.perf-chart-card {
+  background: #fff;
+  border: 1px solid #f1f5f9;
+  border-radius: 14px;
+  padding: 20px;
+  overflow: hidden;
+}
+.perf-chart-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.perf-chart-sub {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 16px;
+}
+.perf-chart-body {
+  height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Mechanic Scorecard Table ────────────────────────────── */
+.perf-table-wrap {
+  background: #fff; border-radius: 14px;
+  border: 1px solid #f1f5f9; overflow-x: auto;
+}
+.perf-table { width: 100%; border-collapse: collapse; }
+.perf-table thead th {
+  font-size: 11px; text-transform: uppercase; color: #94a3b8;
+  letter-spacing: 0.05em; padding: 14px 16px; font-weight: 700;
+  text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap;
+}
+.perf-table tbody td {
+  font-size: 13px; padding: 14px 16px;
+  border-bottom: 1px solid #fafafa; color: #334155;
+  vertical-align: middle;
+}
+.perf-table tbody tr { transition: background 0.15s; }
+.perf-table tbody tr:hover { background: #fafbfc; }
+.perf-table tbody tr:last-child td { border-bottom: none; }
+
+/* ── Mechanic Row ────────────────────────────────────────── */
+.perf-mechanic-cell {
+  display: flex; align-items: center; gap: 12px;
+}
+.perf-mechanic-avatar {
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #f97316, #ea580c);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; flex-shrink: 0;
+}
+.perf-mechanic-info { }
+.perf-mechanic-name { font-weight: 700; color: #1e293b; font-size: 13px; }
+.perf-mechanic-phone { font-size: 11px; color: #94a3b8; }
+
+/* ── Rating ────────────────────────────────────────────── */
+.perf-rating {
+  display: flex; align-items: center; gap: 2px;
+}
+.perf-rating-star { color: #fbbf24; }
+.perf-rating-star.empty { color: #e2e8f0; }
+.perf-rating-value {
+  font-size: 12px; font-weight: 700; color: #1e293b;
+  margin-left: 6px;
+}
+
+/* ── Progress Bar ──────────────────────────────────────── */
+.perf-progress-wrap {
+  display: flex; align-items: center; gap: 8px;
+}
+.perf-progress-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: #f1f5f9;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.perf-progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+.perf-progress-bar.excellent { background: linear-gradient(90deg, #16a34a, #22c55e); }
+.perf-progress-bar.good      { background: linear-gradient(90deg, #f97316, #fb923c); }
+.perf-progress-bar.poor      { background: linear-gradient(90deg, #ef4444, #f87171); }
+.perf-progress-pct {
+  font-size: 12px;
+  font-weight: 700;
+  width: 42px;
+  text-align: right;
+}
+
+/* ── SLA Gauge ─────────────────────────────────────────── */
+.perf-sla-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.perf-sla-card {
+  background: #fff;
+  border: 1px solid #f1f5f9;
+  border-radius: 14px;
+  padding: 20px;
+  text-align: center;
+}
+.perf-sla-ring {
+  width: 100px; height: 100px;
+  margin: 0 auto 12px;
+  position: relative;
+}
+.perf-sla-ring svg { transform: rotate(-90deg); }
+.perf-sla-ring-text {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 800; color: #1e293b;
+}
+.perf-sla-label {
+  font-size: 13px; font-weight: 700; color: #1e293b; margin-bottom: 4px;
+}
+.perf-sla-sub {
+  font-size: 11px; color: #94a3b8;
+}
+
+/* ── Ranking Badge ─────────────────────────────────────── */
+.perf-rank {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%;
+  font-size: 12px; font-weight: 800;
+}
+.perf-rank.gold   { background: #fef3c7; color: #b45309; }
+.perf-rank.silver { background: #f1f5f9; color: #64748b; }
+.perf-rank.bronze { background: #fed7aa; color: #c2410c; }
+.perf-rank.normal { background: #f8fafc; color: #94a3b8; }
+
+/* ── Filters ───────────────────────────────────────────── */
+.perf-filters {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center;
+}
+.perf-filter-select {
+  height: 38px; padding: 0 12px; border: 1px solid #e0e0e0;
+  border-radius: 10px; font-size: 13px; background: #fff;
+  cursor: pointer; min-width: 140px;
+}
+.perf-filter-select:focus { outline: none; border-color: #f97316; }
+.perf-date-input {
+  height: 38px; padding: 0 12px; border: 1px solid #e0e0e0;
+  border-radius: 10px; font-size: 13px; background: #fff;
+}
+.perf-date-input:focus { outline: none; border-color: #f97316; }
+
+/* ── Status Badge ──────────────────────────────────────── */
+.perf-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 700; padding: 3px 10px;
+  border-radius: 12px;
+}
+.perf-badge.excellent { background: #dcfce7; color: #16a34a; }
+.perf-badge.good      { background: #fff7ed; color: #d97706; }
+.perf-badge.poor      { background: #fee2e2; color: #ef4444; }
+
+/* ── Empty / Loading ───────────────────────────────────── */
+.perf-empty {
+  text-align: center; padding: 60px 20px;
+}
+.perf-empty-icon {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: #f1f5f9; display: flex;
+  align-items: center; justify-content: center;
+  margin: 0 auto 16px; color: #94a3b8;
+}
+.perf-empty h3 { font-size: 16px; color: #1e293b; margin-bottom: 6px; }
+.perf-empty p { font-size: 13px; color: #94a3b8; }
+.perf-spinner {
+  width: 36px; height: 36px; border: 3px solid #f1f5f9;
+  border-top-color: #f97316; border-radius: 50%;
+  animation: perf-spin 0.8s linear infinite; margin: 40px auto;
+}
+@keyframes perf-spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .perf-page { padding: 16px; }
+  .perf-stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .perf-charts-grid { grid-template-columns: 1fr; }
+  .perf-sla-grid { grid-template-columns: repeat(2, 1fr); }
+  .perf-filters { flex-direction: column; }
+  .perf-tabs { overflow-x: auto; }
+}

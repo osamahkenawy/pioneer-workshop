@@ -1,0 +1,289 @@
+/* ══════════════════════════════════════════════════════════
+   Mechanic Home Dashboard — dh-* styles
+   ══════════════════════════════════════════════════════════ */
+
+/* ── Loader ── */
+.dh-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+/* ── Quick Action Cards ── */
+.dh-quick-actions {
+  padding: 0 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dh-action-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+  transition: transform 0.18s, box-shadow 0.18s;
+  width: 100%;
+}
+
+.dh-action-card:active {
+  transform: scale(0.98);
+}
+
+.dh-action-primary {
+  background: linear-gradient(135deg, #1e3a6b 0%, #3a6fb5 100%);
+  box-shadow: 0 6px 24px rgba(36, 64, 102, 0.35);
+  color: #fff;
+}
+
+.dh-action-primary:hover {
+  box-shadow: 0 10px 32px rgba(36, 64, 102, 0.45);
+  transform: translateY(-1px);
+}
+
+.dh-action-secondary {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  box-shadow: 0 6px 24px rgba(249, 115, 22, 0.35);
+  color: #fff;
+}
+
+.dh-action-secondary:hover {
+  box-shadow: 0 10px 32px rgba(249, 115, 22, 0.45);
+  transform: translateY(-1px);
+}
+
+.dh-action-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dh-action-body {
+  flex: 1;
+}
+
+.dh-action-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.dh-action-sub {
+  font-size: 12px;
+  opacity: 0.75;
+  font-weight: 500;
+}
+
+.dh-action-arrow {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* ── Recent WorkOrders ── */
+.dh-recent-section {
+  margin: 8px 16px 16px;
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.07);
+  overflow: hidden;
+}
+
+.dh-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dh-section-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0;
+}
+
+.dh-view-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e3a6b;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+  transition: opacity 0.15s;
+}
+
+.dh-view-all:hover { opacity: 0.7; }
+
+.dh-orders-list {
+  padding: 8px 0;
+}
+
+.dh-order-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #f8fafc;
+  transition: background 0.15s;
+}
+
+.dh-order-row:last-child { border-bottom: none; }
+.dh-order-row:hover { background: #fafbfc; }
+
+.dh-order-dot {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.dh-order-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dh-order-num {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 2px;
+}
+
+.dh-order-recipient {
+  font-size: 12px;
+  color: #475569;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dh-order-addr {
+  font-size: 11px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dh-order-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dh-status-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.dh-order-time {
+  font-size: 11px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* ── Mechanic Profile Summary Card ── */
+.dh-profile-card {
+  margin: 0 16px 20px;
+  background: #fff;
+  border-radius: 18px;
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.07);
+  border: 1px solid #f1f5f9;
+}
+
+.dh-profile-avatar {
+  width: 52px;
+  height: 52px;
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dh-profile-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dh-profile-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dh-profile-detail {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 2px;
+}
+
+.dh-profile-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 20px;
+  flex-shrink: 0;
+}
+
+.dh-profile-status.available { background: #dcfce7; color: #16a34a; }
+.dh-profile-status.busy      { background: #fff7ed; color: #ea580c; }
+.dh-profile-status.on_break  { background: #fef9c3; color: #ca8a04; }
+.dh-profile-status.offline   { background: #f1f5f9; color: #64748b; }
+
+/* ── Spin keyframe (for refresh icon) ── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── RTL support ── */
+[dir="rtl"] .dh-action-card   { text-align: end; }
+[dir="rtl"] .dh-action-arrow  { transform: scaleX(-1); }
+[dir="rtl"] .dh-view-all > svg { transform: scaleX(-1); }

@@ -1,0 +1,153 @@
+/* Technician KPI — the periodic attendance/billing report view.
+   Builds on CrmSurface.css tokens; only what's specific to this report
+   lives here. */
+
+/* .form-control's width:100% (CRMPages.css) becomes its flex-basis inside
+   .cs-controls' flex row, so it fights .cs-search's flex:1 for space and
+   visually overlaps it. Give these selects a fixed basis instead. */
+.tk-fixed-select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 150px;
+  max-width: 190px;
+}
+
+/* ── Estimated-data notice ──────────────────────────────────────────
+   Only Jul-2026 comes from a real attendance report. Everything else is
+   modeled, and the page has to say so where the numbers are read, not in
+   a footnote — hence a full-width notice rather than a subtle chip. */
+.tk-notice {
+  display: flex; gap: 12px; align-items: flex-start;
+  border: 1px solid var(--cs-amber-rule); background: var(--cs-amber-wash);
+  border-radius: var(--cs-radius); padding: 14px 16px; margin-bottom: 18px;
+}
+.tk-notice-icon { color: var(--cs-amber); flex: none; margin-top: 1px; }
+.tk-notice strong { display: block; font-size: 13.5px; color: var(--cs-ink); margin-bottom: 3px; }
+.tk-notice p { margin: 0; font-size: 12.5px; color: var(--cs-ink-soft); line-height: 1.5; }
+
+.tk-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.tk-badge--estimated { background: var(--cs-amber-tint); color: var(--cs-amber); }
+.tk-badge--actual    { background: var(--cs-green-tint); color: var(--cs-green); }
+
+/* ── Trend strip: one bar per period, doubling as the period picker ──
+   Single measure (billed value) so there's one scale and no dual axis.
+   Estimated periods are hatched rather than recoloured — the actual/
+   estimated split is a status dimension, so it must not be carried by
+   colour alone. */
+.tk-trend {
+  background: var(--cs-surface); border: 1px solid var(--cs-rule);
+  border-radius: var(--cs-radius); box-shadow: var(--cs-shadow);
+  padding: 16px 18px 12px; margin-bottom: 18px;
+}
+.tk-trend-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.tk-trend-head h3 { margin: 0; font-size: 14px; font-weight: 700; color: var(--cs-ink); }
+.tk-trend-head .tk-trend-sub { font-size: 12px; color: var(--cs-ink-faint); }
+
+.tk-bars {
+  display: flex; align-items: flex-end; gap: 2px; height: 96px;
+  border-bottom: 1px solid var(--cs-rule); padding-bottom: 0;
+  position: relative;
+}
+
+/* Mean of the complete months. The bars stay zero-based (so magnitude isn't
+   exaggerated) and this line is what makes the narrow real spread readable. */
+.tk-meanline {
+  position: absolute; left: 0; right: 0; height: 0;
+  border-top: 1px dashed var(--cs-ink-faint); opacity: .75;
+  pointer-events: none; z-index: 1;
+}
+.tk-meanline span {
+  position: absolute; right: 0; top: -15px;
+  font-size: 10px; color: var(--cs-ink-faint); background: var(--cs-surface);
+  padding: 0 4px; font-variant-numeric: tabular-nums;
+}
+.tk-bar-btn {
+  flex: 1 1 0; min-width: 0; height: 100%;
+  display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch;
+  background: none; border: 0; padding: 0 2px; cursor: pointer; position: relative;
+}
+.tk-bar-btn:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; border-radius: 6px; }
+.tk-bar-value {
+  font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--cs-ink-soft);
+  text-align: center; margin-bottom: 4px; white-space: nowrap;
+}
+.tk-bar {
+  /* 4px rounded data-end, anchored flat to the baseline */
+  border-radius: 4px 4px 0 0;
+  background: var(--cs-blue);
+  transition: background .15s ease, opacity .15s ease;
+  min-height: 3px;
+  width: 100%; max-width: 54px; margin-inline: auto;
+  position: relative; z-index: 2;
+}
+.tk-bar--estimated {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--cs-blue) 0 3px,
+    #7ea6f5 3px 6px
+  );
+}
+.tk-bar-btn:not(.is-selected) .tk-bar { opacity: .42; }
+.tk-bar-btn:hover .tk-bar { opacity: .72; }
+.tk-bar-btn.is-selected .tk-bar { opacity: 1; }
+.tk-bar-btn.is-selected .tk-bar-value { color: var(--cs-ink); font-weight: 700; }
+
+.tk-bar-labels { display: flex; gap: 2px; margin-top: 6px; }
+.tk-bar-label {
+  flex: 1 1 0; min-width: 0; text-align: center;
+  font-size: 10.5px; color: var(--cs-ink-faint); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tk-bar-label.is-selected { color: var(--cs-ink); font-weight: 700; }
+
+.tk-legend {
+  display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  margin-top: 12px; font-size: 11.5px; color: var(--cs-ink-faint);
+}
+.tk-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.tk-legend i { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+.tk-legend i.solid { background: var(--cs-blue); }
+.tk-legend i.hatched {
+  background: repeating-linear-gradient(135deg, var(--cs-blue) 0 3px, #7ea6f5 3px 6px);
+}
+
+/* Tooltip on the bars */
+.tk-tip {
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: #16233b; color: #fff; border-radius: 8px; padding: 8px 10px;
+  font-size: 11.5px; line-height: 1.5; white-space: nowrap; z-index: 5;
+  pointer-events: none; box-shadow: 0 6px 18px rgba(16, 24, 40, .18);
+}
+.tk-tip b { font-weight: 700; }
+.tk-tip-row { display: flex; gap: 10px; justify-content: space-between; }
+.tk-tip-row span:last-child { font-variant-numeric: tabular-nums; }
+
+/* ── Report table ─────────────────────────────────────────────────── */
+.tk-table th { position: sticky; top: 0; background: var(--cs-surface); z-index: 2; }
+.tk-table td, .tk-table th { padding-inline: 12px; }
+.tk-table .tk-tech-cell { min-width: 190px; }
+.tk-scroll { max-height: 620px; overflow: auto; }
+
+.tk-pill {
+  display: inline-block; min-width: 46px; text-align: center;
+  font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tk-table tfoot td {
+  position: sticky; bottom: 0; background: var(--cs-rule-soft);
+  font-weight: 700; font-size: 13px; color: var(--cs-ink);
+  border-top: 1px solid var(--cs-rule); border-bottom: 0;
+}
+
+@media (max-width: 720px) {
+  .tk-bar-value { display: none; }
+  .tk-bars { height: 72px; }
+}

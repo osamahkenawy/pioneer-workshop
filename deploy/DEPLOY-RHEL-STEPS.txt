@@ -1,0 +1,433 @@
+================================================================================
+  CAR WORKSHOP PLATFORM — NEW SERVER DEPLOYMENT STEPS
+  Server  : EDCDCMWSSTG01
+  IP      : 10.10.241.84
+  OS      : Red Hat Enterprise Linux (RHEL 8/9)
+  User    : osamah.kenawy
+  Date    : 2026-07-27
+================================================================================
+
+  Run every command below IN ORDER on the RHEL server via MobaXterm/CyberArk.
+  Copy and paste each block one step at a time.
+
+================================================================================
+STEP 1 — Verify access and OS
+================================================================================
+
+  cat /etc/redhat-release
+  whoami
+  sudo whoami
+
+  Expected output:
+    Red Hat Enterprise Linux release 8.x  (or 9.x)
+    osamah.kenawy
+    root
+
+  If "sudo whoami" is denied, ask your sysadmin to add you to sudoers first.
+
+================================================================================
+STEP 2 — Fix DNF Repositories  ⚠️  REQUIRED — server has no repos enabled
+================================================================================
+
+  The server shows:
+    "Error: There are no enabled repositories in /etc/yum.repos.d/"
+  This means RHEL is NOT registered with Red Hat Subscription Manager.
+  Fix this by adding CentOS Stream 9 compatible repos (no subscription needed):
+
+  -- 2a. Create a working repo file using CentOS Stream 9 mirrors:
+
+    sudo tee /etc/yum.repos.d/centos-stream9.repo > /dev/null << 'EOF'
+    [baseos]
+    name=CentOS Stream 9 - BaseOS
+    baseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/
+    gpgcheck=1
+    enabled=1
+    gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+
+    [appstream]
+    name=CentOS Stream 9 - AppStream
+    baseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+    gpgcheck=1
+    enabled=1
+    gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+
+    [extras]
+    name=CentOS Stream 9 - Extras
+    baseurl=https://mirror.stream.centos.org/9-stream/extras/x86_64/extras/
+    gpgcheck=1
+    enabled=1
+    gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+    EOF
+
+  -- 2b. Import the CentOS GPG key:
+
+    sudo rpm --import https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+
+  -- 2c. Verify repos are working:
+
+    sudo dnf repolist
+    sudo dnf makecache
+
+    Expected: you should see baseos, appstream, extras listed with package counts.
+
+  NOTE: If the server is on an internal network with no internet access, ask
+        your sysadmin for the internal mirror URL and replace the baseurl above.
+
+================================================================================
+STEP 3 — Update system packages
+================================================================================
+
+  sudo dnf update -y
+
+================================================================================
+STEP 4 — Install Git
+================================================================================
+
+  sudo dnf install -y git
+  git --version
+
+================================================================================
+STEP 4 — Install Node.js 20
+================================================================================
+
+  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+  sudo dnf install -y nodejs
+  node -v
+  npm -v
+
+  Expected: v20.x.x
+
+================================================================================
+STEP 5 — Install PM2 (process manager)
+================================================================================
+
+  sudo npm install -g pm2
+  pm2 -v
+
+================================================================================
+STEP 6 — Install Nginx
+================================================================================
+
+  sudo dnf install -y nginx
+  sudo systemctl enable nginx
+  sudo systemctl start nginx
+  sudo systemctl status nginx
+
+  Expected: Active: active (running)
+
+================================================================================
+STEP 7 — Install MySQL 8
+================================================================================
+
+  -- 7a. Add the MySQL 8 Community repo (choose based on your RHEL version):
+
+  For RHEL 9:
+    sudo dnf install -y https://dev.mysql.com/get/mysql80-community-release-el9-1.noarch.rpm
+
+  For RHEL 8:
+    sudo dnf install -y https://dev.mysql.com/get/mysql80-community-release-el8-1.noarch.rpm
+
+  -- 7b. Install MySQL server:
+
+    sudo dnf install -y mysql-community-server
+
+  -- 7c. Start and enable MySQL:
+
+    sudo systemctl enable mysqld
+    sudo systemctl start mysqld
+
+  -- 7d. Get the auto-generated temporary root password:
+
+    sudo grep 'temporary password' /var/log/mysqld.log
+
+    (Copy the password shown at the end of that line — you will need it next)
+
+  -- 7e. Set a new root password (replace TMP_PASS with the password from 7d):
+
+    mysql -u root -p'TMP_PASS' --connect-expired-password -e \
+      "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Root@12345'; FLUSH PRIVILEGES;"
+
+    NOTE: MySQL 8 requires a strong password (uppercase + number + symbol).
+          Password used: Root@12345
+          Change it to something stronger in production.
+
+  -- 7f. Test the new password:
+
+    mysql -u root -p'Root@12345' -e "SHOW DATABASES;"
+
+================================================================================
+STEP 8 — Create app directories
+================================================================================
+
+  sudo mkdir -p /var/www/car-workshop/backend
+  sudo mkdir -p /var/www/car-workshop/frontend
+  sudo chown -R osamah.kenawy:osamah.kenawy /var/www/car-workshop
+  ls -la /var/www/car-workshop/
+
+================================================================================
+STEP 9 — Deploy Backend
+================================================================================
+
+  -- 9a. Clone the backend from GitHub:
+
+    git clone https://github.com/osamahkenawy/car-workshop-backend.git \
+      /var/www/car-workshop/backend
+
+  -- 9b. Go to the backend folder:
+
+    cd /var/www/car-workshop/backend
+
+  -- 9c. Install npm packages:
+
+    npm install
+
+  -- 9d. Create the .env file:
+
+    cat > /var/www/car-workshop/backend/.env << 'EOF'
+    NODE_ENV=production
+    PORT=4000
+    BACKEND_URL=http://10.10.241.84
+    BASE_URL=http://10.10.241.84
+    FRONTEND_URL=http://10.10.241.84
+
+    DB_HOST=localhost
+    DB_PORT=3306
+    DB_USER=root
+    DB_PASSWORD=Root@12345
+    DB_NAME=car_workshop
+
+    JWT_SECRET=rhel-staging-jwt-secret-change-before-go-live
+    JWT_EXPIRES_IN=7d
+    MECHANIC_ACCESS_TTL_SHORT=12h
+    MECHANIC_REFRESH_TTL_DAYS=30
+    API_KEY_PREFIX=cw_
+
+    SMTP_HOST=
+    SMTP_PORT=587
+    SMTP_SECURE=false
+    SMTP_USER=
+    SMTP_PASSWORD=
+    SMTP_FROM=no-reply@workshop.pioneeruae.com
+    SMTP_FROM_NAME=Car Workshop Platform
+
+    CRON_TZ=Asia/Dubai
+    VAT_ENABLED=true
+    VAT_RATE=5.0
+    LOG_OTP_SECRET=false
+    EOF
+
+  -- 9e. Create the database:
+
+    mysql -u root -p'Root@12345' -e "CREATE DATABASE IF NOT EXISTS car_workshop;"
+
+  -- 9f. Run all DB migrations (in order):
+
+    mysql -u root -p'Root@12345' car_workshop \
+      < /var/www/car-workshop/backend/src/migrations/car_workshop.sql
+
+    mysql -u root -p'Root@12345' car_workshop \
+      < /var/www/car-workshop/backend/src/migrations/post/00_schema_patches.sql
+
+    mysql -u root -p'Root@12345' car_workshop \
+      < /var/www/car-workshop/backend/src/migrations/post/01_seed_countries.sql
+
+    mysql -u root -p'Root@12345' car_workshop \
+      < /var/www/car-workshop/backend/src/migrations/post/02_sow_schema.sql
+
+  -- 9g. Start the backend with PM2:
+
+    pm2 start /var/www/car-workshop/backend/src/server.js \
+      --name car-workshop-backend \
+      --max-memory-restart 512M
+
+    pm2 save
+
+  -- 9h. Enable PM2 to start on system reboot:
+
+    sudo env PATH="$PATH:/usr/bin" \
+      pm2 startup systemd -u osamah.kenawy --hp /home/osamah.kenawy
+
+    (Copy the command it prints and run it)
+
+  -- 9i. Verify backend is running:
+
+    pm2 status
+    pm2 logs car-workshop-backend --lines 20
+
+    Expected: status = online, last log line = "Car Workshop Platform API listening on port 4000"
+
+================================================================================
+STEP 10 — Build and Deploy Frontend
+================================================================================
+
+  -- 10a. Clone the frontend (into /tmp to build it there):
+
+    git clone https://github.com/osamahkenawy/car-workshop-frontend.git \
+      /tmp/car-workshop-frontend
+
+  -- 10b. Go to the frontend folder:
+
+    cd /tmp/car-workshop-frontend
+
+  -- 10c. Install dependencies:
+
+    npm install
+
+  -- 10d. Build (set API URL to the server IP):
+
+    VITE_API_URL=http://10.10.241.84 npm run build
+
+  -- 10e. Copy build output to the Nginx web root:
+
+    sudo rm -rf /var/www/car-workshop/frontend/*
+    sudo cp -r /tmp/car-workshop-frontend/dist/. /var/www/car-workshop/frontend/
+
+  -- 10f. Fix SELinux context so Nginx can serve these files:
+
+    sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend
+
+================================================================================
+STEP 11 — Configure Nginx
+================================================================================
+
+  -- 11a. Create the Nginx config file:
+
+    sudo tee /etc/nginx/conf.d/car-workshop.conf > /dev/null << 'EOF'
+    server {
+        listen 80;
+        server_name 10.10.241.84 _;
+
+        root /var/www/car-workshop/frontend;
+        index index.html;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        location /api/ {
+            proxy_pass         http://127.0.0.1:4000/api/;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade           $http_upgrade;
+            proxy_set_header   Connection        'upgrade';
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_read_timeout 120s;
+        }
+
+        location /socket.io/ {
+            proxy_pass         http://127.0.0.1:4000/socket.io/;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade    $http_upgrade;
+            proxy_set_header   Connection "upgrade";
+            proxy_set_header   Host       $host;
+        }
+
+        location /uploads/ {
+            proxy_pass       http://127.0.0.1:4000/uploads/;
+            proxy_set_header Host $host;
+        }
+
+        client_max_body_size 50M;
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript
+                   text/xml application/xml image/svg+xml;
+    }
+    EOF
+
+  -- 11b. Allow SELinux to let Nginx connect to the backend (port 4000):
+
+    sudo setsebool -P httpd_can_network_connect 1
+
+  -- 11c. Test and reload Nginx:
+
+    sudo nginx -t
+    sudo systemctl reload nginx
+
+  Expected: nginx configuration file test is successful
+
+================================================================================
+STEP 12 — Open Firewall Ports
+================================================================================
+
+  sudo firewall-cmd --permanent --add-service=http
+  sudo firewall-cmd --permanent --add-service=https
+  sudo firewall-cmd --reload
+  sudo firewall-cmd --list-all
+
+  Expected: services: cockpit dhcpv6-client http https ssh
+
+================================================================================
+STEP 13 — Final Verification
+================================================================================
+
+  -- Check PM2:
+
+    pm2 status
+
+  -- Check Nginx:
+
+    sudo systemctl status nginx
+
+  -- Check the API responds:
+
+    curl -s http://localhost/api/health | head -c 200
+    curl -s http://localhost/api/docs   | head -c 100
+
+  -- Check from your browser:
+
+    Open: http://10.10.241.84
+    Open: http://10.10.241.84/api/docs
+
+================================================================================
+UPDATING THE SERVER IN THE FUTURE
+================================================================================
+
+  When you push new code to GitHub, run these commands on the server
+  to pull and redeploy:
+
+  -- Backend update:
+
+    cd /var/www/car-workshop/backend
+    git fetch origin && git reset --hard origin/main
+    npm install
+    mysql -u root -p'Root@12345' car_workshop \
+      < src/migrations/post/02_sow_schema.sql 2>/dev/null || true
+    pm2 restart car-workshop-backend
+    pm2 logs car-workshop-backend --lines 20
+
+  -- Frontend update:
+
+    cd /tmp/car-workshop-frontend
+    git fetch origin && git reset --hard origin/main
+    npm install
+    VITE_API_URL=http://10.10.241.84 npm run build
+    sudo rm -rf /var/www/car-workshop/frontend/*
+    sudo cp -r /tmp/car-workshop-frontend/dist/. /var/www/car-workshop/frontend/
+    sudo chcon -Rt httpd_sys_content_t /var/www/car-workshop/frontend
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+  Backend not starting:
+    pm2 logs car-workshop-backend --lines 50
+
+  Nginx not serving:
+    sudo nginx -t
+    sudo tail -50 /var/log/nginx/error.log
+
+  SELinux blocking Nginx:
+    sudo ausearch -c nginx | tail -20
+    sudo setsebool -P httpd_can_network_connect 1
+
+  MySQL connection refused:
+    sudo systemctl status mysqld
+    mysql -u root -p'Root@12345' -e "SHOW DATABASES;"
+
+  Port not open:
+    sudo firewall-cmd --list-all
+    sudo ss -tlnp | grep -E '80|443|4000'
+
+================================================================================

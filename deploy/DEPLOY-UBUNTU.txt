@@ -1,0 +1,506 @@
+================================================================================
+  CAR WORKSHOP PLATFORM — DEPLOYMENT GUIDE (Ubuntu + Nginx)
+  Server  : workshop.pioneeruae.com  (130.61.83.110)
+  User    : ubuntu
+  Stack   : Node.js 20 + PM2 + MySQL 8 + Nginx
+  Swagger : http://workshop.pioneeruae.com/api/docs
+  Date    : 2026-07-24
+================================================================================
+
+QUICK DEPLOY (automated — run once on a fresh Ubuntu server)
+─────────────────────────────────────────────────────────────
+  If you already have SSH access to the server:
+
+    1. Copy the deploy script to the server:
+         scp deploy/deploy-server.sh ubuntu@130.61.83.110:~/
+
+    2. SSH into the server:
+         ssh ubuntu@130.61.83.110
+
+    3. Run the script:
+         chmod +x deploy-server.sh
+         bash deploy-server.sh
+
+  That's it — the script installs everything and deploys both
+  frontend and backend automatically.
+
+  For Windows machines using PuTTY/CyberArk, use the manual
+  steps in PART 1–4 below instead.
+
+================================================================================
+PART 1 — ONE-TIME SERVER SETUP
+================================================================================
+
+-- 1.1  Connect to the server ------------------------------------------------
+
+  Via SSH (Linux/Mac/Windows Terminal):
+    ssh ubuntu@130.61.83.110
+
+  Via PuTTY (Windows):
+    Host: 130.61.83.110   Port: 22   Connection type: SSH
+    Load your .ppk key under Connection > SSH > Auth > Credentials
+
+  Via CyberArk/Guacamole:
+    Use the web terminal as you normally do.
+
+
+-- 1.2  Update system packages -----------------------------------------------
+
+  sudo apt-get update -y && sudo apt-get upgrade -y
+
+
+-- 1.3  Install Node.js 20 ---------------------------------------------------
+
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+  node -v    # v20.x.x
+  npm -v
+
+
+-- 1.4  Install Git, Nginx, PM2 ---------------------------------------------
+
+  sudo apt-get install -y nginx git
+  sudo npm install -g pm2
+  pm2 -v
+  nginx -v
+
+
+-- 1.5  Install MySQL 8 ------------------------------------------------------
+
+  sudo apt-get install -y mysql-server
+  sudo systemctl enable mysql
+  sudo systemctl start mysql
+
+  # Secure MySQL (set root password, remove test DBs):
+  sudo mysql_secure_installation
+
+  # If mysql_secure_installation has issues, set root password manually:
+  sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'YourPassword'; FLUSH PRIVILEGES;"
+
+  # Verify:
+  mysql -u root -p
+  EXIT;
+
+
+-- 1.6  Create app directories -----------------------------------------------
+
+  sudo mkdir -p /var/www/car-workshop/backend
+  sudo mkdir -p /var/www/car-workshop/frontend
+  sudo chown -R ubuntu:ubuntu /var/www/car-workshop
+
+
+-- 1.7  Configure Ubuntu firewall (ufw) --------------------------------------
+
+  sudo ufw allow OpenSSH
+  sudo ufw allow 'Nginx HTTP'
+  sudo ufw allow 'Nginx HTTPS'
+  sudo ufw enable
+  sudo ufw status
+
+
+================================================================================
+PART 2 — DEPLOY BACKEND
+================================================================================
+
+-- 2.1  Clone the backend repo -----------------------------------------------
+
+  cd /var/www/car-workshop
+  git clone https://github.com/osamahkenawy/car-workshop-backend.git backend
+  cd backend
+
+
+-- 2.2  Install dependencies -------------------------------------------------
+
+  npm install
+  # NOTE: Use plain "npm install" (not --omit=dev) so swagger-ui-express
+  #       and js-yaml are included — they are production dependencies.
+
+
+-- 2.3  Create the .env file -------------------------------------------------
+
+  nano /var/www/car-workshop/backend/.env
+
+  Paste the block below and fill in your values:
+
+  ----------------------------------------------------------------
+  NODE_ENV=production
+  PORT=4000
+  BACKEND_URL=http://workshop.pioneeruae.com
+  BASE_URL=http://workshop.pioneeruae.com
+  FRONTEND_URL=http://workshop.pioneeruae.com
+
+  # Database
+  DB_HOST=localhost
+  DB_PORT=3306
+  DB_USER=root
+  DB_PASSWORD=YOUR_MYSQL_PASSWORD_HERE
+  DB_NAME=car_workshop
+
+  # JWT
+  JWT_SECRET=CHANGE-THIS-TO-A-LONG-RANDOM-64-CHAR-STRING
+  JWT_EXPIRES_IN=7d
+  MECHANIC_ACCESS_TTL_SHORT=12h
+  MECHANIC_REFRESH_TTL_DAYS=30
+  API_KEY_PREFIX=cw_
+
+  # SMTP (leave blank to skip email)
+  SMTP_HOST=
+  SMTP_PORT=587
+  SMTP_SECURE=false
+  SMTP_USER=
+  SMTP_PASSWORD=
+  SMTP_FROM=no-reply@workshop.pioneeruae.com
+  SMTP_FROM_NAME=Car Workshop Platform
+
+  # SMS (leave blank to skip)
+  SMS_PROVIDER=
+  TWILIO_ACCOUNT_SID=
+  TWILIO_AUTH_TOKEN=
+  TWILIO_FROM_NUMBER=
+
+  # Web Push VAPID (generate: npx web-push generate-vapid-keys)
+  VAPID_PUBLIC_KEY=
+  VAPID_PRIVATE_KEY=
+  VAPID_SUBJECT=mailto:admin@workshop.pioneeruae.com
+
+  # Firebase (leave blank to skip)
+  FIREBASE_SERVICE_ACCOUNT_JSON=
+  FIREBASE_PROJECT_ID=
+
+  # AWS S3 (leave blank to use local ./uploads folder)
+  AWS_S3_BUCKET=
+  AWS_REGION=me-central-1
+  AWS_ACCESS_KEY_ID=
+  AWS_SECRET_ACCESS_KEY=
+
+  # Stripe
+  STRIPE_SECRET_KEY=
+  STRIPE_WEBHOOK_SECRET=
+
+  # Routing
+  OSRM_URL=https://router.project-osrm.org
+
+  # Cron
+  CRON_TZ=Asia/Dubai
+  VAT_ENABLED=true
+  VAT_RATE=5.0
+  PAST_DUE_SUSPEND_AFTER_DAYS=7
+  LOG_OTP_SECRET=false
+  ----------------------------------------------------------------
+
+  Save: Ctrl+O  Enter  Ctrl+X
+
+
+-- 2.4  Create MySQL database and run migrations -----------------------------
+
+  # Create database:
+  mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS car_workshop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+  # Run main schema migration:
+  mysql -u root -p car_workshop < /var/www/car-workshop/backend/src/migrations/car_workshop.sql
+
+  # Run post-migration patches:
+  mysql -u root -p car_workshop < /var/www/car-workshop/backend/src/migrations/post/00_schema_patches.sql
+  mysql -u root -p car_workshop < /var/www/car-workshop/backend/src/migrations/post/01_seed_countries.sql
+
+  # Verify tables were created:
+  mysql -u root -p -e "SHOW TABLES;" car_workshop
+
+
+-- 2.5  Start backend with PM2 -----------------------------------------------
+
+  cd /var/www/car-workshop/backend
+
+  pm2 start src/server.js \
+    --name car-workshop-backend \
+    --max-memory-restart 512M
+
+  pm2 status
+  pm2 logs car-workshop-backend --lines 50    # check for startup errors
+
+  # Save and enable PM2 on reboot:
+  pm2 save
+  pm2 startup systemd -u ubuntu --hp /home/ubuntu
+  # Run the printed "sudo env PATH=..." command
+
+
+-- 2.6  Verify backend is running -------------------------------------------
+
+  curl http://127.0.0.1:4000/health
+  # Expected: {"success":true,"service":"car-workshop-backend","status":"ok"}
+
+  curl http://127.0.0.1:4000/api/docs
+  # Expected: HTML page (Swagger UI)
+
+
+================================================================================
+PART 3 — DEPLOY FRONTEND
+================================================================================
+
+-- 3.1  Clone frontend and set production API URL ----------------------------
+
+  cd /tmp
+  git clone https://github.com/osamahkenawy/car-workshop-frontend.git frontend-src
+  cd frontend-src
+
+  # Set the API URL pointing to your domain:
+  echo "VITE_API_URL=http://workshop.pioneeruae.com/api" > .env.production
+
+
+-- 3.2  Install, build, deploy -----------------------------------------------
+
+  npm install
+  npm run build                          # output goes to dist/
+
+  sudo rm -rf /var/www/car-workshop/frontend/*
+  sudo cp -r dist/. /var/www/car-workshop/frontend/
+
+  ls /var/www/car-workshop/frontend/     # should show index.html + assets/
+
+
+================================================================================
+PART 4 — CONFIGURE NGINX
+================================================================================
+
+-- 4.1  Create Nginx site config --------------------------------------------
+
+  sudo tee /etc/nginx/sites-available/car-workshop > /dev/null << 'EOF'
+server {
+    listen 80;
+    server_name workshop.pioneeruae.com 130.61.83.110;
+
+    # ── Frontend SPA ───────────────────────────────────────────
+    root /var/www/car-workshop/frontend;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ── Backend REST API + Swagger UI ──────────────────────────
+    location /api/ {
+        proxy_pass         http://127.0.0.1:4000/api/;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade           $http_upgrade;
+        proxy_set_header   Connection        'upgrade';
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # ── Socket.IO ─────────────────────────────────────────────
+    location /socket.io/ {
+        proxy_pass         http://127.0.0.1:4000/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host       $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # ── Uploaded files ────────────────────────────────────────
+    location /uploads/ {
+        proxy_pass       http://127.0.0.1:4000/uploads/;
+        proxy_set_header Host $host;
+    }
+
+    client_max_body_size 50M;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript
+               text/xml application/xml image/svg+xml;
+    gzip_min_length 1000;
+}
+EOF
+
+
+-- 4.2  Enable site and reload Nginx -----------------------------------------
+
+  sudo ln -sf /etc/nginx/sites-available/car-workshop \
+              /etc/nginx/sites-enabled/car-workshop
+
+  # Remove default Nginx page (optional, only if no other apps on server):
+  # sudo rm -f /etc/nginx/sites-enabled/default
+
+  sudo nginx -t                          # test config — must say "ok"
+  sudo systemctl reload nginx
+
+
+================================================================================
+PART 5 — VERIFY FULL DEPLOYMENT
+================================================================================
+
+  Run these from the server terminal:
+
+  1. Backend health:
+       curl http://127.0.0.1:4000/health
+
+  2. API via Nginx:
+       curl http://130.61.83.110/api/health
+
+  3. Swagger UI (open in browser):
+       http://workshop.pioneeruae.com/api/docs
+       http://130.61.83.110/api/docs
+
+  4. Frontend (open in browser):
+       http://workshop.pioneeruae.com
+
+  5. PM2 process:
+       pm2 status
+       pm2 logs car-workshop-backend --lines 50
+
+  6. Nginx status:
+       sudo systemctl status nginx
+       sudo tail -20 /var/log/nginx/error.log
+
+  7. MySQL tables:
+       mysql -u root -p -e "SHOW TABLES;" car_workshop
+
+
+================================================================================
+PART 6 — FUTURE UPDATES (after pushing new code to GitHub)
+================================================================================
+
+-- Update Backend only -------------------------------------------------------
+
+  cd /var/www/car-workshop/backend
+  git pull origin main
+  npm install
+  pm2 restart car-workshop-backend
+  pm2 logs car-workshop-backend --lines 30
+
+
+-- Update Frontend only ------------------------------------------------------
+
+  cd /tmp/frontend-src
+  git pull origin main
+  npm install
+  npm run build
+  sudo rm -rf /var/www/car-workshop/frontend/*
+  sudo cp -r dist/. /var/www/car-workshop/frontend/
+  sudo systemctl reload nginx
+
+
+-- Update both (full redeploy) -----------------------------------------------
+
+  # Backend
+  cd /var/www/car-workshop/backend
+  git pull origin main && npm install && pm2 restart car-workshop-backend
+
+  # Frontend
+  cd /tmp/frontend-src
+  git pull origin main && npm install && npm run build
+  sudo rm -rf /var/www/car-workshop/frontend/* && sudo cp -r dist/. /var/www/car-workshop/frontend/
+  sudo systemctl reload nginx
+
+
+-- If /tmp/frontend-src no longer exists, re-clone first: -------------------
+
+  rm -rf /tmp/frontend-src
+  git clone https://github.com/osamahkenawy/car-workshop-frontend.git /tmp/frontend-src
+  echo "VITE_API_URL=http://workshop.pioneeruae.com/api" > /tmp/frontend-src/.env.production
+
+
+================================================================================
+PART 7 — SWAGGER / API DOCS
+================================================================================
+
+  The Swagger UI is served directly by the backend at:
+
+    http://workshop.pioneeruae.com/api/docs   ← via Nginx proxy
+    http://127.0.0.1:4000/api/docs            ← direct on server
+
+  What's documented:
+    • 393 API paths across 35 tags
+    • Auth (JWT Bearer) and External API (X-API-Key) security schemes
+    • All route groups: Auth, Work Orders, Mechanics, Customers,
+      Vehicles, Invoices, Wallet, Reports, Super Admin, and more
+
+  To use protected endpoints in the Swagger UI:
+    1. Call POST /api/auth/login to get a JWT token
+    2. Click "Authorize" (lock icon) in the top right
+    3. Enter:  Bearer <your-token>
+    4. All authenticated requests will include the token
+
+  The spec file is at:
+    /var/www/car-workshop/backend/src/swagger.yaml
+
+
+================================================================================
+PART 8 — TROUBLESHOOTING
+================================================================================
+
+PROBLEM: npm install fails with EACCES / permission error
+  sudo chown -R ubuntu:ubuntu /var/www/car-workshop
+  cd /var/www/car-workshop/backend && npm install
+
+PROBLEM: Backend crash on startup — "Cannot find module 'swagger-ui-express'"
+  cd /var/www/car-workshop/backend
+  npm install     # NOT --omit=dev, swagger packages are in dependencies
+
+PROBLEM: curl http://127.0.0.1:4000/health → Connection refused
+  pm2 logs car-workshop-backend --lines 100
+  # Check for DB connection error, missing .env, or port conflict
+
+PROBLEM: Nginx 502 Bad Gateway
+  pm2 status
+  pm2 restart car-workshop-backend
+  sudo systemctl reload nginx
+
+PROBLEM: Nginx 404 on /api/docs
+  # Make sure Nginx is proxying /api/ correctly:
+  sudo nginx -t
+  curl http://127.0.0.1:4000/api/docs    # test backend directly
+
+PROBLEM: MySQL "ERROR 1045: Access denied for user 'root'"
+  sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'NewPassword'; FLUSH PRIVILEGES;"
+  # Then update DB_PASSWORD in .env and: pm2 restart car-workshop-backend
+
+PROBLEM: Frontend builds but shows blank page
+  # Check browser console for errors
+  # Ensure VITE_API_URL was set before running npm run build
+  cat /tmp/frontend-src/.env.production
+
+PROBLEM: PM2 not running after server reboot
+  pm2 startup systemd -u ubuntu --hp /home/ubuntu
+  # Run the printed sudo command, then:
+  pm2 save
+
+PROBLEM: Port 80 not reachable from outside
+  sudo ufw status
+  sudo ufw allow 'Nginx HTTP'
+  sudo ufw reload
+
+
+================================================================================
+PART 9 — USEFUL COMMANDS REFERENCE
+================================================================================
+
+  pm2 status                              # all processes
+  pm2 logs car-workshop-backend           # live logs (Ctrl+C to exit)
+  pm2 logs car-workshop-backend --lines 100
+  pm2 restart car-workshop-backend        # restart
+  pm2 stop car-workshop-backend           # stop
+  pm2 monit                               # CPU/RAM monitor
+
+  sudo systemctl status nginx
+  sudo systemctl reload nginx             # reload without downtime
+  sudo nginx -t                           # test config syntax
+
+  sudo systemctl status mysql
+  mysql -u root -p
+
+  sudo tail -f /var/log/nginx/error.log
+  sudo tail -f /var/log/nginx/access.log
+  sudo journalctl -u nginx -f
+
+  df -h                                   # disk space
+  free -h                                 # memory
+  top / htop                              # processes
+
+
+================================================================================
+END OF GUIDE
+================================================================================

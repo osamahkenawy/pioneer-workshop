@@ -1,0 +1,304 @@
+/* Customer Experience dashboard — sentiment-driven palette layered on top of
+   the app's navy structural base: green = promoter/good, amber = passive/
+   watch, red = detractor/urgent. Reports.css supplies only structural
+   utilities here (.filter-date, .rpt-btn, .rpt-empty, .rpt-loading,
+   .skeleton-pulse, .od-items-table) — everything visual is custom below. */
+
+:root {
+  --cx-green: #16a34a;      --cx-green-tint: #e7f3ec;
+  --cx-amber: #d97706;      --cx-amber-tint: #fdf2e0;
+  --cx-red: #dc2626;        --cx-red-tint: #fdeeea;
+  --cx-cool: #0ea5e9;       --cx-cool-tint: #e6f6fd;
+  --cx-navy: #16233b;
+}
+
+.cx-banner {
+  margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; font-size: 14px; border: 1px solid;
+}
+.cx-banner.is-ok    { border-color: #cfe4d8; background: var(--cx-green-tint); color: #14503d; }
+.cx-banner.is-error { border-color: #f6dede; background: var(--cx-red-tint); color: #8c2818; }
+
+.cx-controls {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 24px;
+}
+
+/* ── Date range pill ──────────────────────────────────────────────── */
+.cx-daterange {
+  display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #e2e7f0;
+  border-radius: 14px; padding: 6px 8px; box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+}
+.cx-date-field {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: 10px;
+  transition: background .15s ease;
+}
+.cx-date-field:focus-within { background: var(--cx-cool-tint); }
+.cx-date-icon { color: var(--cx-cool); flex: none; }
+.cx-date-field-label {
+  display: block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: #94a3b8; line-height: 1.4;
+}
+.cx-date-input {
+  border: none; background: transparent; padding: 0; font-size: 13.5px; font-weight: 600;
+  color: var(--cx-navy); font-family: inherit; line-height: 1.3; cursor: pointer;
+}
+.cx-date-input:focus { outline: none; }
+.cx-date-input::-webkit-calendar-picker-indicator {
+  filter: invert(58%) sepia(78%) saturate(1000%) hue-rotate(165deg); cursor: pointer;
+}
+.cx-daterange-arrow { color: #cbd5e1; font-size: 14px; flex: none; }
+
+.cx-refresh-btn {
+  display: inline-flex; align-items: center; gap: 7px; border: none; cursor: pointer;
+  background: linear-gradient(135deg, #16233b, #22335a); color: #fff; font-size: 13px; font-weight: 600;
+  padding: 11px 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(22, 35, 59, .25);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.cx-refresh-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(22, 35, 59, .32); }
+.cx-refresh-btn:disabled { opacity: .7; cursor: default; }
+.cx-spin { animation: cx-spin 0.8s linear infinite; }
+@keyframes cx-spin { to { transform: rotate(360deg); } }
+
+/* ── Section headers ─────────────────────────────────────────────── */
+.cx-section-head {
+  display: flex; align-items: center; gap: 10px; margin: 32px 0 14px;
+}
+.cx-section-head h2 {
+  font-size: 16px; font-weight: 700; color: var(--cx-navy); margin: 0;
+}
+.cx-section-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.cx-section-head--warm .cx-section-dot { background: var(--cx-red); box-shadow: 0 0 0 4px var(--cx-red-tint); }
+.cx-section-head--cool .cx-section-dot { background: var(--cx-cool); box-shadow: 0 0 0 4px var(--cx-cool-tint); }
+.cx-section-count {
+  background: var(--cx-red); color: #fff; font-size: 12px; font-weight: 700;
+  padding: 1px 9px; border-radius: 999px; line-height: 1.6;
+}
+
+/* ── Hero: NPS gauge + vitals ─────────────────────────────────────── */
+.cx-hero {
+  display: flex; gap: 24px; flex-wrap: wrap; align-items: stretch;
+  background: linear-gradient(135deg, #16233b 0%, #22335a 100%);
+  border-radius: 20px; padding: 28px; margin-bottom: 8px;
+}
+.cx-hero-gauge {
+  flex: 0 0 260px; display: flex; flex-direction: column; align-items: center;
+  background: #fff; border-radius: 16px; padding: 18px 20px 20px;
+}
+.cx-gauge-svg { display: block; }
+.cx-gauge-number { font-size: 32px; font-weight: 800; fill: #16233b; }
+.cx-gauge-caption { font-size: 11px; font-weight: 700; letter-spacing: .08em; fill: #94a3b8; }
+.cx-gauge-endlabel { font-size: 10px; fill: #b7c0cf; }
+.cx-gauge-value-arc { transition: stroke-dasharray .6s ease; }
+
+.cx-band-pill {
+  font-size: 12px; font-weight: 700; padding: 3px 12px; border-radius: 999px; margin-top: 2px;
+}
+
+.cx-nps-split { width: 100%; margin-top: 16px; }
+.cx-nps-split-bar {
+  display: flex; width: 100%; height: 8px; border-radius: 999px; overflow: hidden; background: #eef1f6;
+}
+.cx-nps-split-bar span { display: block; height: 100%; transition: width .5s ease; }
+.cx-nps-split-legend {
+  display: flex; justify-content: space-between; gap: 6px; margin-top: 8px;
+  font-size: 10.5px; color: #64748b; flex-wrap: wrap;
+}
+.cx-nps-split-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.cx-nps-split-legend i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+.cx-hero-vitals {
+  flex: 1 1 420px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; align-content: center;
+}
+.cx-vital {
+  display: flex; align-items: center; gap: 12px; background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 14px 16px;
+}
+.cx-vital-icon {
+  flex: none; width: 36px; height: 36px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+}
+.cx-vital-value { font-size: 20px; font-weight: 800; color: #fff; line-height: 1.1; }
+.cx-vital-unit { font-size: 12px; font-weight: 600; color: rgba(255,255,255,.55); margin-inline-start: 2px; }
+.cx-vital-label { font-size: 11.5px; color: rgba(255,255,255,.68); margin-top: 2px; }
+.cx-vital-sub { font-size: 10.5px; color: rgba(255,255,255,.48); margin-top: 1px; }
+.cx-vital--pulse .cx-vital-icon { animation: cx-pulse 1.8s ease-in-out infinite; }
+@keyframes cx-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+}
+
+/* ── Needs attention: ticket cards ───────────────────────────────── */
+.cx-all-clear {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 36px 20px; border: 1px dashed #cfe4d8; background: var(--cx-green-tint);
+  border-radius: 14px; text-align: center;
+}
+.cx-all-clear-icon {
+  width: 48px; height: 48px; border-radius: 50%; background: #fff; color: var(--cx-green);
+  display: flex; align-items: center; justify-content: center;
+}
+.cx-all-clear p { margin: 0; color: #14503d; font-size: 13.5px; font-weight: 500; }
+
+.cx-attention-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;
+}
+.cx-ticket {
+  background: #fff; border: 1px solid #e6eaf1; border-inline-start: 4px solid transparent;
+  border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+  transition: opacity .5s ease, transform .5s ease;
+}
+.cx-ticket--red   { border-inline-start-color: var(--cx-red); }
+.cx-ticket--amber { border-inline-start-color: var(--cx-amber); }
+.cx-ticket--green { border-inline-start-color: var(--cx-green); }
+.cx-ticket.is-resolving { opacity: 0; transform: translateX(8px); }
+
+.cx-ticket-top { display: flex; align-items: flex-start; gap: 10px; }
+.cx-avatar {
+  flex: none; width: 34px; height: 34px; border-radius: 50%; font-size: 12px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+}
+.cx-ticket-who { min-width: 0; flex: 1; }
+.cx-ticket-name { font-weight: 700; font-size: 13.5px; color: var(--cx-navy); }
+.cx-ticket-meta { display: flex; align-items: center; gap: 10px; margin-top: 3px; font-size: 11.5px; color: #7d8494; }
+.cx-ticket-meta span { display: inline-flex; align-items: center; gap: 4px; }
+.cx-score-badge {
+  flex: none; width: 30px; height: 30px; border-radius: 50%; border: 2px solid;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800;
+}
+
+.cx-ticket-quote {
+  display: flex; gap: 8px; background: #f8fafc; border-radius: 10px; padding: 10px 12px;
+}
+.cx-quote-mark { flex: none; color: #cbd5e1; margin-top: 1px; }
+.cx-ticket-quote p {
+  margin: 0; font-size: 12.5px; font-style: italic; color: #475569; line-height: 1.45;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+
+.cx-ticket-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cx-resolution-chip {
+  background: var(--cx-red-tint); color: #b3341f; font-weight: 600; font-size: 11px;
+  padding: 2px 9px; border-radius: 999px;
+}
+.cx-resolve-btn {
+  margin-inline-start: auto; display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid #d8dee9; background: #fff; color: var(--cx-navy); font-size: 12px; font-weight: 600;
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap; transition: all .15s ease;
+}
+.cx-resolve-btn:hover:not(:disabled) { background: var(--cx-navy); color: #fff; border-color: var(--cx-navy); }
+.cx-resolve-btn:disabled { opacity: .6; cursor: default; }
+
+/* ── Booking & loyalty: cool-toned panel ─────────────────────────── */
+.cx-cool-panel {
+  background: var(--cx-cool-tint); border: 1px solid #d3ecf9; border-radius: 16px; padding: 18px;
+}
+.cx-vitals-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;
+}
+.cx-cool-panel .cx-vital {
+  background: #fff; border: 1px solid #e2effa;
+}
+.cx-cool-panel .cx-vital-value { color: var(--cx-navy); }
+.cx-cool-panel .cx-vital-unit { color: #94a3b8; }
+.cx-cool-panel .cx-vital-label { color: #5b6678; }
+.cx-cool-panel .cx-vital-sub { color: #94a3b8; }
+
+/* ── Footer row: contact channels + complaints roadmap ───────────── */
+.cx-footer-row {
+  display: flex; gap: 16px; flex-wrap: wrap; margin-top: 24px;
+}
+.cx-channel-card {
+  flex: 1 1 320px; background: #fff; border: 1px solid #e6eaf1; border-radius: 14px; padding: 18px;
+}
+.cx-footer-card-head h4 { margin: 0 0 12px; font-size: 14px; color: var(--cx-navy); }
+.cx-channel-bars { display: flex; flex-direction: column; gap: 10px; }
+.cx-channel-bar-row { display: grid; grid-template-columns: 100px 1fr 28px; align-items: center; gap: 10px; }
+.cx-channel-bar-label {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #475569; white-space: nowrap;
+}
+.cx-channel-bar-track { background: #eef1f6; border-radius: 999px; height: 8px; overflow: hidden; }
+.cx-channel-bar-fill { height: 100%; background: linear-gradient(90deg, #0ea5e9, #6366f1); border-radius: 999px; }
+.cx-channel-bar-count { font-size: 12.5px; font-weight: 700; color: var(--cx-navy); text-align: end; }
+.cx-footnote { font-size: 11px; color: #94a3b8; margin: 12px 0 0; }
+
+.cx-roadmap-card {
+  flex: 1 1 280px; position: relative; display: flex; flex-direction: column; gap: 12px;
+  border: 1px solid #e6eaf1; background: #fff; border-radius: 14px; padding: 18px;
+}
+.cx-roadmap-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cx-roadmap-card strong { font-size: 14px; color: var(--cx-navy); }
+.cx-roadmap-card p { margin: 0; font-size: 12.5px; color: #7d8494; line-height: 1.5; }
+.cx-roadmap-link {
+  display: inline-flex; align-items: center; gap: 5px; border: none; background: none; cursor: pointer;
+  color: var(--cx-cool); font-size: 12px; font-weight: 700; padding: 0; white-space: nowrap;
+}
+.cx-roadmap-link:hover { text-decoration: underline; }
+
+.cx-mini-vitals { display: flex; gap: 18px; }
+.cx-mini-vital { display: flex; flex-direction: column; gap: 2px; }
+.cx-mini-vital-value { font-size: 20px; font-weight: 800; color: var(--cx-navy); }
+.cx-mini-vital-label { font-size: 10.5px; color: #94a3b8; }
+
+@media (max-width: 640px) {
+  .cx-hero { flex-direction: column; }
+  .cx-hero-gauge { flex-basis: auto; }
+}
+
+/* ── Branch filter ────────────────────────────────────────────────── */
+.cx-branch-select {
+  flex: 0 0 auto; width: auto; max-width: 230px;
+  height: 44px; padding: 0 12px;
+  border: 1px solid #e2e7f0; border-radius: 14px;
+  background: #fff; color: var(--cx-navy);
+  font-size: 13.5px; font-weight: 600; font-family: inherit; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+}
+.cx-branch-select:focus { outline: none; border-color: var(--cx-cool); }
+
+.cx-branch-note {
+  margin: -8px 0 18px; font-size: 12.5px; color: #7d8494;
+  padding: 9px 13px; border-radius: 9px;
+  background: var(--cx-cool-tint); border: 1px solid #d3ecf9;
+}
+
+/* ── Clickable NPS segments ───────────────────────────────────────
+   The bar doubles as a drill-down into that segment's responses, so the
+   segments are real buttons: keyboard reachable and with a visible hover,
+   not just a tinted div with an onClick. */
+.cx-nps-split-bar .cx-nps-seg {
+  display: block; height: 100%; border: 0; padding: 0;
+  cursor: pointer; transition: filter .15s ease;
+}
+.cx-nps-split-bar .cx-nps-seg:hover { filter: brightness(1.12) saturate(1.1); }
+.cx-nps-split-bar .cx-nps-seg:focus-visible {
+  outline: 2px solid var(--cx-navy); outline-offset: 1px;
+}
+
+.cx-nps-legend-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 0; background: none; padding: 2px 0; cursor: pointer;
+  font-size: 10.5px; color: #64748b; font-family: inherit; white-space: nowrap;
+}
+.cx-nps-legend-btn:hover { color: var(--cx-navy); text-decoration: underline; }
+.cx-nps-legend-btn i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+.cx-export-btn {
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  background: #fff; color: var(--cx-navy); font-size: 13px; font-weight: 600;
+  padding: 11px 16px; border-radius: 12px; border: 1px solid #e2e7f0;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04); transition: border-color .15s ease, color .15s ease;
+}
+.cx-export-btn:hover:not(:disabled) { border-color: var(--cx-cool); color: var(--cx-cool); }
+.cx-export-btn:disabled { opacity: .55; cursor: default; }
+
+/* CSV sits beside Excel as the secondary choice: same shape, unfilled and
+   lighter, so the pair reads as one control with a default rather than as two
+   buttons of equal weight. */
+.cx-export-btn.is-secondary {
+  background: transparent;
+  box-shadow: none;
+  font-weight: 500;
+  padding-left: 13px;
+  padding-right: 13px;
+}

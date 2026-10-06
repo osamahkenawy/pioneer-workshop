@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pioneer Car Service Center — Retail Customer Journey Map</title>
+<style>
+:root{--ink:#13232B;--soft:#4C5C64;--amber:#E9A200;--oxide:#A93F28;--service:#1C6B52;--blue:#2E5E7E;--slate:#5A4632;--hair:#D2D5D1;}
+*{box-sizing:border-box}
+body{margin:0;background:#EDEEEA;color:var(--ink);font-family:"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.55}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+header.top{padding:46px 0 28px;border-bottom:2px solid var(--ink)}
+.kicker{font-family:Consolas,monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--soft);margin:0 0 14px}
+h1{font-size:clamp(26px,5vw,40px);line-height:1.05;margin:0 0 14px;letter-spacing:-.02em;font-weight:700}
+.lede{max-width:64ch;color:var(--soft);margin:0;font-size:15.5px}
+.reg{display:grid;gap:12px;grid-template-columns:1fr;margin:26px 0 0}
+@media(min-width:780px){.reg{grid-template-columns:1fr 1fr 1fr}}
+.rc{background:#fff;border:1px solid var(--hair);padding:15px}
+.rc h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--amber)}
+.rc p{margin:0;font-size:13.5px;color:var(--soft)}
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin:30px 0 10px}
+.lg{display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--hair);padding:7px 11px;
+ font-family:Consolas,monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.sw{width:22px;height:13px;flex:none;border:1.5px solid var(--ink);background:#fff}
+.sw.term{border-radius:7px;background:var(--ink)}
+.sw.dec{background:#FDF2D6;border-color:var(--amber);clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
+.sw.sys{background:#E7F0EB;border-color:var(--service)}
+.sw.gap{background:#fff;border-color:var(--oxide);border-style:dashed}
+.sw.ins{background:#E6EEF4;border-color:var(--blue)}
+.sw.self{background:#F2EEE7;border-color:#5A4632}
+.sw.crit{background:#F7EBE7;border-color:var(--oxide);border-width:2.5px}
+.frame{background:#fff;border:1px solid var(--hair);overflow-x:auto;-webkit-overflow-scrolling:touch}
+.frame svg{display:block}
+.hint{font-family:Consolas,monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft);margin:8px 0 0}
+footer{margin-top:56px;padding:22px 0 56px;border-top:2px solid var(--ink);
+ font-family:Consolas,monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <p class="kicker">Pioneer Car Service Center · External retail customer journey</p>
+  <h1>One journey, three service tiers, two payer paths, three exception routes.</h1>
+  <p class="lede">A single consolidated map of the retail customer journey. It reads in three registers: which stages apply to each service tier, the core process spine with the self-pay and insurance routes shown as separate lanes, and the exception journeys that branch off the spine and rejoin it on resolution.</p>
+  <div class="reg">
+    <div class="rc"><h4>Register 1 — Service tier</h4><p>The band above the lanes shows which of the eleven stages each tier touches. A routine service skips diagnosis, quotation and approval entirely; a major repair uses every stage.</p></div>
+    <div class="rc"><h4>Register 2 — The spine</h4><p>Eight lanes across eleven stages. The payer route forks at triage in stage 02 and rejoins at settlement in stage 10. Insurance steps are shown in blue.</p></div>
+    <div class="rc"><h4>Register 3 — Exceptions</h4><p>Three off-ramps below the spine, each labelled with the stage it branches from: quote revision, rework and comeback, and refund or dispute.</p></div>
+  </div>
+  <div class="legend">
+    <span class="lg"><span class="sw term"></span>Start / end</span>
+    <span class="lg"><span class="sw"></span>Process step</span>
+    <span class="lg"><span class="sw dec"></span>Decision</span>
+    <span class="lg"><span class="sw self"></span>Self-pay path</span>
+    <span class="lg"><span class="sw ins"></span>Insurance path</span>
+    <span class="lg"><span class="sw sys"></span>System in place</span>
+    <span class="lg"><span class="sw gap"></span>System gap — interim manual control</span>
+    <span class="lg"><span class="sw crit"></span>Critical moment</span>
+  </div>
+</header>
+
+<div class="frame" style="margin-top:26px"><svg viewBox="0 0 2586 2038" width="2586" height="2038" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pioneer retail customer journey map">
+<defs>
+<marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#4C5C64"/></marker>
+<marker id="arO" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#A93F28"/></marker>
+<marker id="arG" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#1C6B52"/></marker>
+<marker id="arB" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#2E5E7E"/></marker>
+<marker id="arS" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#5A4632"/></marker>
+</defs>
+<rect x="0" y="0" width="2586" height="2038" fill="#FFFFFF"/>
+<rect x="0" y="460" width="2586" height="128" fill="#FFFFFF"/>
+<rect x="0" y="460" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="460" x2="2586" y2="460" stroke="#D2D5D1"/>
+<text x="18" y="522.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">CUSTOMER</text>
+<text x="18" y="538.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Retail vehicle owner</text>
+<rect x="0" y="588" width="2586" height="128" fill="#F5F5F2"/>
+<rect x="0" y="588" width="190" height="128" fill="#3C4A52"/>
+<line x1="0" y1="588" x2="2586" y2="588" stroke="#D2D5D1"/>
+<text x="18" y="650.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">MARKETING &amp; DEMAND</text>
+<text x="18" y="666.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Sourcing, conversion, retention</text>
+<rect x="0" y="716" width="2586" height="128" fill="#FFFFFF"/>
+<rect x="0" y="716" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="716" x2="2586" y2="716" stroke="#D2D5D1"/>
+<text x="18" y="778.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">SERVICE RECEPTION</text>
+<text x="18" y="794.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Advisor, front office, comms</text>
+<rect x="0" y="844" width="2586" height="128" fill="#F5F5F2"/>
+<rect x="0" y="844" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="844" x2="2586" y2="844" stroke="#D2D5D1"/>
+<text x="18" y="906.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">WORKSHOP</text>
+<text x="18" y="922.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Foreman and technicians</text>
+<rect x="0" y="972" width="2586" height="128" fill="#FFFFFF"/>
+<rect x="0" y="972" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="972" x2="2586" y2="972" stroke="#D2D5D1"/>
+<text x="18" y="1034.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">PARTS</text>
+<text x="18" y="1050.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Stores and procurement</text>
+<rect x="0" y="1100" width="2586" height="128" fill="#F5F5F2"/>
+<rect x="0" y="1100" width="190" height="128" fill="#5A4632"/>
+<line x1="0" y1="1100" x2="2586" y2="1100" stroke="#D2D5D1"/>
+<text x="18" y="1162.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">SELF-PAY PATH</text>
+<text x="18" y="1178.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Customer is the payer</text>
+<rect x="0" y="1228" width="2586" height="128" fill="#FFFFFF"/>
+<rect x="0" y="1228" width="190" height="128" fill="#2E5E7E"/>
+<line x1="0" y1="1228" x2="2586" y2="1228" stroke="#D2D5D1"/>
+<text x="18" y="1290.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">INSURANCE PATH</text>
+<text x="18" y="1306.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Insurer is the payer</text>
+<rect x="0" y="1356" width="2586" height="128" fill="#F5F5F2"/>
+<rect x="0" y="1356" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="1356" x2="2586" y2="1356" stroke="#D2D5D1"/>
+<text x="18" y="1418.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">FINANCE</text>
+<text x="18" y="1434.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">Invoicing and settlement</text>
+<rect x="0" y="1484" width="2586" height="128" fill="#FFFFFF"/>
+<rect x="0" y="1484" width="190" height="128" fill="#13232B"/>
+<line x1="0" y1="1484" x2="2586" y2="1484" stroke="#D2D5D1"/>
+<text x="18" y="1546.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">SYSTEMS &amp; RECORDS</text>
+<text x="18" y="1562.0" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">In place / interim manual</text>
+<line x1="190" y1="284" x2="190" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="386" y1="284" x2="386" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="582" y1="284" x2="582" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="778" y1="284" x2="778" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="974" y1="284" x2="974" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="1170" y1="284" x2="1170" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="1366" y1="284" x2="1366" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="1562" y1="284" x2="1562" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="1758" y1="284" x2="1758" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="1954" y1="284" x2="1954" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="2150" y1="284" x2="2150" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="2346" y1="284" x2="2346" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<line x1="2542" y1="284" x2="2542" y2="1612" stroke="#D2D5D1" stroke-width="0.7" stroke-dasharray="2 5"/>
+<rect x="0" y="46" width="2586" height="238" fill="#FFFFFF"/>
+<rect x="0" y="46" width="190" height="238" fill="#2A3942"/>
+<text x="18" y="86" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.5">CUSTOMER SOURCING</text>
+<text x="18" y="104" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#93A3AB">How demand reaches us</text>
+<text x="18" y="138" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7E8E96">Source is recorded</text>
+<text x="18" y="152" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7E8E96">at the point of capture,</text>
+<text x="18" y="166" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7E8E96">so conversion can be</text>
+<text x="18" y="180" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7E8E96">measured by channel.</text>
+<rect x="214" y="80" width="396" height="24" fill="#1C6B52"/>
+<text x="226" y="96" font-family="Consolas,monospace" font-size="10" font-weight="bold" fill="#FFFFFF" letter-spacing="1.1">OWNED AND REPEAT</text>
+<rect x="214" y="110" width="396" height="36" fill="#E7F0EB" stroke="#1C6B52" stroke-width="1.1"/>
+<text x="226" y="132" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Service reminder raised from our own vehicle record</text>
+<rect x="214" y="154" width="396" height="36" fill="#E7F0EB" stroke="#1C6B52" stroke-width="1.1"/>
+<text x="226" y="176" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Returning customer with a service history held here</text>
+<rect x="214" y="198" width="396" height="36" fill="#E7F0EB" stroke="#1C6B52" stroke-width="1.1"/>
+<text x="226" y="220" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Referral from an existing customer</text>
+<rect x="632" y="80" width="396" height="24" fill="#E9A200"/>
+<text x="644" y="96" font-family="Consolas,monospace" font-size="10" font-weight="bold" fill="#FFFFFF" letter-spacing="1.1">SEARCH AND DISCOVERY</text>
+<rect x="632" y="110" width="396" height="36" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.1"/>
+<text x="644" y="132" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Google Business Profile and maps listing</text>
+<rect x="632" y="154" width="396" height="36" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.1"/>
+<text x="644" y="176" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Ratings and published customer reviews</text>
+<rect x="632" y="198" width="396" height="36" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.1"/>
+<text x="644" y="220" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Website and published price menu</text>
+<rect x="1050" y="80" width="396" height="24" fill="#4C5C64"/>
+<text x="1062" y="96" font-family="Consolas,monospace" font-size="10" font-weight="bold" fill="#FFFFFF" letter-spacing="1.1">PASSING AND LOCAL</text>
+<rect x="1050" y="110" width="396" height="36" fill="#EDEEEA" stroke="#4C5C64" stroke-width="1.1"/>
+<text x="1062" y="132" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Drive-past, walk-in and forecourt visibility</text>
+<rect x="1050" y="154" width="396" height="36" fill="#EDEEEA" stroke="#4C5C64" stroke-width="1.1"/>
+<text x="1062" y="176" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Site signage and local presence</text>
+<rect x="1050" y="198" width="396" height="36" fill="#EDEEEA" stroke="#4C5C64" stroke-width="1.1"/>
+<text x="1062" y="220" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Neighbouring businesses and community networks</text>
+<rect x="1468" y="80" width="396" height="24" fill="#2E5E7E"/>
+<text x="1480" y="96" font-family="Consolas,monospace" font-size="10" font-weight="bold" fill="#FFFFFF" letter-spacing="1.1">PARTNER AND REFERRED</text>
+<rect x="1468" y="110" width="396" height="36" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.1"/>
+<text x="1480" y="132" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Insurer approved-repairer panel referral</text>
+<rect x="1468" y="154" width="396" height="36" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.1"/>
+<text x="1480" y="176" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Corporate and small-fleet account agreements</text>
+<rect x="1468" y="198" width="396" height="36" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.1"/>
+<text x="1480" y="220" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Recovery operator, roadside assistance, dealer overflow</text>
+<polyline points="1842,128.0 1868,128.0 1868,172.0" fill="none" stroke="#4C5C64" stroke-width="1.3"/>
+<polyline points="1842,172.0 1868,172.0 1868,172.0" fill="none" stroke="#4C5C64" stroke-width="1.3"/>
+<polyline points="1842,216.0 1868,216.0 1868,172.0" fill="none" stroke="#4C5C64" stroke-width="1.3"/>
+<line x1="1868" y1="172.0" x2="1912" y2="172.0" stroke="#4C5C64" stroke-width="1.6" marker-end="url(#ar)"/>
+<rect x="1912" y="130.0" width="268" height="84" fill="#13232B"/>
+<text x="2046.0" y="158.0" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">ENQUIRY RECEIVED</text>
+<text x="2046.0" y="178.0" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#B8C4CA">Phone · WhatsApp · website</text>
+<text x="2046.0" y="194.0" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#B8C4CA">form · walk-in · partner hand-off</text>
+<text x="2046.0" y="230.0" text-anchor="middle" font-family="Consolas,monospace" font-size="9.5" fill="#E9A200" letter-spacing="0.8">ENTERS THE JOURNEY AT STAGE 02</text>
+<line x1="0" y1="284" x2="2586" y2="284" stroke="#13232B" stroke-width="1.5"/>
+<rect x="0" y="284" width="2586" height="52" fill="#EDEEEA"/>
+<rect x="0" y="284" width="190" height="52" fill="#DCDED9"/>
+<text x="18" y="315" font-family="Consolas,monospace" font-size="10" fill="#4C5C64" letter-spacing="1.2">JOURNEY STAGE</text>
+<text x="288.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">01</text>
+<text x="288.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Awareness &amp; demand</text>
+<text x="484.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">02</text>
+<text x="484.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Enquiry &amp; quotation</text>
+<text x="680.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">03</text>
+<text x="680.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Booking &amp; triage</text>
+<text x="876.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">04</text>
+<text x="876.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Drop-off &amp; check-in</text>
+<text x="1072.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">05</text>
+<text x="1072.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Inspection &amp; diagnosis</text>
+<text x="1268.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">06</text>
+<text x="1268.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Assessment &amp; quote</text>
+<text x="1464.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">07</text>
+<text x="1464.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Approval to proceed</text>
+<text x="1660.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">08</text>
+<text x="1660.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Parts sourcing</text>
+<text x="1856.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">09</text>
+<text x="1856.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Repair &amp; updates</text>
+<text x="2052.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">10</text>
+<text x="2052.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Quality check</text>
+<text x="2248.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">11</text>
+<text x="2248.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Handover &amp; settlement</text>
+<text x="2444.0" y="304" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#E9A200" font-weight="bold">12</text>
+<text x="2444.0" y="321" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#13232B">Follow-up &amp; closure</text>
+<rect x="0" y="336" width="2586" height="124" fill="#FFFFFF"/>
+<text x="18" y="352" font-family="Consolas,monospace" font-size="9.5" fill="#4C5C64" letter-spacing="1.2">SERVICE TIER — WHICH STAGES APPLY</text>
+<text x="18" y="373" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" fill="#13232B">TIER 1  ·  Quick / routine service</text>
+<text x="18" y="384" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="8.6" fill="#9AA5AB">Self-pay only</text>
+<rect x="244.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="440.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="636.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="832.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1028.0" y="363" width="88" height="15" fill="none" stroke="#D2D5D1" stroke-dasharray="3 3"/>
+<text x="1072.0" y="374" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#9AA5AB">n/a</text>
+<rect x="1224.0" y="363" width="88" height="15" fill="none" stroke="#D2D5D1" stroke-dasharray="3 3"/>
+<text x="1268.0" y="374" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#9AA5AB">n/a</text>
+<rect x="1420.0" y="363" width="88" height="15" fill="none" stroke="#D2D5D1" stroke-dasharray="3 3"/>
+<text x="1464.0" y="374" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#9AA5AB">n/a</text>
+<rect x="1616.0" y="363" width="88" height="15" fill="none" stroke="#D2D5D1" stroke-dasharray="3 3"/>
+<text x="1660.0" y="374" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#9AA5AB">n/a</text>
+<rect x="1812.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2008.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2204.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2400.0" y="363" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<text x="18" y="403" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" fill="#13232B">TIER 2  ·  Diagnostic / repair</text>
+<text x="18" y="414" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="8.6" fill="#9AA5AB">Self-pay or insurance</text>
+<rect x="244.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="440.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="636.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="832.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1028.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1224.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1420.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1616.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1812.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2008.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2204.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2400.0" y="393" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<text x="18" y="433" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" fill="#13232B">TIER 3  ·  Major / complex repair</text>
+<text x="18" y="444" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="8.6" fill="#9AA5AB">Tow-in, assessor, multi-day</text>
+<rect x="244.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="440.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="636.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="832.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1028.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1224.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1420.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1616.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="1812.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2008.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2204.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<rect x="2400.0" y="423" width="88" height="15" fill="#E9A200" opacity="0.85"/>
+<line x1="0" y1="460" x2="2586" y2="460" stroke="#13232B" stroke-width="1.5"/>
+<polyline points="288.0,623.0 288.0,553.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="365.0,524.0 407.0,524.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="484.0,553.0 484.0,751.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="484.0,809.0 484.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="561.0,780.0 582.0,780.0 582.0,524.0 603.0,524.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="680.0,565.0 680.0,623.0" fill="none" stroke="#A93F28" stroke-width="1.5" marker-end="url(#arO)"/>
+<text x="688.0" y="594.0" font-family="Consolas,monospace" font-size="9" fill="#A93F28">no</text>
+<polyline points="680.0,565.0 680.0,751.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="688.0" y="658.0" font-family="Consolas,monospace" font-size="9" fill="#4C5C64">yes</text>
+<polyline points="680.0,681.0 680.0,703.0 288.0,703.0 288.0,681.0" fill="none" stroke="#1C6B52" stroke-width="1.5" marker-end="url(#arG)"/>
+<text x="688.0" y="697.0" font-family="Consolas,monospace" font-size="9" fill="#1C6B52">nurture and re-offer</text>
+<polyline points="680.0,809.0 680.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="680.0,809.0 680.0,1135.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<text x="688.0" y="972.0" font-family="Consolas,monospace" font-size="9" fill="#5A4632">self-pay</text>
+<polyline points="680.0,809.0 680.0,1263.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<text x="688.0" y="1036.0" font-family="Consolas,monospace" font-size="9" fill="#2E5E7E">insurance</text>
+<polyline points="757.0,780.0 778.0,780.0 778.0,524.0 799.0,524.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="876.0,553.0 876.0,751.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="876.0,809.0 876.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="757.0,1164.0 1387.0,1164.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<polyline points="757.0,1292.0 799.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="953.0,780.0 974.0,780.0 974.0,908.0 995.0,908.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1072.0,937.0 1072.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="953.0,1292.0 995.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="1149.0,908.0 1191.0,908.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1268.0,879.0 1268.0,809.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1149.0,1292.0 1191.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="1345.0,780.0 1387.0,780.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1464.0,751.0 1464.0,553.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1464.0,809.0 1464.0,1123.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<text x="1472.0" y="966.0" font-family="Consolas,monospace" font-size="9" fill="#5A4632">self-pay</text>
+<polyline points="1345.0,1292.0 1387.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<text x="1346.0" y="1285.0" font-family="Consolas,monospace" font-size="9" fill="#2E5E7E">insurance</text>
+<polyline points="1464.0,1205.0 1464.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="1541.0,1164.0 1562.0,1164.0 1562.0,780.0 1583.0,780.0" fill="none" stroke="#A93F28" stroke-width="1.5" marker-end="url(#arO)"/>
+<text x="1548.0" y="1157.0" font-family="Consolas,monospace" font-size="9" fill="#A93F28">no</text>
+<polyline points="1541.0,1164.0 1562.0,1164.0 1562.0,1036.0 1583.0,1036.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="1548.0" y="1157.0" font-family="Consolas,monospace" font-size="9" fill="#4C5C64">yes</text>
+<polyline points="1541.0,1164.0 2171.0,1164.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<text x="1836.0" y="1157.0" font-family="Consolas,monospace" font-size="9" fill="#5A4632">approved</text>
+<polyline points="1541.0,1292.0 1562.0,1292.0 1562.0,1036.0 1583.0,1036.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="1548.0" y="1285.0" font-family="Consolas,monospace" font-size="9" fill="#4C5C64">yes</text>
+<polyline points="1541.0,1292.0 1562.0,1292.0 1562.0,780.0 1583.0,780.0" fill="none" stroke="#A93F28" stroke-width="1.5" marker-end="url(#arO)"/>
+<text x="1548.0" y="1285.0" font-family="Consolas,monospace" font-size="9" fill="#A93F28">declined</text>
+<polyline points="1541.0,1292.0 1583.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="1737.0,1036.0 1758.0,1036.0 1758.0,908.0 1779.0,908.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1856.0,879.0 1856.0,809.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="1856.0,751.0 1856.0,553.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="1737.0,1292.0 1779.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="1933.0,908.0 1975.0,908.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2052.0,949.0 2052.0,959.0 1856.0,959.0 1856.0,937.0" fill="none" stroke="#A93F28" stroke-width="1.5" marker-end="url(#arO)"/>
+<text x="2060.0" y="953.0" font-family="Consolas,monospace" font-size="9" fill="#A93F28">fail: rework</text>
+<polyline points="2129.0,908.0 2150.0,908.0 2150.0,780.0 2171.0,780.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="2136.0" y="901.0" font-family="Consolas,monospace" font-size="9" fill="#4C5C64">pass</text>
+<polyline points="2248.0,751.0 2248.0,553.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2248.0,809.0 2248.0,1135.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<text x="2256.0" y="972.0" font-family="Consolas,monospace" font-size="9" fill="#5A4632">self-pay</text>
+<polyline points="1933.0,1292.0 2171.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="2248.0,1193.0 2248.0,1391.0" fill="none" stroke="#5A4632" stroke-width="1.5" marker-end="url(#arS)"/>
+<polyline points="2248.0,1321.0 2248.0,1391.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="2248.0,1449.0 2248.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="2325.0,780.0 2367.0,780.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2325.0,1292.0 2367.0,1292.0" fill="none" stroke="#2E5E7E" stroke-width="1.5" marker-end="url(#arB)"/>
+<polyline points="2325.0,1420.0 2367.0,1420.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2444.0,809.0 2444.0,1519.0" fill="none" stroke="#1C6B52" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arG)"/>
+<polyline points="2444.0,751.0 2444.0,681.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2444.0,751.0 2444.0,553.0" fill="none" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polyline points="2444.0,681.0 2444.0,703.0 288.0,703.0 288.0,681.0" fill="none" stroke="#1C6B52" stroke-width="1.5" marker-end="url(#arG)"/>
+<text x="2452.0" y="697.0" font-family="Consolas,monospace" font-size="9" fill="#1C6B52">repeat and referral loop</text>
+<rect x="211.0" y="495.0" width="154" height="58" rx="29.0" fill="#13232B" stroke="#13232B"/>
+<text x="288.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#FFFFFF">Service due, fault</text>
+<text x="288.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#FFFFFF">or incident occurs</text>
+<rect x="211.0" y="623.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="288.0" y="649.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Arrives via one of the</text>
+<text x="288.0" y="661.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">channels shown above</text>
+<rect x="407.0" y="495.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="484.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Enquires by phone,</text>
+<text x="484.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">WhatsApp or in person</text>
+<rect x="407.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="484.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Logs enquiry and source;</text>
+<text x="484.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">quotes from catalogue</text>
+<path d="M407.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#FFFFFF" stroke="#A93F28" stroke-width="1.4" stroke-dasharray="5 3"/>
+<text x="484.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">Enquiry log and quote</text>
+<text x="484.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">GAP - manual today</text>
+<polygon points="680.0,483.0 757.0,524.0 680.0,565.0 603.0,524.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="680.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Proceeds with</text>
+<text x="680.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">booking?</text>
+<rect x="603.0" y="623.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="680.0" y="649.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Not converted: reason</text>
+<text x="680.0" y="661.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">logged, offer scheduled</text>
+<rect x="603.0" y="751.0" width="154" height="58" rx="3" fill="#F7EBE7" stroke="#A93F28" stroke-width="2.2"/>
+<text x="680.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Triage: symptom, tier</text>
+<text x="680.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and payer route</text>
+<text x="680.0" y="821.0" text-anchor="middle" font-family="Consolas,monospace" font-size="8.6" letter-spacing="0.6" fill="#A93F28">FORK POINT</text>
+<path d="M603.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#FFFFFF" stroke="#A93F28" stroke-width="1.4" stroke-dasharray="5 3"/>
+<text x="680.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">Booking and capacity</text>
+<text x="680.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">GAP - manual today</text>
+<rect x="603.0" y="1135.0" width="154" height="58" rx="3" fill="#F2EEE7" stroke="#5A4632" stroke-width="1.5"/>
+<text x="680.0" y="1161.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Identified as</text>
+<text x="680.0" y="1173.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">self-pay customer</text>
+<rect x="603.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="680.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Claim intent, insurer</text>
+<text x="680.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and claim number captured</text>
+<rect x="799.0" y="495.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="876.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Hands over vehicle</text>
+<text x="876.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and keys</text>
+<rect x="799.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="876.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Check-in, job card,</text>
+<text x="876.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">photo condition record</text>
+<path d="M799.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#E7F0EB" stroke="#1C6B52" stroke-width="1.4"/>
+<text x="876.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Job card</text>
+<text x="876.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Workshop system</text>
+<rect x="799.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="876.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Insurer-arranged recovery</text>
+<text x="876.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">logged (Tier 3)</text>
+<rect x="995.0" y="879.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1072.0" y="905.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Inspection and diagnosis</text>
+<text x="1072.0" y="917.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">with photo evidence</text>
+<path d="M995.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#FFFFFF" stroke="#A93F28" stroke-width="1.4" stroke-dasharray="5 3"/>
+<text x="1072.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">Inspection evidence</text>
+<text x="1072.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">GAP - manual today</text>
+<rect x="995.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="1072.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Documentation prepared</text>
+<text x="1072.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">for the insurer file</text>
+<rect x="1191.0" y="879.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1268.0" y="905.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Damage assessment</text>
+<text x="1268.0" y="917.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and time estimate</text>
+<rect x="1191.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1268.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Quote built - retail or</text>
+<text x="1268.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">insurer-format template</text>
+<rect x="1191.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="1268.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Assessor inspection</text>
+<text x="1268.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">scheduled (Tier 3)</text>
+<rect x="1387.0" y="495.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1464.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Receives evidence</text>
+<text x="1464.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and priced options</text>
+<rect x="1387.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1464.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Issues options with</text>
+<text x="1464.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">traffic-light urgency</text>
+<polygon points="1464.0,1123.0 1541.0,1164.0 1464.0,1205.0 1387.0,1164.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="1464.0" y="1161.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Customer</text>
+<text x="1464.0" y="1173.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">approves?</text>
+<polygon points="1464.0,1251.0 1541.0,1292.0 1464.0,1333.0 1387.0,1292.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="1464.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Insurer</text>
+<text x="1464.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">pre-authorises?</text>
+<path d="M1387.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#FFFFFF" stroke="#A93F28" stroke-width="1.4" stroke-dasharray="5 3"/>
+<text x="1464.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">Approval record</text>
+<text x="1464.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">GAP - manual today</text>
+<rect x="1583.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1660.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Declined: logged,</text>
+<text x="1660.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">vehicle released as-is</text>
+<rect x="1583.0" y="1007.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1660.0" y="1033.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Stock checked; non-stock</text>
+<text x="1660.0" y="1045.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">or imported parts ordered</text>
+<rect x="1583.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="1660.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Approved parts vendor</text>
+<text x="1660.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">confirmed with insurer</text>
+<rect x="1779.0" y="879.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1856.0" y="905.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Repair carried out</text>
+<text x="1856.0" y="917.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">- single or multi-day</text>
+<rect x="1779.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1856.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Proactive update cadence,</text>
+<text x="1856.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">not on request</text>
+<rect x="1779.0" y="495.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1856.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Receives status</text>
+<text x="1856.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">updates</text>
+<rect x="1779.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="1856.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Interim photo</text>
+<text x="1856.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">documentation to insurer</text>
+<polygon points="2052.0,867.0 2129.0,908.0 2052.0,949.0 1975.0,908.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="2052.0" y="905.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">QC and road</text>
+<text x="2052.0" y="917.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">test passed?</text>
+<rect x="2171.0" y="751.0" width="154" height="58" rx="3" fill="#F7EBE7" stroke="#A93F28" stroke-width="2.2"/>
+<text x="2248.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Guided handover: work done,</text>
+<text x="2248.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">deferred items, warranty</text>
+<text x="2248.0" y="821.0" text-anchor="middle" font-family="Consolas,monospace" font-size="8.6" letter-spacing="0.6" fill="#A93F28">MOMENT OF TRUTH</text>
+<rect x="2171.0" y="495.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="2248.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Collects vehicle</text>
+<text x="2248.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">after walkthrough</text>
+<rect x="2171.0" y="1135.0" width="154" height="58" rx="3" fill="#F2EEE7" stroke="#5A4632" stroke-width="1.5"/>
+<text x="2248.0" y="1161.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Pays in full;</text>
+<text x="2248.0" y="1173.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">itemised invoice</text>
+<rect x="2171.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="2248.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Insurer settles; customer</text>
+<text x="2248.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">pays excess only</text>
+<rect x="2171.0" y="1391.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="2248.0" y="1417.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Invoice raised per</text>
+<text x="2248.0" y="1429.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">settlement route</text>
+<path d="M2171.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#E7F0EB" stroke="#1C6B52" stroke-width="1.4"/>
+<text x="2248.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Invoice</text>
+<text x="2248.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Finance system</text>
+<rect x="2367.0" y="751.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="2444.0" y="777.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">48-hour follow-up</text>
+<text x="2444.0" y="789.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and satisfaction check</text>
+<rect x="2367.0" y="623.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="2444.0" y="649.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Review request, reminder</text>
+<text x="2444.0" y="661.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and referral prompt</text>
+<rect x="2367.0" y="1263.0" width="154" height="58" rx="3" fill="#E6EEF4" stroke="#2E5E7E" stroke-width="1.5"/>
+<text x="2444.0" y="1289.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Claim file closed</text>
+<text x="2444.0" y="1301.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and confirmed</text>
+<rect x="2367.0" y="1391.0" width="154" height="58" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="2444.0" y="1417.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Insurer receivable</text>
+<text x="2444.0" y="1429.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and ageing tracked</text>
+<path d="M2367.0,1519.0 h154 v46 c-38.5,10 -77.0,-14 -154.0,0 z" fill="#FFFFFF" stroke="#A93F28" stroke-width="1.4" stroke-dasharray="5 3"/>
+<text x="2444.0" y="1545.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">Feedback capture</text>
+<text x="2444.0" y="1557.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#A93F28">GAP - not in place</text>
+<rect x="2367.0" y="495.0" width="154" height="58" rx="29.0" fill="#13232B" stroke="#13232B"/>
+<text x="2444.0" y="521.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#FFFFFF">Returns for</text>
+<text x="2444.0" y="533.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#FFFFFF">next service</text>
+<rect x="0" y="1612" width="2586" height="44" fill="#13232B"/>
+<text x="18" y="1639" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#FFFFFF" letter-spacing="0.6">EXCEPTION JOURNEYS — off-ramps from the core spine above, each rejoining it on resolution</text>
+<rect x="0" y="1656" width="2586" height="116" fill="#FFFFFF"/>
+<line x1="0" y1="1656" x2="2586" y2="1656" stroke="#D2D5D1"/>
+<rect x="0" y="1656" width="190" height="116" fill="#A93F28"/>
+<text x="18" y="1694" font-family="Consolas,monospace" font-size="10" fill="#F3CFC5" letter-spacing="1.2">E1</text>
+<text x="18" y="1714" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF">PRICING / QUOTE REVISION</text>
+<text x="18" y="1732" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#F0C9BE">Branches from stage 08</text>
+<rect x="211.0" y="1686.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="288.0" y="1711.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Technician flags</text>
+<text x="288.0" y="1723.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">additional fault</text>
+<rect x="407.0" y="1686.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="484.0" y="1711.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Photo and video evidence</text>
+<text x="484.0" y="1723.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">captured before contact</text>
+<line x1="365.0" y1="1714.0" x2="407.0" y2="1714.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="603.0" y="1686.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="680.0" y="1711.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Revised quote issued</text>
+<text x="680.0" y="1723.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">insurer: second pre-auth</text>
+<line x1="561.0" y1="1714.0" x2="603.0" y2="1714.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polygon points="876.0,1677.0 953.0,1714.0 876.0,1751.0 799.0,1714.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="876.0" y="1717.6" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Approved?</text>
+<line x1="757.0" y1="1714.0" x2="799.0" y2="1714.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="995.0" y="1686.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1072.0" y="1711.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Scope updated,</text>
+<text x="1072.0" y="1723.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">work proceeds</text>
+<line x1="953.0" y1="1714.0" x2="995.0" y2="1714.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="1191.0" y="1686.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1268.0" y="1711.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Declined: vehicle released</text>
+<text x="1268.0" y="1723.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">as-is, item deferred</text>
+<line x1="1149.0" y1="1714.0" x2="1191.0" y2="1714.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="0" y="1772" width="2586" height="116" fill="#F5F5F2"/>
+<line x1="0" y1="1772" x2="2586" y2="1772" stroke="#D2D5D1"/>
+<rect x="0" y="1772" width="190" height="116" fill="#A93F28"/>
+<text x="18" y="1810" font-family="Consolas,monospace" font-size="10" fill="#F3CFC5" letter-spacing="1.2">E2</text>
+<text x="18" y="1830" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF">REWORK / COMEBACK</text>
+<text x="18" y="1848" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#F0C9BE">Branches from stage 11</text>
+<rect x="211.0" y="1802.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="288.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Customer returns with</text>
+<text x="288.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">a recurring issue</text>
+<rect x="407.0" y="1802.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="484.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Root cause checked against</text>
+<text x="484.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">the original job card</text>
+<line x1="365.0" y1="1830.0" x2="407.0" y2="1830.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polygon points="680.0,1793.0 757.0,1830.0 680.0,1867.0 603.0,1830.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="680.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Original repair</text>
+<text x="680.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">or new fault?</text>
+<line x1="561.0" y1="1830.0" x2="603.0" y2="1830.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="799.0" y="1802.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="876.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Warranty or chargeable</text>
+<text x="876.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">determination applied</text>
+<line x1="757.0" y1="1830.0" x2="799.0" y2="1830.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="995.0" y="1802.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1072.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Queue priority applied</text>
+<text x="1072.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">per defined policy</text>
+<line x1="953.0" y1="1830.0" x2="995.0" y2="1830.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="1191.0" y="1802.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1268.0" y="1827.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Repaired; technician and</text>
+<text x="1268.0" y="1839.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">QA accountability logged</text>
+<line x1="1149.0" y1="1830.0" x2="1191.0" y2="1830.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="0" y="1888" width="2586" height="116" fill="#FFFFFF"/>
+<line x1="0" y1="1888" x2="2586" y2="1888" stroke="#D2D5D1"/>
+<rect x="0" y="1888" width="190" height="116" fill="#A93F28"/>
+<text x="18" y="1926" font-family="Consolas,monospace" font-size="10" fill="#F3CFC5" letter-spacing="1.2">E3</text>
+<text x="18" y="1946" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#FFFFFF">REFUND / DISPUTE</text>
+<text x="18" y="1964" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#F0C9BE">Branches from stage 10 or 11</text>
+<rect x="211.0" y="1918.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="288.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Complaint intake —</text>
+<text x="288.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">time to first response</text>
+<rect x="407.0" y="1918.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="484.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Verified against job card</text>
+<text x="484.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">and original invoice</text>
+<line x1="365.0" y1="1946.0" x2="407.0" y2="1946.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<polygon points="680.0,1909.0 757.0,1946.0 680.0,1983.0 603.0,1946.0" fill="#FDF2D6" stroke="#E9A200" stroke-width="1.8"/>
+<text x="680.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Refund</text>
+<text x="680.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">due?</text>
+<line x1="561.0" y1="1946.0" x2="603.0" y2="1946.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="799.0" y="1918.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="876.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Routed per delegation</text>
+<text x="876.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">of authority threshold</text>
+<line x1="757.0" y1="1946.0" x2="799.0" y2="1946.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="995.0" y="1918.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1072.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Processed within the</text>
+<text x="1072.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">committed turnaround</text>
+<line x1="953.0" y1="1946.0" x2="995.0" y2="1946.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="1191.0" y="1918.0" width="154" height="56" rx="3" fill="#FFFFFF" stroke="#13232B" stroke-width="1.5"/>
+<text x="1268.0" y="1943.4" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">Resolution confirmed;</text>
+<text x="1268.0" y="1955.9" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#13232B">loop closed with customer</text>
+<line x1="1149.0" y1="1946.0" x2="1191.0" y2="1946.0" stroke="#4C5C64" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="0" y="0" width="2586" height="46" fill="#13232B"/>
+<text x="18" y="29" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" letter-spacing="0.6">PIONEER CAR SERVICE CENTER  ·  RETAIL CUSTOMER JOURNEY  ·  SERVICE TIERS, PAYER PATHS AND EXCEPTION FLOWS</text>
+<line x1="0" y1="2004" x2="2586" y2="2004" stroke="#13232B" stroke-width="1.5"/>
+</svg></div>
+<p class="hint">Scroll horizontally to follow the full sequence</p>
+
+<footer>Pioneer Car Service Center · Retail customer journey map · August 2026</footer>
+</div>
+</body>
+</html>

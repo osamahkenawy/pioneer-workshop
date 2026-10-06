@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 350">
+  <defs>
+    <filter id="stepShadow2" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="15" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="500" height="350" fill="#f8fafc" rx="16"/>
+  
+  <!-- Import card -->
+  <rect x="80" y="30" width="340" height="290" rx="12" fill="#fff" filter="url(#stepShadow2)"/>
+  
+  <!-- Header -->
+  <rect x="80" y="30" width="340" height="50" rx="12" fill="#244066"/>
+  <rect x="80" y="65" width="340" height="15" fill="#244066"/>
+  <text x="250" y="60" font-size="14" fill="#fff" text-anchor="middle" font-weight="600">Import Your Data</text>
+  
+  <!-- Upload area -->
+  <rect x="110" y="100" width="280" height="100" rx="10" fill="#f8fafc" stroke="#244066" stroke-width="2" stroke-dasharray="8,4"/>
+  
+  <circle cx="250" cy="140" r="20" fill="#244066" opacity="0.1"/>
+  <text x="250" y="147" font-size="20" text-anchor="middle">📁</text>
+  <text x="250" y="175" font-size="11" fill="#666" text-anchor="middle">Drop your CSV or Excel file here</text>
+  <text x="250" y="190" font-size="10" fill="#999" text-anchor="middle">or click to browse</text>
+  
+  <!-- Import options -->
+  <text x="110" y="225" font-size="10" fill="#666" font-weight="600">Or import from:</text>
+  
+  <rect x="110" y="235" width="85" height="35" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="152" y="257" font-size="9" fill="#666" text-anchor="middle">📊 Salesforce</text>
+  
+  <rect x="205" y="235" width="85" height="35" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="247" y="257" font-size="9" fill="#666" text-anchor="middle">📋 HubSpot</text>
+  
+  <rect x="300" y="235" width="85" height="35" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="342" y="257" font-size="9" fill="#666" text-anchor="middle">📧 Mailchimp</text>
+  
+  <!-- Progress bar -->
+  <text x="110" y="295" font-size="10" fill="#244066" font-weight="600">Importing contacts...</text>
+  <rect x="110" y="305" width="280" height="8" rx="4" fill="#e2e8f0"/>
+  <rect x="110" y="305" width="180" height="8" rx="4" fill="#22c55e"/>
+  
+  <!-- Decorative -->
+  <circle cx="45" cy="150" r="25" fill="#22c55e" opacity="0.15"/>
+  <circle cx="455" cy="250" r="35" fill="#f2421b" opacity="0.1"/>
+</svg>
+
+

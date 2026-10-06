@@ -1,0 +1,696 @@
+/* ═══════════════════════════════════════════
+   Signup Page Styles
+   ═══════════════════════════════════════════ */
+
+.sp-page {
+  display: flex;
+  min-height: 100vh;
+  background: #f8fafc;
+  overflow-x: hidden;
+}
+
+/* ── Left Panel ── */
+.sp-left {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+  position: relative;
+  overflow-y: auto;
+}
+.sp-content {
+  width: 100%;
+  max-width: 440px;
+}
+
+/* ── Logo ── */
+.sp-header {
+  margin-bottom: 28px;
+}
+.sp-logo img {
+  height: 56px;
+  width: auto;
+}
+
+/* ── Step Indicator ── */
+.sp-steps {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.sp-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sp-step-circle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  background: #e2e8f0;
+  color: #94a3b8;
+  transition: all 0.3s;
+}
+.sp-step-item.active .sp-step-circle {
+  background: #1B3A5C;
+  color: #fff;
+}
+.sp-step-item.done .sp-step-circle {
+  background: #10b981;
+  color: #fff;
+}
+.sp-step-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #94a3b8;
+  transition: color 0.3s;
+}
+.sp-step-item.active .sp-step-label {
+  color: #1B3A5C;
+}
+.sp-step-item.done .sp-step-label {
+  color: #10b981;
+}
+.sp-step-line {
+  flex: 1;
+  height: 2px;
+  background: #e2e8f0;
+  border-radius: 2px;
+}
+
+/* ── Form Section ── */
+.sp-form-section h1 {
+  font-size: 24px;
+  font-weight: 800;
+  color: #111827;
+  margin: 0 0 6px;
+}
+.sp-subtitle {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+.sp-subtitle strong {
+  color: #374151;
+}
+
+/* ── Back Button ── */
+.sp-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 16px;
+  transition: color 0.2s;
+}
+.sp-back-btn:hover {
+  color: #1B3A5C;
+}
+
+/* ── Fields ── */
+.sp-field {
+  margin-bottom: 18px;
+}
+.sp-field label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 6px;
+}
+.sp-req {
+  color: #ef4444;
+}
+.sp-optional {
+  color: #9ca3af;
+  font-weight: 400;
+  font-size: 12px;
+}
+.sp-field input[type="text"],
+.sp-field input[type="email"],
+.sp-field input[type="tel"],
+.sp-field input[type="password"] {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  font-size: 14px;
+  color: #111827;
+  background: #fff;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+  box-sizing: border-box;
+}
+.sp-field input:focus {
+  border-color: #1B3A5C;
+  box-shadow: 0 0 0 3px rgba(27, 58, 92, 0.08);
+}
+.sp-field input.sp-input-error {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.08);
+}
+.sp-field input::placeholder {
+  color: #94a3b8;
+}
+.sp-field-error {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  color: #ef4444;
+  font-weight: 500;
+}
+
+/* ── Password Wrap ── */
+.sp-pw-wrap {
+  position: relative;
+}
+.sp-pw-wrap input {
+  width: 100%;
+  padding-right: 42px !important;
+}
+.sp-pw-eye {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+}
+.sp-pw-eye:hover {
+  color: #475569;
+}
+
+[dir="rtl"] .sp-pw-wrap input {
+  padding-right: 14px !important;
+  padding-left: 42px !important;
+}
+[dir="rtl"] .sp-pw-eye {
+  right: auto;
+  left: 12px;
+}
+
+/* ── Phone Input ── */
+.sp-phone-wrap {
+  display: flex;
+  align-items: stretch;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  overflow: visible;
+  position: relative;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  direction: ltr !important;
+  unicode-bidi: isolate;
+}
+.sp-phone-wrap:focus-within {
+  border-color: #1B3A5C;
+  box-shadow: 0 0 0 3px rgba(27, 58, 92, 0.08);
+}
+.sp-phone-code-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  background: #f8fafc;
+  border: none;
+  border-right: 1.5px solid #e2e8f0;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #374151;
+  min-width: 90px;
+  border-radius: 10px 0 0 10px;
+}
+.sp-phone-code-btn:hover {
+  background: #f1f5f9;
+}
+.sp-phone-flag {
+  font-size: 18px;
+  line-height: 1;
+}
+.sp-phone-code-text {
+  font-weight: 600;
+  font-size: 13px;
+}
+.sp-phone-input {
+  flex: 1;
+  border: none !important;
+  border-radius: 0 10px 10px 0 !important;
+  box-shadow: none !important;
+  padding: 11px 14px !important;
+  font-size: 14px;
+  outline: none;
+}
+
+/* ── Phone Dropdown ── */
+.sp-phone-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 280px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.12);
+  z-index: 100;
+  animation: spDropIn 0.15s ease;
+}
+@keyframes spDropIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.sp-phone-search {
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 13px;
+  outline: none;
+  border-radius: 12px 12px 0 0;
+  box-sizing: border-box;
+}
+.sp-phone-list {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.sp-phone-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #374151;
+  transition: background 0.15s;
+}
+.sp-phone-option:hover {
+  background: #f1f5f9;
+}
+.sp-phone-option.active {
+  background: #eff6ff;
+  font-weight: 600;
+}
+.sp-phone-option-name {
+  flex: 1;
+  text-align: left;
+}
+.sp-phone-option-code {
+  color: #6b7280;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+}
+
+/* ── Primary Button ── */
+.sp-btn-primary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 13px 24px;
+  background: linear-gradient(135deg, #1B3A5C, #1e3a6b);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 8px;
+}
+.sp-btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1e3a6b, #2d5080);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(27, 58, 92, 0.25);
+}
+.sp-btn-primary:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* ── Spinner ── */
+.sp-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2.5px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spSpin 0.6s linear infinite;
+}
+@keyframes spSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Links ── */
+.sp-login-link {
+  text-align: center;
+  margin-top: 18px;
+  font-size: 13.5px;
+  color: #6b7280;
+}
+.sp-login-link a {
+  color: #1B3A5C;
+  font-weight: 700;
+  text-decoration: none;
+}
+.sp-login-link a:hover {
+  text-decoration: underline;
+}
+.sp-terms {
+  text-align: center;
+  margin-top: 14px;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+.sp-terms a {
+  color: #6b7280;
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+/* ── Error Global ── */
+.sp-error-global {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  color: #dc2626;
+  font-size: 13.5px;
+  font-weight: 500;
+  margin-bottom: 20px;
+}
+
+/* ── Animation ── */
+.sp-fade-in {
+  animation: spFadeIn 0.25s ease;
+}
+@keyframes spFadeIn {
+  from { opacity: 0; transform: translateX(10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Right Panel (decorative background image) ── */
+.sp-right {
+  flex: 1;
+  min-width: 0;
+  background: url('../assets/images/theme/signup-800-1200.png') center center / cover no-repeat;
+  background-color: #0f1c2e;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Feature Items ── */
+.sp-features {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.sp-feature-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.sp-feature-icon {
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.1);
+  border-radius: 10px;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.sp-feature-item strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.sp-feature-item span {
+  font-size: 12.5px;
+  color: rgba(255,255,255,0.6);
+}
+
+/* ── Hero Overlay (on top of right panel image) ── */
+.sp-hero-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 40px 32px;
+  background: linear-gradient(
+    to top,
+    rgba(15, 28, 46, 0.55) 0%,
+    rgba(15, 28, 46, 0.2) 40%,
+    transparent 100%
+  );
+  z-index: 1;
+}
+.sp-hero-card {
+  width: 100%;
+  max-width: 420px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 18px;
+  padding: 28px 26px;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.15);
+}
+.sp-hero-title {
+  font-size: 22px;
+  font-weight: 800;
+  color: #ffffff;
+  margin: 0 0 10px;
+  line-height: 1.3;
+}
+.sp-hero-text {
+  font-size: 13.5px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+  line-height: 1.65;
+}
+.sp-hero-stats {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+.sp-hero-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  padding: 12px 0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+.sp-hero-stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: #ffffff;
+  line-height: 1;
+}
+.sp-hero-stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
+
+/* ── Responsive ── */
+
+/* Tablet & small desktop */
+@media (max-width: 1200px) {
+  .sp-page {
+    flex-direction: column !important;
+    min-height: 100vh;
+  }
+  .sp-right {
+    display: none !important;
+  }
+  .sp-left {
+    flex: 1;
+    width: 100% !important;
+    padding: 28px 24px;
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+  .sp-content {
+    max-width: 500px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .sp-header {
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: center;
+  }
+  .sp-steps {
+    margin-bottom: 20px;
+  }
+  .sp-field {
+    margin-bottom: 14px;
+  }
+}
+
+/* Mobile portrait */
+@media (max-width: 600px) {
+  .sp-right {
+    display: none !important;
+  }
+  .sp-left {
+    padding: 20px 16px;
+  }
+  .sp-content {
+    max-width: 100%;
+  }
+  .sp-logo img {
+    height: 44px;
+  }
+  .sp-header {
+    margin-bottom: 16px;
+  }
+  .sp-steps {
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .sp-step-circle {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+  }
+  .sp-step-label {
+    font-size: 12px;
+  }
+  .sp-form-section h1 {
+    font-size: 20px;
+    margin-bottom: 4px;
+  }
+  .sp-subtitle {
+    font-size: 13px;
+    margin-bottom: 18px;
+  }
+  .sp-field {
+    margin-bottom: 12px;
+  }
+  .sp-field label {
+    font-size: 12.5px;
+    margin-bottom: 5px;
+  }
+  .sp-field input[type="text"],
+  .sp-field input[type="email"],
+  .sp-field input[type="tel"],
+  .sp-field input[type="password"] {
+    padding: 10px 12px;
+    font-size: 14px;
+    border-radius: 8px;
+  }
+  .sp-phone-wrap {
+    border-radius: 8px;
+  }
+  .sp-phone-code-btn {
+    min-width: 80px;
+    padding: 0 8px;
+    font-size: 12px;
+    border-radius: 8px 0 0 8px;
+  }
+  .sp-phone-input {
+    padding: 10px 12px !important;
+    border-radius: 0 8px 8px 0 !important;
+  }
+  .sp-phone-dropdown {
+    width: calc(100vw - 32px);
+    max-width: 300px;
+  }
+  .sp-btn-primary {
+    padding: 12px 20px;
+    font-size: 14px;
+    border-radius: 8px;
+    margin-top: 6px;
+  }
+  .sp-login-link {
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  .sp-terms {
+    font-size: 11px;
+    margin-top: 10px;
+  }
+  .sp-error-global {
+    font-size: 13px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 14px;
+  }
+  .sp-back-btn {
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+}
+
+/* Small phones */
+@media (max-width: 380px) {
+  .sp-right {
+    height: 200px;
+  }
+  .sp-hero-overlay {
+    padding: 12px 10px;
+  }
+  .sp-hero-card {
+    padding: 14px 12px;
+    border-radius: 10px;
+  }
+  .sp-hero-title {
+    font-size: 15px;
+  }
+  .sp-hero-text {
+    font-size: 11px;
+  }
+  .sp-left {
+    padding: 16px 12px;
+  }
+  .sp-step-label {
+    font-size: 11px;
+  }
+  .sp-form-section h1 {
+    font-size: 18px;
+  }
+  .sp-phone-code-btn {
+    min-width: 72px;
+    padding: 0 6px;
+  }
+}

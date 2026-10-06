@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pioneer Vehicle Inspection</title>
+<style>
+  :root{
+    --navy:#153d78;
+    --blue:#1f6fbe;
+    --line:#d9e4f1;
+    --soft:#f6f9fd;
+    --text:#18345c;
+    --muted:#64748b;
+    --danger:#ef4444;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    font-family:Inter,Arial,sans-serif;
+    background:#f4f7fb;
+    color:var(--text);
+  }
+
+  .inspection-shell{
+    max-width:1500px;
+    margin:0 auto;
+    padding:24px;
+  }
+
+  .intro{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:16px 18px;
+    margin-bottom:18px;
+    box-shadow:0 6px 20px rgba(21,61,120,.05);
+  }
+
+  .intro strong{display:block;margin-bottom:4px}
+  .intro span{color:var(--muted)}
+
+  .layout{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 250px;
+    gap:18px;
+    align-items:start;
+  }
+
+  .diagram-area{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:18px;
+    padding:16px;
+    min-height:650px;
+  }
+
+  .diagram-grid{
+    display:grid;
+    grid-template-columns:1fr 1.1fr 1.1fr 1fr;
+    gap:14px;
+    align-items:start;
+  }
+
+  .view-card{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:15px;
+    overflow:hidden;
+    min-height:330px;
+    position:relative;
+  }
+
+  .view-card.rear{
+    grid-column:1 / 2;
+    min-height:280px;
+  }
+
+  .view-head{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:12px 14px;
+    background:linear-gradient(180deg,#f7fbff 0%,#edf5ff 100%);
+    border-bottom:1px solid #e7eef7;
+    font-weight:800;
+    letter-spacing:.2px;
+  }
+
+  .view-icon{
+    width:34px;height:34px;
+    border-radius:50%;
+    display:grid;place-items:center;
+    background:var(--navy);
+    color:#fff;
+    font-size:15px;
+    flex:0 0 auto;
+  }
+
+  .vehicle-wrap{
+    position:relative;
+    height:275px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:16px;
+    background:
+      radial-gradient(circle at 50% 45%, rgba(46,125,205,.08), transparent 42%),
+      #fff;
+  }
+
+  .rear .vehicle-wrap{height:225px}
+
+  .vehicle-wrap img{
+    max-width:100%;
+    max-height:100%;
+    object-fit:contain;
+    user-select:none;
+    pointer-events:none;
+  }
+
+  .damage-marker{
+    position:absolute;
+    width:24px;height:24px;
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+    border:3px solid #fff;
+    box-shadow:0 2px 8px rgba(0,0,0,.25);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#fff;
+    font-size:10px;
+    font-weight:800;
+    cursor:pointer;
+    z-index:3;
+  }
+
+  .legend{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:18px;
+    padding:14px;
+  }
+
+  .legend h3{
+    margin:0 0 10px;
+    text-align:center;
+    color:var(--navy);
+    font-size:15px;
+  }
+
+  .legend-item{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    border:1px solid #e6edf5;
+    border-radius:9px;
+    padding:9px 10px;
+    margin:7px 0;
+    cursor:pointer;
+    transition:.15s ease;
+  }
+
+  .legend-item:hover,
+  .legend-item.active{
+    border-color:#3da6e8;
+    background:#eef9ff;
+  }
+
+  .code{
+    min-width:34px;
+    padding:4px 6px;
+    border-radius:7px;
+    background:#edf3f8;
+    text-align:center;
+    font-weight:800;
+    font-size:12px;
+  }
+
+  .label{
+    font-size:13px;
+    color:#273b59;
+  }
+
+  .hint{
+    margin-top:12px;
+    color:#74849a;
+    font-size:12px;
+    line-height:1.5;
+  }
+
+  @media(max-width:1100px){
+    .layout{grid-template-columns:1fr}
+    .legend{order:-1}
+    .diagram-grid{grid-template-columns:1fr 1fr}
+    .view-card.rear{grid-column:auto}
+  }
+
+  @media(max-width:650px){
+    .inspection-shell{padding:12px}
+    .diagram-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+
+<body>
+  <main class="inspection-shell">
+    <section class="intro">
+      <strong>Inspect the vehicle with the customer.</strong>
+      <span>Choose a defect from the legend, then click on any vehicle image to place a marker.</span>
+    </section>
+
+    <section class="layout">
+      <div class="diagram-area">
+        <div class="diagram-grid">
+
+          <article class="view-card">
+            <div class="view-head"><div class="view-icon">⌂</div>TOP / ROOF</div>
+            <div class="vehicle-wrap" data-view="top">
+              <img src="top-roof.png" alt="Top roof vehicle inspection view">
+            </div>
+          </article>
+
+          <article class="view-card">
+            <div class="view-head"><div class="view-icon">◫</div>DRIVER SIDE (LEFT)</div>
+            <div class="vehicle-wrap" data-view="driver">
+              <img src="driver-side.png" alt="Driver side vehicle inspection view">
+            </div>
+          </article>
+
+          <article class="view-card">
+            <div class="view-head"><div class="view-icon">◫</div>PASSENGER SIDE (RIGHT)</div>
+            <div class="vehicle-wrap" data-view="passenger">
+              <img src="passenger-side.png" alt="Passenger side vehicle inspection view">
+            </div>
+          </article>
+
+          <article class="view-card">
+            <div class="view-head"><div class="view-icon">▣</div>FRONT</div>
+            <div class="vehicle-wrap" data-view="front">
+              <img src="front.png" alt="Front vehicle inspection view">
+            </div>
+          </article>
+
+          <article class="view-card rear">
+            <div class="view-head"><div class="view-icon">▣</div>REAR</div>
+            <div class="vehicle-wrap" data-view="rear">
+              <img src="rear.png" alt="Rear vehicle inspection view">
+            </div>
+          </article>
+
+        </div>
+      </div>
+
+      <aside class="legend">
+        <h3>LEGEND</h3>
+        <div id="legend"></div>
+        <p class="hint">Select a defect, then click a vehicle view. Click an existing marker to remove it.</p>
+      </aside>
+    </section>
+  </main>
+
+<script>
+const defects = [
+  ["SH","Swirls/Holograms","#6757e8"],
+  ["WS","Water Spots","#4f87f7"],
+  ["OX","Oxidation","#17b890"],
+  ["CF","Clearcoat Failure","#ff8a4c"],
+  ["DS","Deep Scratch","#ef476f"],
+  ["BD","Bird Dropping","#8f62d6"],
+  ["RP","Rough Paint","#26b9d5"],
+  ["UD","Unknown Defect","#f3b63f"],
+  ["PT","Paint Transfer","#6d92ea"],
+  ["PC","Paint Chip","#9e62dc"],
+  ["GS","Glass Scratch","#67bd52"],
+  ["GC","Glass Chip","#7bcf86"],
+  ["DD","Dents/Dings","#ff825c"],
+  ["SS","Side Swipe","#6678e8"],
+  ["CR","Curb Rash","#f45f7c"],
+  ["WD","Wheel Damage","#4d91e8"],
+  ["GO","Gouges/Crease","#b77947"]
+];
+
+let selected = defects[0];
+
+const legend = document.getElementById("legend");
+defects.forEach((d,i)=>{
+  const el = document.createElement("div");
+  el.className = "legend-item" + (i===0 ? " active":"");
+  el.innerHTML = `<span class="code">${d[0]}</span><span class="label">${d[1]}</span>`;
+  el.onclick = ()=>{
+    document.querySelectorAll(".legend-item").forEach(x=>x.classList.remove("active"));
+    el.classList.add("active");
+    selected = d;
+  };
+  legend.appendChild(el);
+});
+
+document.querySelectorAll(".vehicle-wrap").forEach(area=>{
+  area.addEventListener("click", e=>{
+    if(e.target.classList.contains("damage-marker")) return;
+
+    const r = area.getBoundingClientRect();
+    const x = ((e.clientX-r.left)/r.width)*100;
+    const y = ((e.clientY-r.top)/r.height)*100;
+
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = "damage-marker";
+    marker.textContent = selected[0];
+    marker.title = selected[1];
+    marker.style.background = selected[2];
+    marker.style.left = x + "%";
+    marker.style.top = y + "%";
+    marker.dataset.code = selected[0];
+    marker.dataset.label = selected[1];
+
+    marker.addEventListener("click", ev=>{
+      ev.stopPropagation();
+      marker.remove();
+    });
+
+    area.appendChild(marker);
+  });
+});
+
+// Example payload collection for your backend:
+function getInspectionPayload(){
+  return [...document.querySelectorAll(".vehicle-wrap")].map(area=>({
+    view: area.dataset.view,
+    damages: [...area.querySelectorAll(".damage-marker")].map(m=>({
+      code: m.dataset.code,
+      label: m.dataset.label,
+      xPercent: parseFloat(m.style.left),
+      yPercent: parseFloat(m.style.top)
+    }))
+  }));
+}
+
+window.getInspectionPayload = getInspectionPayload;
+</script>
+</body>
+</html>

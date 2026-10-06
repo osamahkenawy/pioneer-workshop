@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="vidGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#244066"/>
+      <stop offset="100%" style="stop-color:#1a3050"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="640" height="360" fill="url(#vidGrad)" rx="16"/>
+  
+  <!-- Decorative elements -->
+  <circle cx="100" cy="80" r="60" fill="#f2421b" opacity="0.1"/>
+  <circle cx="540" cy="280" r="80" fill="#f2421b" opacity="0.08"/>
+  <circle cx="320" cy="180" r="150" fill="#fff" opacity="0.03"/>
+  
+  <!-- Grid pattern -->
+  <g opacity="0.05" stroke="#fff" stroke-width="1">
+    <line x1="0" y1="90" x2="640" y2="90"/>
+    <line x1="0" y1="180" x2="640" y2="180"/>
+    <line x1="0" y1="270" x2="640" y2="270"/>
+    <line x1="160" y1="0" x2="160" y2="360"/>
+    <line x1="320" y1="0" x2="320" y2="360"/>
+    <line x1="480" y1="0" x2="480" y2="360"/>
+  </g>
+  
+  <!-- Dashboard preview elements -->
+  <rect x="120" y="80" width="180" height="100" rx="8" fill="#fff" opacity="0.1"/>
+  <rect x="130" y="95" width="80" height="10" rx="3" fill="#fff" opacity="0.3"/>
+  <rect x="130" y="115" width="150" height="50" rx="4" fill="#fff" opacity="0.15"/>
+  
+  <rect x="340" y="80" width="180" height="100" rx="8" fill="#fff" opacity="0.1"/>
+  <rect x="350" y="95" width="70" height="10" rx="3" fill="#fff" opacity="0.3"/>
+  <rect x="350" y="115" width="60" height="25" rx="4" fill="#f2421b" opacity="0.5"/>
+  <rect x="420" y="115" width="60" height="25" rx="4" fill="#fff" opacity="0.15"/>
+  
+  <rect x="120" y="200" width="400" height="80" rx="8" fill="#fff" opacity="0.1"/>
+  <rect x="140" y="220" width="100" height="12" rx="3" fill="#fff" opacity="0.3"/>
+  <rect x="140" y="245" width="360" height="20" rx="4" fill="#fff" opacity="0.08"/>
+  
+  <!-- Play button will be overlayed by CSS -->
+  <text x="320" y="320" font-size="14" fill="#fff" text-anchor="middle" opacity="0.7" font-weight="500">Watch Demo Video</text>
+</svg>
+
+

@@ -1,0 +1,131 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Public estimate approval page.
+
+   Standalone — reached from an emailed link, never logged in, so (like
+   CustomerSurveyPublic.css) it shares nothing with the dashboard shell.
+   Navy/orange to match the rest of the customer-facing brand surfaces.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.ea-page {
+  --ea-navy: #1e3a6b;
+  --ea-orange: #f97316;
+  --ea-ink: #1e293b;
+  --ea-muted: #64748b;
+  --ea-line: #e2e8f0;
+  --ea-green: #16a34a;
+  --ea-red: #dc2626;
+  --ea-green-bg: #ecfdf3;
+  --ea-red-bg: #fef2f2;
+
+  min-height: 100vh;
+  background: #f4f6f9;
+  padding: 28px 16px 64px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: var(--ea-ink);
+  box-sizing: border-box;
+}
+.ea-page *, .ea-page *::before, .ea-page *::after { box-sizing: border-box; }
+
+.ea-card {
+  max-width: 720px;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+  padding: 28px 30px 34px;
+}
+.ea-card.ea-center { text-align: center; padding: 60px 30px; }
+.ea-card.ea-center h1 { font-size: 20px; margin: 0 0 8px; color: var(--ea-navy); }
+.ea-card.ea-center p { color: var(--ea-muted); margin: 0; }
+
+/* ── Header ── */
+.ea-header {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--ea-line);
+  margin-bottom: 18px;
+}
+.ea-brand { font-size: 13px; font-weight: 700; color: var(--ea-orange); text-transform: uppercase; letter-spacing: 0.06em; }
+.ea-header h1 { font-size: 22px; margin: 6px 0 8px; color: var(--ea-navy); }
+.ea-meta { display: flex; gap: 14px; font-size: 13.5px; color: var(--ea-muted); }
+.ea-meta span:not(:last-child)::after { content: '·'; margin-left: 14px; color: var(--ea-line); }
+
+/* ── Banners ── */
+.ea-banner { border-radius: 10px; padding: 12px 16px; font-size: 13.5px; font-weight: 600; margin-bottom: 16px; line-height: 1.5; }
+.ea-banner-ok    { background: var(--ea-green-bg); color: #15803d; border: 1px solid #bbf7d0; }
+.ea-banner-warn  { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
+.ea-banner-info  { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+.ea-instructions { font-size: 13.5px; color: var(--ea-muted); line-height: 1.6; margin: 0 0 16px; }
+
+.ea-name-field {
+  display: block; font-size: 12px; font-weight: 700; color: var(--ea-muted);
+  margin-bottom: 18px;
+}
+.ea-name-field input {
+  display: block; width: 100%; margin-top: 5px;
+  border: 1.5px solid var(--ea-line); border-radius: 10px;
+  padding: 10px 12px; font-size: 14px; font-family: inherit;
+}
+
+/* ── Line-item sections ── */
+.ea-section { margin-bottom: 18px; }
+.ea-section-title {
+  font-size: 11.5px; font-weight: 800; color: var(--ea-navy);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+.ea-line {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border-radius: 10px; border: 1px solid var(--ea-line);
+  margin-bottom: 8px; flex-wrap: wrap;
+}
+.ea-line-approved { background: var(--ea-green-bg); border-color: #bbf7d0; }
+.ea-line-rejected { background: var(--ea-red-bg); border-color: #fecaca; opacity: 0.8; }
+
+.ea-line-main { flex: 1; min-width: 200px; }
+.ea-line-desc { font-size: 14px; font-weight: 600; color: var(--ea-ink); }
+.ea-line-qty { font-weight: 500; color: var(--ea-muted); }
+.ea-line-price { font-size: 13px; color: var(--ea-muted); margin-top: 2px; font-weight: 600; }
+.ea-tag {
+  display: inline-block; margin-left: 8px; font-size: 10.5px; font-weight: 700;
+  padding: 2px 7px; border-radius: 999px; vertical-align: middle;
+}
+.ea-tag-urgent { background: #fef2f2; color: var(--ea-red); }
+
+.ea-line-actions { display: flex; gap: 8px; }
+.ea-btn {
+  border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px;
+  font-weight: 700; cursor: pointer; transition: opacity 0.15s;
+}
+.ea-btn:disabled { opacity: 0.6; cursor: default; }
+.ea-btn-approve { background: var(--ea-green); color: #fff; }
+.ea-btn-reject { background: #fff; color: var(--ea-red); border: 1.5px solid #fecaca; }
+
+.ea-decided {
+  font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 8px;
+}
+.ea-decided-approved { color: #15803d; }
+.ea-decided-rejected { color: var(--ea-red); }
+
+/* ── Totals ── */
+.ea-totals {
+  border-top: 1px solid var(--ea-line); margin-top: 18px; padding-top: 14px;
+  font-size: 13.5px;
+}
+.ea-totals > div { display: flex; justify-content: space-between; padding: 4px 0; color: var(--ea-muted); }
+.ea-total-grand {
+  font-size: 16px; font-weight: 800; color: var(--ea-navy) !important;
+  border-top: 1px solid var(--ea-line); margin-top: 6px; padding-top: 10px !important;
+}
+.ea-total-grand span { color: var(--ea-navy) !important; }
+
+.ea-remaining {
+  text-align: center; font-size: 12.5px; color: var(--ea-muted);
+  margin-top: 16px; font-weight: 600;
+}
+
+@media (max-width: 560px) {
+  .ea-card { padding: 20px 18px 26px; }
+  .ea-line { flex-direction: column; align-items: stretch; }
+  .ea-line-actions { justify-content: flex-end; }
+}

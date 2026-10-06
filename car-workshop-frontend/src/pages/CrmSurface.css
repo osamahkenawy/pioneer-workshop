@@ -1,0 +1,432 @@
+/**
+ * CrmSurface.css — the shared surface for the CRM screens.
+ *
+ * Its own stylesheet rather than more classes in CRMPages.css: that file is
+ * shared by seven older pages, and these screens want a different treatment
+ * (accent-washed KPI tiles, a single control bar, avatar rows, row menus)
+ * that would either fight the shared rules or leak into pages that did not
+ * ask for it.
+ *
+ * Used by Service Reminders and Tasks & Follow-ups. They share the tokens and
+ * every primitive below, so the two screens cannot drift apart by accident.
+ * Anything genuinely specific to one screen is marked as such.
+ *
+ * Every class is prefixed .cs- so nothing escapes these pages.
+ */
+
+.cs {
+  --cs-ink:        #16233b;
+  --cs-ink-soft:   #5b6678;
+  --cs-ink-faint:  #8b93a3;
+  --cs-rule:       #e6eaf1;
+  --cs-rule-soft:  #f1f4f8;
+  --cs-surface:    #ffffff;
+  --cs-hover:      #fafbfd;
+  --cs-navy:       #1e3a6b;
+
+  --cs-rose:       #c0392b;
+  --cs-rose-wash:  #fdf1f1;
+  --cs-rose-tint:  #fbe2e2;
+  --cs-rose-rule:  #f6dede;
+
+  --cs-blue:       #2563eb;
+  --cs-blue-wash:  #f5f8ff;
+  --cs-blue-tint:  #e3ecfd;
+  --cs-blue-rule:  #e4ebfa;
+
+  --cs-amber:      #c2841c;
+  --cs-amber-wash: #fffbf2;
+  --cs-amber-tint: #fcf0d9;
+  --cs-amber-rule: #f6ecda;
+
+  --cs-green:      #17734f;
+  --cs-green-wash: #f4faf7;
+  --cs-green-tint: #ddf0e6;
+  --cs-green-rule: #e2f0e8;
+
+  --cs-radius:     14px;
+  --cs-shadow:     0 1px 2px rgba(22, 35, 59, .04), 0 8px 24px -18px rgba(22, 35, 59, .18);
+
+  color: var(--cs-ink);
+}
+
+/* ── Header ─────────────────────────────────────────────────── */
+.cs-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 22px;
+}
+/* The title+subtitle block is a flex item with no explicit width, so its
+   default min-width:auto stops the subtitle from wrapping and lets it
+   overflow behind whatever sits in .cs-actions instead — give it room to
+   shrink and wrap like normal block text. */
+.cs-head > div:first-child { flex: 1 1 320px; min-width: 0; }
+.cs-title {
+  font-size: 28px; font-weight: 700; letter-spacing: -.02em;
+  margin: 0 0 4px; color: var(--cs-ink);
+}
+.cs-sub { margin: 0; font-size: 14.5px; color: var(--cs-ink-soft); }
+
+.cs-generate {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 20px; border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--cs-blue); color: #fff;
+  font-size: 14.5px; font-weight: 600; font-family: inherit;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, .3), 0 8px 20px -12px rgba(37, 99, 235, .6);
+  transition: background .15s ease, transform .15s ease;
+}
+.cs-generate:hover:not(:disabled) { background: #1d4ed8; }
+.cs-generate:active:not(:disabled) { transform: translateY(1px); }
+.cs-generate:disabled { opacity: .6; cursor: default; }
+.cs-generate:focus-visible { outline: 2px solid var(--cs-navy); outline-offset: 3px; }
+
+/* ── Banner ─────────────────────────────────────────────────── */
+.cs-banner {
+  margin: 0 0 18px; padding: 12px 16px; border-radius: 10px;
+  font-size: 14px; border: 1px solid;
+}
+.cs-banner.is-ok    { border-color: #cfe4d8; background: var(--cs-green-wash); color: #14503d; }
+.cs-banner.is-error { border-color: var(--cs-rose-rule); background: var(--cs-rose-wash); color: #8c2818; }
+.cs-banner.is-info  { border-color: var(--cs-amber-rule); background: var(--cs-amber-wash); color: #7a5200; }
+
+/* ── KPI tiles ──────────────────────────────────────────────── */
+/* Four fixed columns rather than auto-fit: the tiles are a set of exactly
+   four, so an auto-fit grid only ever gets the count wrong on the way down. */
+.cs-kpis {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px; margin-bottom: 20px;
+}
+@media (max-width: 1180px) { .cs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px)  { .cs-kpis { grid-template-columns: 1fr; } }
+
+.cs-kpi {
+  display: flex; align-items: center; gap: 16px;
+  padding: 20px; border-radius: var(--cs-radius);
+  border: 1px solid var(--cs-rule); background: var(--cs-surface);
+}
+.cs-kpi--rose  { background: var(--cs-rose-wash);  border-color: var(--cs-rose-rule); }
+.cs-kpi--blue  { background: var(--cs-blue-wash);  border-color: var(--cs-blue-rule); }
+.cs-kpi--amber { background: var(--cs-amber-wash); border-color: var(--cs-amber-rule); }
+.cs-kpi--green { background: var(--cs-green-wash); border-color: var(--cs-green-rule); }
+
+.cs-kpi-icon {
+  flex: none; width: 54px; height: 54px; border-radius: 14px;
+  display: grid; place-items: center;
+}
+.cs-kpi--rose  .cs-kpi-icon { background: var(--cs-rose-tint);  color: var(--cs-rose); }
+.cs-kpi--blue  .cs-kpi-icon { background: var(--cs-blue-tint);  color: var(--cs-blue); }
+.cs-kpi--amber .cs-kpi-icon { background: var(--cs-amber-tint); color: var(--cs-amber); }
+.cs-kpi--green .cs-kpi-icon { background: var(--cs-green-tint); color: var(--cs-green); }
+
+.cs-kpi-body { min-width: 0; }
+.cs-kpi-value {
+  margin: 0; font-size: 27px; font-weight: 700; line-height: 1.15;
+  letter-spacing: -.02em; font-variant-numeric: tabular-nums; color: var(--cs-ink);
+}
+.cs-kpi-label { margin: 2px 0 0; font-size: 14.5px; color: var(--cs-ink-soft); }
+.cs-kpi-sub   { margin: 4px 0 0; font-size: 12.5px; color: var(--cs-ink-faint); }
+.cs-kpi-sub.is-urgent { color: var(--cs-rose); }
+
+/* ── Control bar ────────────────────────────────────────────── */
+.cs-controls {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px; margin-bottom: 18px;
+  background: var(--cs-surface); border: 1px solid var(--cs-rule);
+  border-radius: var(--cs-radius); box-shadow: var(--cs-shadow);
+}
+.cs-views { display: flex; gap: 4px; flex-wrap: wrap; }
+.cs-view {
+  padding: 9px 16px; border: 0; border-radius: 9px; cursor: pointer;
+  background: transparent; color: var(--cs-ink-soft);
+  font-size: 14px; font-weight: 500; font-family: inherit; white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.cs-view:hover { background: var(--cs-rule-soft); color: var(--cs-ink); }
+.cs-view.is-active { background: var(--cs-navy); color: #fff; font-weight: 600; }
+.cs-view:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+
+.cs-search { position: relative; flex: 1; min-width: 220px; }
+.cs-search svg {
+  position: absolute; inset-inline-start: 12px; top: 50%;
+  transform: translateY(-50%); color: var(--cs-ink-faint); pointer-events: none;
+}
+.cs-search input {
+  width: 100%; height: 44px; padding-inline: 38px 12px;
+  border: 1px solid var(--cs-rule); border-radius: 10px;
+  background: var(--cs-surface); color: var(--cs-ink);
+  font-size: 14.5px; font-family: inherit;
+}
+.cs-search input::placeholder { color: var(--cs-ink-faint); }
+.cs-search input:focus {
+  outline: 0; border-color: var(--cs-blue);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, .12);
+}
+
+.cs-sort {
+  flex: none; width: 44px; height: 44px; display: grid; place-items: center;
+  border: 1px solid var(--cs-rule); border-radius: 10px; cursor: pointer;
+  background: var(--cs-surface); color: var(--cs-ink-soft);
+}
+.cs-sort:hover { background: var(--cs-rule-soft); color: var(--cs-ink); }
+.cs-sort.is-active { border-color: var(--cs-blue); color: var(--cs-blue); background: var(--cs-blue-wash); }
+.cs-sort:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+
+/* ── Table ──────────────────────────────────────────────────── */
+.cs-tablewrap {
+  background: var(--cs-surface); border: 1px solid var(--cs-rule);
+  border-radius: var(--cs-radius); box-shadow: var(--cs-shadow);
+  overflow-x: auto;
+}
+.cs-table { width: 100%; border-collapse: collapse; }
+.cs-table th {
+  text-align: start; padding: 16px 18px; white-space: nowrap;
+  font-size: 11px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--cs-ink-faint); border-bottom: 1px solid var(--cs-rule);
+}
+.cs-table td {
+  padding: 15px 18px; vertical-align: middle;
+  border-bottom: 1px solid var(--cs-rule-soft); font-size: 14.5px;
+}
+.cs-table tbody tr:last-child td { border-bottom: 0; }
+.cs-table tbody tr:hover td { background: var(--cs-hover); }
+.cs-num { font-variant-numeric: tabular-nums; }
+
+/* Customer cell */
+.cs-who { display: flex; align-items: center; gap: 12px; }
+.cs-avatar {
+  flex: none; width: 40px; height: 40px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 13px; font-weight: 700; letter-spacing: .02em;
+}
+.cs-name { font-weight: 600; color: var(--cs-ink); }
+.cs-meta { font-size: 12.5px; color: var(--cs-ink-faint); margin-top: 2px; }
+
+/* Vehicle cell */
+.cs-vehicle { display: flex; align-items: center; gap: 7px; }
+.cs-vehicle svg { flex: none; color: var(--cs-ink-faint); }
+
+/* Service cell — kept on one line; the wrapper scrolls if the viewport is
+   too narrow, which reads better than a two-line service name in every row. */
+.cs-service { white-space: nowrap; }
+
+/* Due cell */
+.cs-due { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cs-due.is-late { color: var(--cs-rose); font-weight: 600; }
+.cs-due.is-late + .cs-meta { color: var(--cs-rose); }
+
+/* Channel cell */
+.cs-channel { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.cs-channel svg { flex: none; color: var(--cs-ink-faint); }
+.cs-channel.is-whatsapp svg { color: #25a366; }
+
+/* Status pill */
+.cs-pill {
+  display: inline-block; padding: 5px 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+
+/* Action group */
+.cs-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* .form-control's width:100% (CRMPages.css) becomes a flex-basis here and
+   fights the row for space — same bug as the Technician KPI controls had.
+   Shared here (rather than duplicated per-page) so any date/period input
+   dropped into .cs-actions gets a sane fixed width instead of blowing out
+   the row. */
+.cs-fixed-input { flex: 0 0 auto; width: auto; min-width: 150px; max-width: 190px; }
+.cs-send {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 16px; border: 0; border-radius: 9px; cursor: pointer;
+  background: var(--cs-navy); color: #fff;
+  font-size: 13.5px; font-weight: 600; font-family: inherit; white-space: nowrap;
+}
+.cs-send:hover:not(:disabled) { background: #16294d; }
+.cs-send:disabled { opacity: .55; cursor: default; }
+.cs-send:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+
+.cs-done { font-size: 13px; color: var(--cs-ink-faint); white-space: nowrap; }
+
+.cs-icon-btn {
+  flex: none; width: 38px; height: 38px; display: grid; place-items: center;
+  border: 1px solid var(--cs-rule); border-radius: 9px; cursor: pointer;
+  background: var(--cs-surface); color: var(--cs-ink-soft);
+}
+.cs-icon-btn:hover:not(:disabled) { background: var(--cs-rule-soft); color: var(--cs-ink); }
+.cs-icon-btn:disabled { opacity: .5; cursor: default; }
+.cs-icon-btn:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+
+/* Kebab menu */
+.cs-menu-wrap { position: relative; }
+.cs-menu {
+  position: absolute; inset-inline-end: 0; top: calc(100% + 6px); z-index: 30;
+  min-width: 190px; padding: 6px;
+  background: var(--cs-surface); border: 1px solid var(--cs-rule);
+  border-radius: 11px; box-shadow: 0 12px 32px -12px rgba(22, 35, 59, .3);
+}
+.cs-menu button {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 9px 11px; border: 0; border-radius: 7px; cursor: pointer;
+  background: none; color: var(--cs-ink); text-align: start;
+  font-size: 13.5px; font-family: inherit; white-space: nowrap;
+}
+.cs-menu button:hover { background: var(--cs-rule-soft); }
+.cs-menu button.is-danger { color: var(--cs-rose); }
+.cs-menu button.is-danger:hover { background: var(--cs-rose-wash); }
+.cs-menu-rule { height: 1px; margin: 5px 4px; background: var(--cs-rule); }
+
+/* ── Empty / loading ────────────────────────────────────────── */
+.cs-empty { padding: 56px 24px; text-align: center; color: var(--cs-ink-soft); }
+.cs-empty svg { color: #c7cddb; margin-bottom: 14px; }
+.cs-empty p { margin: 0 0 8px; font-size: 14.5px; }
+.cs-empty .cs-empty-cta {
+  margin-top: 12px; padding: 9px 18px; border: 0; border-radius: 9px; cursor: pointer;
+  background: var(--cs-navy); color: #fff; font-size: 13.5px; font-weight: 600; font-family: inherit;
+}
+
+/* ── By-service footer ──────────────────────────────────────── */
+.cs-bytype { margin-top: 22px; }
+.cs-bytype h2 {
+  margin: 0 0 10px; font-size: 11px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--cs-ink-faint);
+}
+.cs-bytype-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.cs-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 13px; border-radius: 999px;
+  border: 1px solid var(--cs-rule); background: var(--cs-surface);
+  font-size: 13px; color: var(--cs-ink-soft);
+}
+.cs-chip strong { color: var(--cs-ink); font-variant-numeric: tabular-nums; }
+.cs-chip em { font-style: normal; color: var(--cs-amber); font-weight: 600; }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   Tasks & Follow-ups
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Cross-reference strip — enquiry follow-ups live on another page, and the
+   count is useless without a way to get there. */
+.cs-crossref {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 18px; margin-bottom: 18px;
+  border: 1px solid var(--cs-amber-rule); background: var(--cs-amber-wash);
+  border-radius: var(--cs-radius); color: #7a5200; font-size: 14.5px;
+}
+.cs-crossref-icon {
+  flex: none; width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--cs-amber-tint); color: var(--cs-amber);
+}
+.cs-crossref p { margin: 0; flex: 1; min-width: 200px; }
+.cs-crossref-go {
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
+  padding: 9px 15px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--cs-amber-rule); background: var(--cs-surface);
+  color: #7a5200; font-size: 13.5px; font-weight: 600; font-family: inherit;
+}
+.cs-crossref-go:hover { background: var(--cs-amber-tint); }
+.cs-crossref-go:focus-visible { outline: 2px solid var(--cs-amber); outline-offset: 2px; }
+
+/* Task cell — a square tinted by priority, so urgency reads down the column
+   before any text is parsed. */
+.cs-task { display: flex; align-items: flex-start; gap: 12px; }
+.cs-task-icon {
+  flex: none; width: 36px; height: 36px; border-radius: 10px;
+  display: grid; place-items: center; margin-top: 1px;
+}
+.cs-task-body { min-width: 0; }
+.cs-task-title { font-weight: 600; color: var(--cs-ink); }
+.cs-task-note {
+  font-size: 12.5px; color: var(--cs-ink-faint); margin-top: 3px;
+  max-width: 300px; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+
+/* Priority and status pills carry an icon, so they are not colour-only. */
+.cs-pill-icon { display: inline-flex; align-items: center; gap: 5px; }
+
+.cs-unassigned { color: var(--cs-amber); font-weight: 500; }
+
+/* Outlined counterpart to .cs-send, for the secondary row action. */
+.cs-btn-ghost {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 15px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--cs-rule); background: var(--cs-surface);
+  color: var(--cs-ink-soft); font-size: 13.5px; font-weight: 600;
+  font-family: inherit; white-space: nowrap;
+}
+.cs-btn-ghost:hover:not(:disabled) { background: var(--cs-rule-soft); color: var(--cs-ink); }
+.cs-btn-ghost:disabled { opacity: .55; cursor: default; }
+.cs-btn-ghost:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+
+/* Filter popover behind the control bar's trailing button. */
+.cs-filter-wrap { position: relative; flex: none; }
+.cs-filter-panel {
+  position: absolute; inset-inline-end: 0; top: calc(100% + 8px); z-index: 40;
+  width: 250px; padding: 14px;
+  background: var(--cs-surface); border: 1px solid var(--cs-rule);
+  border-radius: 12px; box-shadow: 0 14px 36px -14px rgba(22, 35, 59, .32);
+}
+.cs-filter-panel label {
+  display: block; font-size: 11px; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--cs-ink-faint); margin-bottom: 6px;
+}
+.cs-filter-panel select {
+  width: 100%; height: 38px; padding-inline: 10px; margin-bottom: 12px;
+  border: 1px solid var(--cs-rule); border-radius: 8px;
+  background: var(--cs-surface); color: var(--cs-ink);
+  font-size: 14px; font-family: inherit;
+}
+.cs-filter-panel select:focus {
+  outline: 0; border-color: var(--cs-blue);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, .12);
+}
+.cs-filter-clear {
+  width: 100%; padding: 8px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--cs-rule); background: var(--cs-surface);
+  color: var(--cs-ink-soft); font-size: 13px; font-family: inherit;
+}
+.cs-filter-clear:hover { background: var(--cs-rule-soft); }
+
+/* Count badge on the filter button, so an active filter cannot be missed. */
+.cs-filter-dot {
+  position: absolute; top: -5px; inset-inline-end: -5px;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  display: grid; place-items: center;
+  background: var(--cs-blue); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+
+/* Eight columns in one table squeezes the two prose columns until titles wrap
+   to three lines. Give them a floor and let the wrapper scroll instead — a
+   readable title matters more than fitting every column on a narrow screen. */
+.cs-table--tasks th, .cs-table--tasks td { padding-inline: 14px; }
+.cs-table--tasks th:nth-child(1), .cs-table--tasks td:nth-child(1) { min-width: 250px; }
+.cs-table--tasks th:nth-child(2), .cs-table--tasks td:nth-child(2) { min-width: 160px; }
+.cs-table--tasks .cs-send, .cs-table--tasks .cs-btn-ghost { padding-inline: 13px; }
+.cs-table--tasks .cs-actions { gap: 6px; }
+.cs-table--tasks th:nth-child(3), .cs-table--tasks td:nth-child(3) { white-space: nowrap; }
+.cs-table--tasks th:nth-child(6), .cs-table--tasks td:nth-child(6) { white-space: nowrap; }
+
+/* Eight columns need ~1260px, so below a wide monitor the table scrolls — and
+   the primary actions are the first thing to slide out of reach. Pin the last
+   column to the trailing edge so Done/Start stay clickable at any width. */
+.cs-table--tasks th:last-child,
+.cs-table--tasks td:last-child {
+  position: sticky; inset-inline-end: 0; z-index: 2;
+  background: var(--cs-surface);
+  box-shadow: -10px 0 12px -12px rgba(22, 35, 59, .45);
+}
+.cs-table--tasks tbody tr:hover td:last-child { background: var(--cs-hover); }
+/* The row menu has to clear the pinned column's stacking context. */
+.cs-table--tasks td:last-child .cs-menu { z-index: 40; }
+/* Every sticky last cell owns its own stacking context, so a menu opened in
+   one row is painted behind the next row's cell (later in DOM order wins at
+   equal z-index). Lift the cell that currently hosts the open menu above its
+   siblings so the dropdown floats over the rows underneath it. */
+.cs-table--tasks td:last-child:has(.cs-menu) { z-index: 41; }
+
+/* A KPI card that filters the table below it (e.g. Complaints > Past target).
+   Only cards with a real action get the affordance. */
+.cs-kpi.is-clickable { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+.cs-kpi.is-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(16,24,40,.10); }
+.cs-kpi.is-clickable:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
+.cs-kpi.is-active { box-shadow: inset 0 0 0 2px var(--cs-rose); }

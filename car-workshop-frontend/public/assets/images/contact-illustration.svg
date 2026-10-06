@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 400">
+  <!-- Background shapes -->
+  <circle cx="175" cy="200" r="150" fill="#244066" opacity="0.05"/>
+  <circle cx="280" cy="100" r="60" fill="#f2421b" opacity="0.08"/>
+  
+  <!-- Envelope illustration -->
+  <rect x="60" y="120" width="230" height="160" rx="12" fill="#244066"/>
+  
+  <!-- Envelope flap -->
+  <path d="M60,120 L175,210 L290,120" fill="#1a3050"/>
+  <path d="M60,120 L175,190 L290,120" fill="none" stroke="#3a5a8a" stroke-width="2"/>
+  
+  <!-- Letter inside -->
+  <rect x="90" y="180" width="170" height="80" rx="6" fill="#fff"/>
+  <rect x="105" y="200" width="80" height="8" rx="2" fill="#244066" opacity="0.3"/>
+  <rect x="105" y="215" width="140" height="6" rx="2" fill="#244066" opacity="0.15"/>
+  <rect x="105" y="228" width="120" height="6" rx="2" fill="#244066" opacity="0.15"/>
+  <rect x="105" y="241" width="60" height="12" rx="3" fill="#f2421b"/>
+  
+  <!-- Floating elements -->
+  <!-- Chat bubble 1 -->
+  <rect x="20" y="80" width="80" height="40" rx="8" fill="#fff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.1))"/>
+  <rect x="32" y="92" width="50" height="6" rx="2" fill="#244066" opacity="0.3"/>
+  <rect x="32" y="104" width="40" height="6" rx="2" fill="#244066" opacity="0.2"/>
+  <polygon points="40,120 50,120 45,130" fill="#fff"/>
+  
+  <!-- Chat bubble 2 -->
+  <rect x="250" y="60" width="70" height="35" rx="8" fill="#f2421b" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.1))"/>
+  <rect x="262" y="72" width="45" height="5" rx="2" fill="#fff" opacity="0.7"/>
+  <rect x="262" y="82" width="35" height="5" rx="2" fill="#fff" opacity="0.5"/>
+  <polygon points="305,95 315,95 310,105" fill="#f2421b"/>
+  
+  <!-- Notification bell -->
+  <circle cx="300" cy="180" r="25" fill="#22c55e" opacity="0.2"/>
+  <text x="300" y="188" font-size="20" text-anchor="middle">🔔</text>
+  <circle cx="312" cy="168" r="8" fill="#f2421b"/>
+  <text x="312" y="172" font-size="8" fill="#fff" text-anchor="middle" font-weight="bold">3</text>
+  
+  <!-- Phone icon -->
+  <circle cx="50" cy="300" r="25" fill="#244066" opacity="0.1"/>
+  <text x="50" y="308" font-size="20" text-anchor="middle">📞</text>
+  
+  <!-- Email icons floating -->
+  <circle cx="290" cy="280" r="20" fill="#f2421b" opacity="0.15"/>
+  <text x="290" y="287" font-size="16" text-anchor="middle">✉️</text>
+  
+  <!-- Stars decoration -->
+  <text x="100" y="320" font-size="16" opacity="0.3">⭐</text>
+  <text x="230" y="340" font-size="12" opacity="0.2">⭐</text>
+  <text x="180" y="370" font-size="14" opacity="0.25">⭐</text>
+</svg>
+
+

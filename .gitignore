@@ -1,0 +1,26 @@
+# ── Secrets: never commit these ──
+# They are NOT in this repo. Get them from the transfer archive
+# (pioneer-workshop-mac.tar.gz) or rebuild from the .example files.
+.env
+.env.*
+!.env.example
+deploy/backend.staging.env
+
+# ── Build output: reinstall/rebuild on the target machine ──
+node_modules/
+dist/
+coverage/
+
+# ── Local state ──
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+*.log
+npm-debug.log*
+.DS_Store
+uploads/*
+!uploads/**/.gitkeep
+
+# Row ids from the last seed-complaints.js run, used by its --clean. These
+# identify different `disputes` rows in every environment, so a committed copy
+# would make --clean delete the wrong cases after a pull.
+car-workshop-backend/scripts/data/.seed-complaints-ids.json

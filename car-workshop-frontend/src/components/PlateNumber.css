@@ -1,0 +1,62 @@
+/* ═══════════════════════════════════════════════════════════
+   PlateNumber — dynamic license-plate component
+   ═══════════════════════════════════════════════════════════ */
+.plate-number {
+  --plate-color: #dc2626;
+  user-select: none;
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 4rem;
+  border-radius: 0.35rem;
+  overflow: hidden;
+  border: 1.5px solid #cbd5e1;      /* chrome outer frame */
+  background: #fff;
+  vertical-align: middle;
+  line-height: 1.05;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.plate-number.plate-elevated {
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.22);
+}
+
+/* Top strip — solid coloured band: code · country · state */
+.plate-number--top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 1px 5px;
+  background: var(--plate-color);
+  color: #fff;
+  font-weight: 700;
+}
+.plate-code { letter-spacing: 0.04em; }
+.plate-country {
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  opacity: 0.95;
+}
+.plate-state { margin-inline-start: auto; opacity: 0.9; font-weight: 600; }
+
+/* Main number block — light plate background, embossed dark digits */
+.plate-number--number {
+  background: #f1f5f9;
+  color: #0f172a;
+  text-align: center;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 1px 6px 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Size variants ── */
+.plate-sm { min-width: 3.4rem; }
+.plate-sm .plate-number--top { font-size: 7px; padding: 1px 4px; }
+.plate-sm .plate-number--number { font-size: 12px; }
+
+.plate-md .plate-number--top { font-size: 8px; }
+.plate-md .plate-number--number { font-size: 15px; }
+
+.plate-lg { min-width: 5.5rem; border-width: 2px; }
+.plate-lg .plate-number--top { font-size: 10px; padding: 2px 7px; }
+.plate-lg .plate-number--number { font-size: 20px; padding: 2px 10px 4px; }
