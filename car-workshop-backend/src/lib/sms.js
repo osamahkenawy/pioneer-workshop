@@ -28,9 +28,16 @@ import { config } from '../config.js';
  */
 export function interpolate(template, vars = {}) {
   if (!template) return '';
-  return String(template).replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, key) => {
+  // Every built-in template (notify.js, service-status.js) is written with
+  // single braces — {order_number} — which this used to leave untouched, so
+  // customers were sent "Work Order {order_number} — Placed Successfully".
+  // Single-brace names are replaced only when the variable is known, so a
+  // literal brace in a custom message survives.
+  return String(template).replace(/\{\{\s*([\w.]+)\s*\}\}|\{([\w.]+)\}/g, (match, doubleKey, singleKey) => {
+    const key = doubleKey || singleKey;
     const value = vars?.[key];
-    return value != null ? String(value) : '';
+    if (value != null) return String(value);
+    return doubleKey ? '' : match;
   });
 }
 

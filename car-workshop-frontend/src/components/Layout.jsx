@@ -2,12 +2,14 @@ import { useState, useContext, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AuthContext } from '../context/AuthContext';
+import { isTechnician, isManager } from '../lib/modules';
 import {
-  HomeSimple, Package, DeliveryTruck, Map, User, MapPin,
+  HomeSimple, Package, User,
   DollarCircle, Bell, Wallet, Page, StatsUpSquare, Settings,
-  Network, Menu, LogOut, Language, Dashboard, Upload,
-  RefreshDouble, CreditCard, Medal, Search, QrCode, ScanBarcode, Wrench, Archive, Megaphone,
-  EmojiSatisfied, ClipboardCheck, StarSolid, WarningTriangle, GraphUp, Group, Truck,
+  Network, Menu, LogOut, Language,
+  RefreshDouble, CreditCard, Medal, QrCode, Wrench, Archive, Megaphone,
+  EmojiSatisfied, ClipboardCheck, StarSolid, WarningTriangle, GraphUp, Group, Truck, PageEdit, Shop, Calendar,
+  Car, Garage, Tools, TaskList, UserBadgeCheck, CheckCircle,
 } from 'iconoir-react';
 import NotificationBell from './NotificationBell';
 import PlanBadge from './dashboard/PlanBadge';
@@ -16,21 +18,25 @@ import './Layout.css';
 
 const iconMap = {
   'dashboard':        HomeSimple,
-  'orders':           Package,
-  'mechanics':          DeliveryTruck,
-  'job-assignment':         Map,
+  'orders':           ClipboardCheck,
+  'estimates':        PageEdit,
+  'appointments':     Calendar,
+  'vehicle-board':    Garage,
+  'mechanics':          Wrench,
+  'job-assignment':         UserBadgeCheck,
   'team-leader':            Group,
   'fleet-intake':           Truck,
-  'mechanic-scan':      ScanBarcode,
-  'my-deliveries':    Package,
-  'mechanic-dashboard': HomeSimple,
-  'my-orders':        Package,
+  // Technician app
+  'tech-jobs':        Wrench,
+  'tech-scan':        QrCode,
+  'tech-history':     CheckCircle,
   'customers':          User,
-  'vehicles':           DeliveryTruck,
+  'vehicles':           Car,
   'parts':              Wrench,
   'enquiries':          Megaphone,
   'inventory':          Archive,
-  'service_bays':            MapPin,
+  'store':              Shop,
+  'service_bays':            Tools,
   'pricing':          DollarCircle,
   'notifications':    Bell,
   'wallet':           Wallet,
@@ -38,14 +44,13 @@ const iconMap = {
   'reports':          StatsUpSquare,
   'settings':         Settings,
   'api-keys':         Network,
-  'service-tracking': Search,
   'returns':          RefreshDouble,
   'cod':              CreditCard,
   'performance':      Medal,
   'customer_feedback': EmojiSatisfied,
   'customer-360':     User,
   'reminders':        Bell,
-  'crm-tasks':        ClipboardCheck,
+  'crm-tasks':        TaskList,
   'customer-experience': StarSolid,
   'complaints':       WarningTriangle,
   'technician-kpi':   GraphUp,
@@ -70,7 +75,8 @@ const navSections = [
     titleKey: 'main',
     items: [
       { path: '/dashboard',          labelKey: 'dashboard',       iconKey: 'dashboard',        moduleKey: 'dashboard',         roles: ['admin', 'dispatcher'] },
-      { path: '/mechanic/dashboard',   labelKey: 'mechanic_home',     iconKey: 'mechanic-dashboard', moduleKey: 'mechanic-dashboard',  roles: ['mechanic'] },
+      // Technician app. The module keys are the old ones, so roles keep working.
+      { path: '/mechanic',           i18nKey: 'technician.my_jobs', labelDefault: 'My Jobs', iconKey: 'tech-jobs', moduleKey: 'mechanic-dashboard', roles: ['mechanic'] },
     ]
   },
   /* â”€â”€ OPERATIONS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -79,12 +85,37 @@ const navSections = [
     items: [
       { path: '/enquiries',          labelKey: 'enquiries',       iconKey: 'enquiries',        moduleKey: 'enquiries',         roles: ['admin', 'dispatcher'] },
       { path: '/work-orders',        labelKey: 'orders',          iconKey: 'orders',           moduleKey: 'work-orders',       roles: ['admin', 'dispatcher'] },
+      // Every car in the workshop by step (replaced Service Tracking; same module key).
+      { path: '/vehicle-board',      labelKey: 'vehicle_status_board', labelDefault: 'Vehicle Status Board', iconKey: 'vehicle-board', moduleKey: 'service-status', roles: ['admin', 'dispatcher'] },
+      // Shares the work-orders moduleKey: an estimate is the first half of a job card, and
+      // a new key would hide it from every dynamic role until someone edited each one.
+      { path: '/estimates',          labelKey: 'estimates',       iconKey: 'estimates',        moduleKey: 'estimates',       roles: ['admin', 'dispatcher'] },
+      // The BOOK stage (enquiry → quote → book → visit). labelDefault: common.bookings
+      // is not in the locale files yet.
+      { path: '/appointments',       labelKey: 'bookings',        labelDefault: 'Bookings', iconKey: 'appointments', moduleKey: 'appointments', roles: ['admin', 'dispatcher'] },
+      { path: '/invoices',           labelKey: 'invoices',        iconKey: 'invoices',         moduleKey: 'invoices',          roles: ['admin', 'dispatcher'] },
       { path: '/customers',          labelKey: 'customers',       iconKey: 'customers',        moduleKey: 'customers',         roles: ['admin', 'dispatcher'] },
       { path: '/vehicles',           labelKey: 'vehicles',        iconKey: 'vehicles',         moduleKey: 'vehicles',          roles: ['admin', 'dispatcher'] },
-      { path: '/mechanics',          labelKey: 'mechanics',       iconKey: 'mechanics',        moduleKey: 'mechanics',         roles: ['admin', 'dispatcher'] },
-      { path: '/job-assignment',     labelKey: 'job_assignment',  iconKey: 'job-assignment',   moduleKey: 'job-assignment',    roles: ['admin', 'dispatcher'] },
-      { path: '/team-leader',        labelKey: 'team_board',      iconKey: 'team-leader',      moduleKey: 'team-leader',       roles: ['admin', 'dispatcher'] },
-      { path: '/fleet-intake',       labelKey: 'fleet_intake',    iconKey: 'fleet-intake',     moduleKey: 'fleet-intake',      roles: ['admin', 'dispatcher'] },
+      { path: '/mechanics',          labelKey: 'technicians',     labelDefault: 'Technicians', iconKey: 'mechanics', moduleKey: 'mechanics',         roles: ['admin', 'dispatcher'] },
+      { path: '/service-bays',       labelKey: 'service_bays',    iconKey: 'service_bays',     moduleKey: 'service-bays',      roles: ['admin', 'dispatcher'] },
+      // Not 'dispatcher': legacy accounts with no role row are Service Advisors,
+      // and assigning work is the Team Leader's (job.assign).
+      { path: '/job-assignment',     labelKey: 'job_assignment',  iconKey: 'job-assignment',   moduleKey: 'job-assignment',    roles: ['admin'] },
+      // No role's module list contains 'team-leader' or 'fleet-intake', so with
+      // their own keys these were invisible to every dynamic role (managers,
+      // advisors, supervisors). They ride on the module each one belongs to.
+      { path: '/team-leader',        labelKey: 'team_board',      iconKey: 'team-leader',      moduleKey: 'team-leader',    roles: ['admin', 'dispatcher'] },
+      { path: '/fleet-intake',       labelKey: 'fleet_intake',    iconKey: 'fleet-intake',     moduleKey: 'fleet-intake',       roles: ['admin', 'dispatcher'] },
+      // Step 6, materials: the Store's queue (requisitions to check/issue, estimate
+      // parts to price). Rides on 'inventory', which the Storekeeper and Part
+      // Advisor roles already carry. labelDefault: common.store is not in the
+      // locale files yet.
+      { path: '/store',              labelKey: 'store',           labelDefault: 'Store', iconKey: 'store', moduleKey: 'store',         roles: ['admin', 'dispatcher'] },
+      // The stock list and parts catalogue (Storekeeper and Part Advisor roles
+      // carry these modules). Not 'dispatcher', so legacy no-role accounts
+      // (Service Advisors) do not get them through the roles fallback.
+      { path: '/inventory',          labelKey: 'inventory',       iconKey: 'inventory',        moduleKey: 'inventory',         roles: ['admin'] },
+      { path: '/parts',              labelKey: 'parts',           iconKey: 'parts',            moduleKey: 'parts',             roles: ['admin'] },
     ]
   },
 
@@ -98,14 +129,15 @@ const navSections = [
       { path: '/crm/reminders',      labelKey: 'service_reminders', iconKey: 'reminders',     moduleKey: 'crm-reminders',  roles: ['admin', 'dispatcher'] },
       { path: '/crm/tasks',          labelKey: 'crm_tasks',         iconKey: 'crm-tasks',     moduleKey: 'crm-tasks',      roles: ['admin', 'dispatcher'] },
       { path: '/complaints',         labelKey: 'complaints',        iconKey: 'complaints',    moduleKey: 'complaints',     roles: ['admin', 'dispatcher'] },
+      { path: '/warranty-claims',    labelKey: 'warranty_claims', iconKey: 'returns',          moduleKey: 'warranty-claims',   roles: ['admin', 'dispatcher'] },
     ]
   },
-  /* â”€â”€ MECHANIC TOOLS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── TECHNICIAN TOOLS ───────────────────────────────────── */
   {
     titleKey: 'tools',
     items: [
-      { path: '/mechanic/work-orders',      labelKey: 'my_deliveries',   iconKey: 'my-deliveries',    moduleKey: 'my-work-orders',     roles: ['mechanic'] },
-      { path: '/mechanic/scan',        labelKey: 'scan_shipment',   iconKey: 'mechanic-scan',      moduleKey: 'mechanic-scan',       roles: ['mechanic'] },
+      { path: '/mechanic/scan',      i18nKey: 'technician.scan_job_card', labelDefault: 'Scan job card', iconKey: 'tech-scan', moduleKey: 'mechanic-scan', roles: ['mechanic'] },
+      { path: '/mechanic/history',   i18nKey: 'technician.finished_jobs', labelDefault: 'Finished jobs', iconKey: 'tech-history', moduleKey: 'my-work-orders', roles: ['mechanic'] },
     ]
   },
   /* â”€â”€ ANALYTICS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -123,7 +155,9 @@ const navSections = [
   {
     titleKey: 'system',
     items: [
-      { path: '/notifications',      labelKey: 'notifications',   iconKey: 'notifications',    moduleKey: 'notifications',     roles: ['admin'] },
+      // Templates, SMS / e-mail logs and broadcasts: managers only (every role
+      // row carries the 'notifications' module, for the bell).
+      { path: '/notifications',      labelKey: 'notifications',   iconKey: 'notifications',    moduleKey: 'notifications',     roles: ['admin'], managersOnly: true },
       { path: '/settings',           labelKey: 'settings',        iconKey: 'settings',         moduleKey: 'settings',          roles: ['admin'] },
       { path: '/api-keys',           labelKey: 'integrations',    iconKey: 'api-keys',         moduleKey: 'integrations',      roles: ['admin'] },
     ]
@@ -136,11 +170,12 @@ const navSections = [
  * If permittedModules is an array â†’ show only items whose moduleKey is included.
  * Falls back to legacy role-based filtering when no permittedModules.
  */
-function getNavForRole(role, permittedModules) {
+function getNavForRole(role, permittedModules, manager) {
   return navSections
     .map(section => ({
       ...section,
       items: section.items.filter(item => {
+        if (item.managersOnly && !manager) return false;
         // Dynamic: if user has permittedModules array, use it
         if (Array.isArray(permittedModules)) {
           return permittedModules.includes(item.moduleKey);
@@ -153,6 +188,33 @@ function getNavForRole(role, permittedModules) {
 }
 
 const allNavItems = navSections.flatMap(s => s.items);
+
+/**
+ * Page path → the menu module that opens it, for Protected's route guard: the
+ * sidebar items (technician app and Dashboard left out: they have their own
+ * rules), plus pages reached only through links.
+ */
+export const ROUTE_MODULES = Object.freeze(Object.fromEntries([
+  ...allNavItems
+    .filter(item => item.path !== '/dashboard' && !item.roles.includes('mechanic'))
+    .map(item => [item.path, item.moduleKey]),
+  ['/crm/customers', 'crm-customers'],
+]));
+
+/** The item's label: its own key (technician.*) or common.<labelKey>. */
+const navLabel = (t, item) => t(item.i18nKey || `common.${item.labelKey}`, item.labelDefault);
+
+/** `pathname` is `path` or a page under it ('/mechanic' is not under '/mechanics'). */
+const isUnder = (pathname, path) => pathname === path || pathname.startsWith(`${path}/`);
+
+/** The nav item for this page: the longest path that contains it (/mechanic/scan, not /mechanic). */
+function activeNavPath(pathname, items) {
+  let best = null;
+  for (const item of items) {
+    if (isUnder(pathname, item.path) && (!best || item.path.length > best.length)) best = item.path;
+  }
+  return best;
+}
 
 export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -196,13 +258,33 @@ export default function Layout({ children }) {
     setShowLangMenu(false);
   };
 
+  // Pages reachable without a sidebar entry of their own still get a title.
+  // A string is a path prefix; a RegExp matches the whole path and wins.
+  const ROUTE_TITLES = [
+    [/^\/work-orders\/[^/]+\/inspection\/?$/, 'layout.vehicle_inspection', 'Vehicle inspection'],
+    ['/invoices', 'common.invoices', 'Invoices'], ['/service-bays', 'common.service_bays', 'Service Bays'],
+    ['/parts', 'common.parts', 'Parts'], ['/inventory', 'common.inventory', 'Inventory'],
+    ['/warranty-claims', 'common.warranty_claims', 'Warranty Claims'], ['/service-pricing', 'common.pricing', 'Service Pricing'],
+    ['/cash-payments', 'common.cash_payments', 'Cash Payments'],
+    ['/crm/customers', 'common.customers', 'Customers'], ['/mechanic-earnings', 'common.mechanic_earnings', 'Mechanic Earnings'],
+    ['/mechanic/jobs', 'technician.job_card', 'Job card'],
+  ];
   const getPageTitle = () => {
-    const item = allNavItems.find(item => location.pathname.startsWith(item.path));
-    if (item) {
-      return t(`common.${item.labelKey}`);
-    }
-    return 'Pioneer Car Service Center';
+    const { pathname } = location;
+    const exact = ROUTE_TITLES.find(([p]) => p instanceof RegExp && p.test(pathname));
+    if (exact) return t(exact[1], exact[2]);
+    // The longest matching path, from the menu or the list above
+    const candidates = [
+      ...allNavItems.map(item => [item.path, () => navLabel(t, item)]),
+      ...ROUTE_TITLES.filter(([p]) => typeof p === 'string').map(([p, key, def]) => [p, () => t(key, def)]),
+    ].filter(([p]) => isUnder(pathname, p));
+    if (!candidates.length) return 'Pioneer Car Service Center';
+    candidates.sort((a, b) => b[0].length - a[0].length);
+    return candidates[0][1]();
   };
+  const navForRole = getNavForRole(user?.role || 'admin', user?.permitted_modules, isManager(user));
+  const activePath = activeNavPath(location.pathname, navForRole.flatMap(s => s.items));
+  const homePath = isTechnician(user) ? '/mechanic' : '/dashboard';
 
   const renderIcon = (iconKey) => {
     const IconComponent = iconMap[iconKey];
@@ -218,7 +300,7 @@ export default function Layout({ children }) {
 
       <aside className={`custom-sidebar ${sidebarOpen ? (isMobile ? 'open' : '') : 'closed'}`}>
         <div className="sidebar-brand">
-          <Link to="/dashboard">
+          <Link to={homePath}>
             <img
               src="/assets/images/logos/pioneer/pioneer_logo_white.svg"
               alt={user?.workshop_name || workshop?.name || 'Pioneer Car Service Center'}
@@ -232,7 +314,7 @@ export default function Layout({ children }) {
         </div>
 
         <nav className="sidebar-nav">
-          {getNavForRole(user?.role || 'admin', user?.permitted_modules).map((section) => (
+          {navForRole.map((section) => (
             <div key={section.titleKey} className="nav-section">
               <div className="sidebar-nav-label">
                 {t(`common.${section.titleKey}`)}
@@ -241,11 +323,12 @@ export default function Layout({ children }) {
                 <div key={item.path} className="sidebar-nav-item">
                   <Link
                     to={item.path}
-                    className={`sidebar-nav-link ${location.pathname.startsWith(item.path) ? 'active' : ''}`}
+                    className={`sidebar-nav-link ${item.path === activePath ? 'active' : ''}`}
+                    aria-current={item.path === activePath ? 'page' : undefined}
                     onClick={() => isMobile && setSidebarOpen(false)}
                   >
                     {renderIcon(item.iconKey)}
-                    <span>{t(`common.${item.labelKey}`)}</span>
+                    <span>{navLabel(t, item)}</span>
                   </Link>
                 </div>
               ))}
@@ -317,8 +400,10 @@ export default function Layout({ children }) {
           {user?.role === 'superadmin'  && <span className="role-badge super-admin">{t('roles.super_admin')}</span>}
           {user?.role === 'super_admin' && <span className="role-badge super-admin">{t('roles.super_admin')}</span>}
           {user?.role === 'admin'       && <span className="role-badge admin">{t('roles.admin')}</span>}
-          {user?.role === 'dispatcher'  && <span className="role-badge staff">{t('roles.staff')}</span>}
-          {user?.role === 'mechanic'      && <span className="role-badge staff" style={{ background: '#f973161a', color: '#f97316', borderColor: '#f97316' }}>{t('roles.mechanic')}</span>}
+          {/* a staff account given a role (e.g. Team Leader) shows that role */}
+          {user?.role === 'dispatcher'  && <span className="role-badge staff">{user.role_name || t('roles.staff')}</span>}
+          {/* roles.mechanic reads "TECHNICIAN" */}
+          {user?.role === 'mechanic'      && <span className="role-badge technician">{t('roles.mechanic', 'TECHNICIAN')}</span>}
           {user?.role
             && !['superadmin', 'super_admin', 'admin', 'dispatcher', 'mechanic'].includes(user.role)
             && (

@@ -130,7 +130,7 @@ export default function CashPayments() {
   const handleSettle = async (mechanicId) => {
     setSettling(true);
     try {
-      const res = await api.post('/cash-payments/settle', { mechanic_id: mechanicId });
+      const res = await api.post('/cash-payment/settle', { mechanic_id: mechanicId });
       if (res.success) {
         setShowSettleModal(null);
         showToast(res.message || t('cod.modal.success'), 'success');

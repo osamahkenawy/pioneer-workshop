@@ -1,6 +1,7 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { requireManager } from '../lib/access.js';
 import { logAudit } from '../lib/audit.js';
 import { getFinancialConfig, computeMechanicEarning } from '../lib/financial.js';
 
@@ -13,6 +14,10 @@ router.use(authMiddleware);
 // Uses `mechanic_earnings` table exactly as defined in car_workshop.sql:
 //   earning_type: labor/tip/bonus/penalty (not 'delivery')
 // Renamed driver_id -> mechanic_id, order_id -> work_order_id throughout.
+//
+// Recording, paying, cancelling and backfilling earnings is money owed to
+// staff: managers only (requireManager). Technicians never reach this router
+// (lib/access.js).
 // ═══════════════════════════════════════════════════════════════
 
 // GET /api/mechanic-earnings/my — Mechanic's own earnings (for mobile app)
@@ -140,7 +145,7 @@ router.get('/summary', async (req, res) => {
 });
 
 // POST /api/mechanic-earnings — record earning for a work order
-router.post('/', async (req, res) => {
+router.post('/', requireManager, async (req, res) => {
   try {
     const { mechanic_id, work_order_id, earning_type = 'labor', base_amount, bonus = 0, deductions = 0, notes } = req.body;
     if (!mechanic_id || !base_amount) return res.status(400).json({ success: false, message: 'mechanic_id and base_amount are required' });
@@ -164,7 +169,7 @@ router.post('/', async (req, res) => {
 });
 
 // PATCH /api/mechanic-earnings/:id — mark paid/cancelled
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireManager, async (req, res) => {
   try {
     const { status, notes, payment_method } = req.body;
     if (!['paid', 'cancelled'].includes(status)) return res.status(400).json({ success: false, message: 'status must be paid or cancelled' });
@@ -185,7 +190,7 @@ router.patch('/:id', async (req, res) => {
 });
 
 // POST /api/mechanic-earnings/bulk-pay — mark multiple as paid, supports partial amount
-router.post('/bulk-pay', async (req, res) => {
+router.post('/bulk-pay', requireManager, async (req, res) => {
   try {
     const { mechanic_id, ids, amount, notes, payment_method } = req.body;
 
@@ -249,7 +254,7 @@ router.post('/bulk-pay', async (req, res) => {
 });
 
 // POST /api/mechanic-earnings/recalculate — backfill missing earnings for completed work orders
-router.post('/recalculate', async (req, res) => {
+router.post('/recalculate', requireManager, async (req, res) => {
   try {
     const { mechanic_id } = req.body;
     const config = await getFinancialConfig(req.workshopId);

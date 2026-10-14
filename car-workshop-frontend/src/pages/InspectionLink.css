@@ -1,0 +1,163 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Public vehicle inspection page — the customer's copy, and where they sign.
+
+   Standalone like EstimateApproval.css: reached from a WhatsApp'd or emailed
+   link, never logged in, shares nothing with the dashboard shell. Same
+   navy/orange brand. Phone-first; logical properties so it reads right to
+   left as well.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.il-page {
+  --il-navy: #1e3a6b;
+  --il-orange: #f97316;
+  --il-orange-bg: #fff7ed;
+  --il-ink: #1e293b;
+  --il-muted: #64748b;
+  --il-line: #e2e8f0;
+  --il-green: #16a34a;
+  --il-green-bg: #ecfdf3;
+
+  min-height: 100vh;
+  background: #f4f6f9;
+  padding: 28px 16px 48px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: var(--il-ink);
+  box-sizing: border-box;
+  -webkit-text-size-adjust: 100%;
+}
+.il-page *, .il-page *::before, .il-page *::after { box-sizing: border-box; }
+
+.il-card {
+  max-width: 720px;
+  margin-inline: auto;
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+  padding: 28px 30px 30px;
+}
+.il-card.il-center { text-align: center; padding: 60px 30px; color: var(--il-muted); }
+.il-card.il-center h1 { font-size: 20px; margin: 0 0 8px; color: var(--il-navy); }
+.il-card.il-center p { color: var(--il-muted); margin: 0; }
+.il-retry { margin-block-start: 18px; }
+.il-spinner {
+  width: 28px; height: 28px; margin: 0 auto 14px; border-radius: 50%;
+  border: 3px solid var(--il-line); border-top-color: var(--il-orange);
+  animation: il-spin .8s linear infinite;
+}
+@keyframes il-spin { to { transform: rotate(360deg); } }
+
+/* ── Header ── */
+.il-header { padding-block-end: 18px; border-block-end: 1px solid var(--il-line); margin-block-end: 18px; }
+.il-brand-row { display: flex; align-items: center; gap: 10px; }
+.il-logo { display: block; height: 104px; max-width: 280px; margin-block: -14px -8px; margin-inline-start: -12px; object-fit: contain; object-position: left center; }
+[dir='rtl'] .il-logo { object-position: right center; }
+.il-header h1 { font-size: 22px; margin: 8px 0 6px; color: var(--il-navy); letter-spacing: -0.01em; line-height: 1.25; }
+.il-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 14px; color: var(--il-muted); }
+
+/* ── Banners ── */
+.il-banner { border-radius: 12px; padding: 12px 16px; font-size: 14px; font-weight: 600; margin-block-end: 16px; line-height: 1.5; }
+.il-banner-ok   { background: var(--il-green-bg); color: #15803d; border: 1px solid #bbf7d0; }
+.il-banner-warn { background: var(--il-orange-bg); color: #9a3412; border: 1px solid #fed7aa; }
+
+/* ── Sections ── */
+.il-section { margin-block-end: 22px; }
+.il-section h2 {
+  font-size: 13px; font-weight: 800; color: var(--il-navy); text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 0 0 10px; padding-block-end: 6px; border-block-end: 2px solid var(--il-navy);
+}
+.il-section h2 ~ h2 { margin-block-start: 16px; }
+.il-muted { font-size: 14px; color: var(--il-muted); line-height: 1.55; margin: 0 0 10px; }
+.il-text { font-size: 14.5px; line-height: 1.55; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.il-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; margin: 0; }
+.il-facts div { min-width: 0; }
+.il-facts dt { font-size: 11.5px; font-weight: 700; color: var(--il-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.il-facts dd { margin: 2px 0 0; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+.il-plate {
+  font-family: 'IBM Plex Mono', ui-monospace, Consolas, monospace; font-weight: 700; font-size: 13.5px;
+  background: #f1f5f9; border: 1px solid var(--il-line); border-radius: 6px; padding: 2px 8px;
+}
+
+/* ── Damage: the diagram (only the views with marks) and the list ──
+   Markers are stored relative to the car picture (CarDamageDiagram.jsx,
+   lib/inspectionMarks.js), so they sit on the spot that was clicked whatever
+   the width of this panel. Markers saved before that are relative to the
+   staff form's box and can sit a little off here; the list under the
+   diagram is the record either way: code, view and note. */
+.il-diagram { max-width: 300px; margin: 0 auto 14px; }
+
+.il-marks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.il-mark button {
+  width: 100%; min-height: 48px; display: flex; align-items: flex-start; gap: 10px; text-align: start;
+  padding: 10px 12px; border-radius: 12px; border: 1.5px solid var(--il-line); background: #fff;
+  font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.il-mark-on button { border-color: var(--il-orange); background: var(--il-orange-bg); }
+.il-mark-n { font-size: 12px; color: #94a3b8; min-inline-size: 16px; padding-block-start: 3px; }
+.il-mark-code {
+  flex-shrink: 0; color: #fff; font-size: 11px; font-weight: 800; border-radius: 999px;
+  min-inline-size: 30px; padding: 3px 7px; text-align: center;
+}
+.il-mark-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.il-mark-label { font-size: 14.5px; font-weight: 700; }
+.il-mark-view { font-size: 12.5px; color: var(--il-muted); }
+.il-mark-note { font-size: 13.5px; color: var(--il-ink); margin-block-start: 3px; overflow-wrap: anywhere; }
+
+/* ── Paper form pages ── */
+.il-docs { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.il-doc {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; grid-column: 1 / -1;
+  border: 1.5px solid var(--il-line); border-radius: 12px;
+}
+.il-doc-name { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.il-doc-img { grid-column: auto; padding: 0; overflow: hidden; }
+.il-doc-img a { display: block; inline-size: 100%; }
+.il-doc-img img { display: block; inline-size: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: #f8fafc; }
+
+/* ── Signature ── */
+.il-signed img { display: block; max-inline-size: 100%; max-block-size: 140px; border: 1px solid var(--il-line); border-radius: 10px; background: #fff; }
+.il-signed p { font-size: 14px; color: #15803d; font-weight: 600; margin: 8px 0 0; }
+
+.il-field { display: block; font-size: 12px; font-weight: 700; color: var(--il-muted); margin-block-end: 14px; }
+.il-field input {
+  display: block; inline-size: 100%; margin-block-start: 5px;
+  border: 1.5px solid var(--il-line); border-radius: 10px;
+  padding: 11px 12px; font-size: 16px; /* 16px stops iOS zooming in */
+  font-family: inherit; color: var(--il-ink); background: #fff;
+}
+.il-field input:focus { outline: none; border-color: var(--il-orange); box-shadow: 0 0 0 3px rgba(249,115,22,.15); }
+
+.il-pad-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; color: var(--il-muted); margin-block-end: 5px; }
+.il-link-btn {
+  background: none; border: none; padding: 4px 8px; margin-inline-end: -8px; min-height: 44px; min-width: 44px;
+  font: inherit; font-weight: 700; color: #c2410c; cursor: pointer;
+}
+.il-link-btn:disabled { color: #cbd5e1; cursor: default; }
+.il-pad {
+  display: block; inline-size: 100%; aspect-ratio: 600 / 220; block-size: auto;
+  border: 1.5px dashed #cbd5e1; border-radius: 12px; background: #fff;
+  touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none;
+}
+.il-confirm { font-size: 14px; font-weight: 600; color: var(--il-navy); line-height: 1.5; margin: 12px 0; }
+
+.il-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: none; border-radius: 10px; padding: 10px 18px; font-size: 15px; min-height: 48px;
+  font-weight: 700; cursor: pointer; font-family: inherit; text-decoration: none;
+  transition: opacity 0.15s, transform .1s; -webkit-tap-highlight-color: transparent;
+}
+.il-btn:active:not(:disabled) { transform: scale(.98); }
+.il-btn:disabled { opacity: 0.55; cursor: default; }
+.il-btn-primary { inline-size: 100%; background: var(--il-green); color: #fff; box-shadow: 0 3px 10px rgba(22,163,74,.25); }
+.il-btn-ghost { background: #fff; color: var(--il-navy); border: 1.5px solid var(--il-line); }
+.il-btn-sm { min-height: 44px; padding: 6px 14px; font-size: 13.5px; }
+
+.il-contact { text-align: center; font-size: 13.5px; color: var(--il-muted); margin: 8px 0 0; }
+.il-contact a { color: var(--il-navy); font-weight: 700; }
+
+@media (max-width: 560px) {
+  .il-page { padding: 0 0 32px; background: #fff; }
+  .il-card { border-radius: 0; box-shadow: none; padding: 20px 16px 24px; }
+  .il-header h1 { font-size: 20px; }
+  .il-logo { height: 88px; }
+}

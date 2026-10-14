@@ -5,11 +5,61 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { requireManager, isTechnician } from '../lib/access.js';
 import { uploadToS3 } from '../lib/s3.js';
 import { validateUpload, IMAGE_KINDS } from '../lib/file-validate.js';
+import { ASSIGNED_TO_MECHANIC } from './work-orders.js';
 
 const router = express.Router();
 router.use(authMiddleware);
+
+/* ── Technician scope ──────────────────────────────────────────
+   A technician's login reaches this router (lib/access.js) for the photos
+   and signatures of their own jobs. These guards run before multer, so a
+   refused upload is never written to disk. Staff are not limited here. */
+
+/** The technician's mechanics.id, or 0 when the login has no mechanic profile. */
+async function ownMechanicId(req) {
+  const [m] = await query('SELECT id FROM mechanics WHERE user_id = ? AND workshop_id = ?', [req.user.id, req.workshopId]);
+  return m?.id || 0;
+}
+
+/** A technician only on a work order assigned to them (work order or any of its job cards); otherwise 404. */
+async function technicianOwnWorkOrder(req, res, next) {
+  if (!isTechnician(req.user)) return next();
+  try {
+    const mine = await ownMechanicId(req);
+    const [own] = await query(
+      `SELECT wo.id FROM work_orders wo WHERE wo.id = ? AND wo.workshop_id = ? AND ${ASSIGNED_TO_MECHANIC}`,
+      [req.params.id, req.workshopId, mine, mine]
+    );
+    if (!own) return res.status(404).json({ success: false, message: 'Work order not found' });
+    return next();
+  } catch (err) {
+    console.error('[Uploads] technician scope:', err.message);
+    return res.status(500).json({ success: false, message: 'Upload failed' });
+  }
+}
+
+/** A technician only on their own mechanic profile; otherwise 404. */
+async function technicianOwnProfile(req, res, next) {
+  if (!isTechnician(req.user)) return next();
+  try {
+    if (String(await ownMechanicId(req)) !== String(req.params.id)) {
+      return res.status(404).json({ success: false, message: 'Mechanic not found' });
+    }
+    return next();
+  } catch (err) {
+    console.error('[Uploads] technician scope:', err.message);
+    return res.status(500).json({ success: false, message: 'Upload failed' });
+  }
+}
+
+/** Not a technician's tool at all. */
+function refuseTechnician(req, res, next) {
+  if (!isTechnician(req.user)) return next();
+  return res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: 'Your account does not have access to this.' });
+}
 
 /* ── Upload Directory Setup ─────────────────────────────────── */
 const UPLOADS_DIR = path.resolve('uploads');
@@ -53,8 +103,9 @@ const proofPhoto  = makeUpload('proofs', 10);
 const stopProofPhoto = makeUpload('stop-proofs', 10);
 const signaturePhoto = makeUpload('signatures', 5);
 
-/* ── POST /api/uploads/logo/:variant — company logo upload (colored or white) ── */
-router.post('/logo/:variant?', logoUpload.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
+/* ── POST /api/uploads/logo/:variant — company logo upload (colored or white) ──
+   Workshop branding is a setting: managers only, like PUT /api/settings. */
+router.post('/logo/:variant?', requireManager, logoUpload.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
@@ -103,7 +154,7 @@ router.post('/logo/:variant?', logoUpload.single('file'), validateUpload(IMAGE_K
 });
 
 /* ── POST /api/uploads/mechanics/:id/photo ───────────────────── */
-router.post('/mechanics/:id/photo', mechanicPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
+router.post('/mechanics/:id/photo', technicianOwnProfile, mechanicPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
     const [mechanic] = await query(
@@ -148,7 +199,7 @@ export async function saveBase64Signature(base64DataUrl, workOrderId) {
 }
 
 /* ── POST /api/uploads/work-orders/:id/proof ───────────────── */
-router.post('/work-orders/:id/proof', proofPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
+router.post('/work-orders/:id/proof', technicianOwnWorkOrder, proofPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
   try {
     const [workOrder] = await query(
       'SELECT id, status FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]
@@ -190,7 +241,7 @@ router.post('/work-orders/:id/proof', proofPhoto.single('file'), validateUpload(
    endpoint is not expected to be commonly used in the car-workshop
    domain — left in place per "preserve business logic" guidance rather
    than silently dropped. ── */
-router.post('/stops/:stopId/proof', stopProofPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
+router.post('/stops/:stopId/proof', refuseTechnician, stopProofPhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
     const [stop] = await query(
@@ -208,7 +259,7 @@ router.post('/stops/:stopId/proof', stopProofPhoto.single('file'), validateUploa
 });
 
 /* ── POST /api/uploads/work-orders/:id/signature — Customer signature capture ── */
-router.post('/work-orders/:id/signature', signaturePhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
+router.post('/work-orders/:id/signature', technicianOwnWorkOrder, signaturePhoto.single('file'), validateUpload(IMAGE_KINDS), async (req, res) => {
   try {
     const [workOrder] = await query(
       'SELECT id, status FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]

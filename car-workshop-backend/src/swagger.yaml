@@ -697,22 +697,6 @@ paths:
         '201':
           description: Created
 
-  /mechanics/live-locations:
-    get:
-      tags: [Mechanics]
-      summary: Get live locations of all mechanics
-      responses:
-        '200':
-          description: Array of mechanic location objects
-
-  /mechanics/locations/live:
-    get:
-      tags: [Mechanics]
-      summary: Get live locations (alternate path)
-      responses:
-        '200':
-          description: Array of mechanic location objects
-
   /mechanics/me:
     get:
       tags: [Mechanics]

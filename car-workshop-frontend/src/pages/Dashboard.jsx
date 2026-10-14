@@ -9,19 +9,30 @@ import {
 } from 'chart.js';
 import { Line, Doughnut, Bar } from 'react-chartjs-2';
 import { 
-  Package, DeliveryTruck, Check, WarningTriangle, DollarCircle,
+  Package, Check, WarningTriangle, DollarCircle,
   Clock, MapPin, StatUp, StatDown, ArrowRight, Plus, Activity,
-  Timer, Wallet, Refresh, Settings, Wrench
+  Timer, Refresh, Settings, Wrench, Page, ClipboardCheck, Group, Truck, User
 } from 'iconoir-react';
 import { AuthContext } from '../context/AuthContext';
 import api from '../lib/api';
 import { fmtCurrency } from '../utils/currency';
 import './Dashboard.css';
+import MyTasks from '../components/workflow/MyTasks';
+import { canDo, hasModule } from '../lib/permissions';
+import { woDisplayKey, woLabel, WO_DISPLAY_KEYS, WO_STATUSES } from '../lib/statusLabels';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement,
   BarElement, ArcElement, Title, Tooltip, Legend, Filler);
 
 const AUTO_REFRESH_MS = 30000; // 30 seconds
+
+/* Chart colours per workshop stage (lib/statusLabels.js display keys); the
+   words come from woLabel. Brighter than the chip tones so slices read on
+   the white card. */
+const STAGE_COLORS = {
+  checked_in: '#64748b', inspected: '#0ea5e9', approved: '#6366f1', assigned: '#8b5cf6', in_work: '#3b82f6',
+  quality_check: '#a855f7', ready: '#f97316', closed: '#22c55e', cancelled: '#94a3b8',
+};
 
 const WIDGET_DEFS = [
   { key: 'metrics',      label: 'dashboard.widgets.metrics' },
@@ -49,7 +60,7 @@ export default function Dashboard() {
      morning still wants to see how the period is going, so the dashboard is
      period-based rather than day-based. Remembered per browser. */
   const [period, setPeriod] = useState(() => {
-    try { return localStorage.getItem('dashboard_period') === 'week' ? 'week' : 'month'; } catch { return 'month'; }
+    try { const p = localStorage.getItem('dashboard_period'); return ['week', 'all'].includes(p) ? p : 'month'; } catch { return 'month'; }
   });
   const [periodRange, setPeriodRange] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -97,11 +108,14 @@ export default function Dashboard() {
 
   const periodLabel = period === 'week'
     ? t('dashboard.this_week', 'This Week')
+    : period === 'all' ? t('dashboard.all_time', 'All time')
     : t('dashboard.this_month', 'This Month');
-  // Deltas compare against the previous period, not yesterday
+  // "this month" / "this week" for use inside a sentence
+  const periodPhrase = period === 'week' ? t('dashboard.phrase_week', 'this week') : t('dashboard.phrase_month', 'this month');
+  // Deltas compare with the previous period up to the same day (stats.js)
   const vsLabel = period === 'week'
-    ? t('dashboard.vs_last_week', 'vs last week')
-    : t('dashboard.vs_last_month', 'vs last month');
+    ? t('dashboard.vs_same_point_last_week', 'vs this point last week')
+    : t('dashboard.vs_same_point_last_month', 'vs this point last month');
 
   const changePeriod = (next) => {
     setPeriod(next);
@@ -136,6 +150,16 @@ export default function Dashboard() {
   const formatDate = () => currentTime.toLocaleDateString(i18n.language === 'ar' ? 'ar-AE' : 'en-AE', { weekday: 'long', month: 'long', day: 'numeric' });
   const cur = workshop?.currency || 'AED';
   const fmtAED = (v) => fmtCurrency(v, cur);
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-AE');
+  const fmtDay = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-AE', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+  // Recent rows span months of history: a bare time ("04:26 PM") hid that
+  // most of them are not from today.
+  const fmtWhen = (ts) => {
+    const d = new Date(ts);
+    const time = d.toLocaleTimeString('en-AE', { hour: '2-digit', minute: '2-digit', hour12: true });
+    return d.toDateString() === new Date().toDateString()
+      ? time : `${d.toLocaleDateString('en-AE', { day: 'numeric', month: 'short' })}, ${time}`;
+  };
   const fmtMins = (m) => {
     if (!m || m <= 0) return '—';
     if (m < 60) return `${m}m`;
@@ -145,7 +169,9 @@ export default function Dashboard() {
   };
 
   const DeltaBadge = ({ delta }) => {
-    if (delta === undefined || delta === null) return null;
+    // Nothing to say when there is no comparison, or when the period is empty
+    // (the header already says so — a row of red "-100%" badges adds nothing).
+    if (delta === undefined || delta === null || period === 'all' || !(stats.orders_period > 0)) return null;
     const isUp = delta >= 0;
     return (
       <span className={`delta-badge ${isUp ? 'up' : 'down'}`}>
@@ -158,8 +184,9 @@ export default function Dashboard() {
   const lineData = {
     // A month's worth of points can't be labelled by weekday (they'd repeat),
     // so switch to day-of-month once the range is longer than a week.
-    labels: chart.map(d => new Date(d.date).toLocaleDateString(undefined,
-      chart.length > 7 ? { day: 'numeric', month: 'short' } : { weekday: 'short' })),
+    labels: chart.map(d => new Date(`${d.date}T00:00:00`).toLocaleDateString('en-AE',
+      periodRange?.granularity === 'month' ? { month: 'short', year: 'numeric' }
+        : chart.length > 7 ? { day: 'numeric', month: 'short' } : { weekday: 'short' })),
     datasets: [
       {
         label: t('dashboard.chart_orders'),
@@ -189,37 +216,38 @@ export default function Dashboard() {
     }
   };
 
-  const statusLabel = (s) => t(`statuses.${s}`, s);
-  const statusColor = (s) => {
-    const map = { completed: '#22c55e', cancelled: '#94a3b8', in_progress: '#3b82f6', inspection: '#7c3aed', assigned: '#8b5cf6', accepted: '#1565C0', ready_for_pickup: '#f97316', pending: '#d97706', confirmed: '#0ea5e9' };
-    return map[s] || '#64748b';
-  };
+  const stageColor = (woOrStatus) => STAGE_COLORS[woDisplayKey(woOrStatus)] || '#64748b';
 
-  /* Status breakdown — one slice per actual status, in lifecycle order, so a
-     slice maps 1:1 onto a work-order status and can drill through to the list
-     filtered by exactly that status. Empty statuses are dropped. */
-  const STATUS_ORDER = ['pending','confirmed','assigned','accepted','in_progress','inspection','ready_for_pickup','completed','cancelled'];
-  const statusSlices = STATUS_ORDER
-    .map(s => ({ status: s, count: Number(ordersByStatus.find(r => r.status === s)?.count || 0) }))
+  /* Status breakdown — one slice per workshop stage, in Steps 1–7 order.
+     Stored statuses that read the same fold into one slice: 'accepted' (the
+     old courier step) into Technician assigned, 'estimate_approved' and
+     'auto_assign' into Approved. A slice drills through to the list filtered
+     by exactly the statuses in it. Empty stages are dropped. */
+  const statusSlices = WO_DISPLAY_KEYS
+    .map(key => {
+      const statuses = WO_STATUSES.filter(s => woDisplayKey(s) === key);
+      const count = ordersByStatus.filter(r => statuses.includes(r.status)).reduce((sum, r) => sum + Number(r.count || 0), 0);
+      return { key, statuses, count };
+    })
     .filter(s => s.count > 0);
   const statusTotal = statusSlices.reduce((sum, s) => sum + s.count, 0);
 
   const statusData = {
-    labels: statusSlices.map(s => statusLabel(s.status)),
+    labels: statusSlices.map(s => woLabel(t, s.statuses[0])),
     datasets: [{
       data: statusSlices.map(s => s.count),
-      backgroundColor: statusSlices.map(s => statusColor(s.status)),
+      backgroundColor: statusSlices.map(s => STAGE_COLORS[s.key]),
       borderWidth: 0,
     }]
   };
 
   // Carry the dashboard's period into the list, so the row count the user
   // lands on matches the slice they clicked.
-  const goToStatus = (status) => {
+  const goToStatus = (statuses) => {
     const range = periodRange
       ? `&date_from=${periodRange.start_date}&date_to=${periodRange.end_date}`
       : '';
-    navigate(`/work-orders?status=${status}${range}`);
+    navigate(`/work-orders?status=${statuses.join(',')}${range}`);
   };
 
   const doughnutOptions = {
@@ -228,17 +256,18 @@ export default function Dashboard() {
     // filtered to that status.
     onClick: (_evt, elements) => {
       const slice = statusSlices[elements?.[0]?.index];
-      if (slice) goToStatus(slice.status);
+      if (slice) goToStatus(slice.statuses);
     },
     onHover: (evt, elements) => {
       if (evt?.native?.target) evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
     },
     plugins: {
       legend: {
-        position: 'right',
+        // Under the ring on a phone, where a side legend squeezes it to nothing.
+        position: typeof window !== 'undefined' && window.innerWidth < 600 ? 'bottom' : 'right',
         onClick: (_e, item) => {
           const slice = statusSlices[item?.index];
-          if (slice) goToStatus(slice.status);
+          if (slice) goToStatus(slice.statuses);
         },
         labels: {
           usePointStyle: true,
@@ -248,7 +277,7 @@ export default function Dashboard() {
           generateLabels: (chart) => {
             const ds = chart.data.datasets[0] || { data: [], backgroundColor: [] };
             return (chart.data.labels || []).map((label, i) => ({
-              text: `${label} — ${ds.data[i]}`,
+              text: `${label} — ${Number(ds.data[i]).toLocaleString('en-AE')}`,
               fillStyle: ds.backgroundColor[i],
               strokeStyle: ds.backgroundColor[i],
               pointStyle: 'circle',
@@ -263,7 +292,7 @@ export default function Dashboard() {
         callbacks: {
           label: (ctx) => {
             const pct = statusTotal ? Math.round((ctx.parsed / statusTotal) * 100) : 0;
-            return ` ${ctx.label}: ${ctx.parsed} (${pct}%)`;
+            return ` ${ctx.label}: ${Number(ctx.parsed).toLocaleString('en-AE')} (${pct}%)`;
           },
           footer: () => 'Click to view these work orders',
         },
@@ -279,6 +308,10 @@ export default function Dashboard() {
     <div className="dashboard">
       {/* Welcome Header */}
       <div className="dashboard-header">
+        {/* The glow shapes live in their own clipped layer. They used to sit
+            on the header itself, whose overflow:hidden then also clipped the
+            "Customize widgets" panel opening out of it. */}
+        <div className="dashboard-header-deco" aria-hidden="true" />
         <div className="welcome-section">
           <div className="greeting-time">
             <Clock width={16} height={16} />
@@ -292,7 +325,8 @@ export default function Dashboard() {
               status breakdown below. */}
           <div style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 999, background: 'rgba(255,255,255,0.14)', marginTop: 10 }}>
             {[{ k: 'week', label: t('dashboard.this_week', 'This Week') },
-              { k: 'month', label: t('dashboard.this_month', 'This Month') }].map(opt => (
+              { k: 'month', label: t('dashboard.this_month', 'This Month') },
+              { k: 'all', label: t('dashboard.all_time', 'All time') }].map(opt => (
               <button
                 key={opt.k}
                 onClick={() => changePeriod(opt.k)}
@@ -309,7 +343,13 @@ export default function Dashboard() {
           </div>
           {periodRange && (
             <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.7)', marginTop: 6 }}>
-              {periodRange.start_date} → {periodRange.end_date}
+              {fmtDay(periodRange.start_date)} → {fmtDay(periodRange.end_date)}
+            </div>
+          )}
+          {period !== 'all' && !loading && (stats.orders_period || 0) === 0 && (
+            <div className="period-empty-hint">
+              {t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}
+              <button onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
             </div>
           )}
         </div>
@@ -327,10 +367,12 @@ export default function Dashboard() {
               {t('dashboard.updated')} {lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
             </span>
           )}
-          <Link to="/work-orders" className="btn-primary">
-            <Plus width={18} height={18} />
-            {t('dashboard.new_order')}
-          </Link>
+          {canDo(user, 'job.open') && (
+            <Link to="/work-orders?new=1" className="btn-primary">
+              <Plus width={18} height={18} />
+              {t('dashboard.new_order')}
+            </Link>
+          )}
           <div style={{ position: 'relative' }}>
             <button className="btn-auto-refresh" onClick={() => setShowWidgetPanel(v => !v)} title={t('dashboard.settings.customize_widgets')}>
               <Settings width={15} height={15} /> {t('dashboard.settings.customize_widgets')}
@@ -353,17 +395,17 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Key Metrics Row — 6 cards now (#42 monthly revenue, #48 avg delivery time) */}
+      {/* Steps 1–7: what is waiting on this person's role */}
+      <MyTasks />
+
+      {/* Key Metrics Row — every tile follows the period switcher. When a
+          period is empty the tiles say so and the header offers "Show all
+          time"; they no longer swap to all-time figures behind a label that
+          still reads "This Month". */}
       {widgetVis.metrics && (() => {
-        // Freshly imported datasets can have every WO dated in the past,
-        // which leaves every "This Month" tile at 0. Fall back to all-time
-        // figures so the dashboard actually shows the workshop's backlog.
-        const usePeriod = (stats.orders_period || 0) > 0;
-        const scopeLabel = usePeriod ? periodLabel : t('dashboard.all_time', 'All time');
-        const ordersVal = usePeriod ? (stats.orders_period || 0) : (stats.total_orders_all_time || 0);
-        const completedVal = usePeriod ? (stats.completed_period || 0) : (stats.completed_orders_all_time || 0);
-        const revenueVal = usePeriod ? (stats.revenue_period || 0) : (stats.revenue_all_time || 0);
-        const cancelledVal = usePeriod ? (stats.cancelled_period || 0) : Math.max(0, (stats.total_orders_all_time || 0) - (stats.completed_orders_all_time || 0) - (stats.active_orders_all_time || 0));
+        const isAll = period === 'all';
+        const cancelledVal = isAll ? (stats.cancelled_all_time || 0) : (stats.cancelled_period || 0);
+        const allTimeNote = (txt) => !isAll && <span className="metric-sub">{txt}</span>;
         return (
         <div className="metrics-row">
         <div className="metric-card primary">
@@ -371,13 +413,14 @@ export default function Dashboard() {
             <Package width={24} height={24} />
           </div>
           <div className="metric-content">
-            <span className="metric-value">{ordersVal}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.orders_period', 'Work Orders')} · {scopeLabel}</span>
+            <span className="metric-value">{fmtNum(stats.orders_period)}</span>
+            <span className="metric-label">{t('dashboard.kpiCards.orders_period', 'Work Orders')} · {periodLabel}</span>
+            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.total_orders_all_time) }))}
           </div>
-          {usePeriod && <DeltaBadge delta={stats.delta_orders_period} />}
-          <div className="metric-trend positive">
-            <StatUp width={14} height={14} />
-            <span>{t('dashboard.active_label')}: {stats.active_orders_all_time || stats.active_orders || 0}</span>
+          <DeltaBadge delta={stats.delta_orders_period} />
+          <div className="metric-trend neutral">
+            <Activity width={14} height={14} />
+            <span>{t('dashboard.active_now', 'In the workshop now')}: {fmtNum(stats.active_orders_all_time || stats.active_orders)} · {t('dashboard.waiting', 'Waiting')}: {fmtNum(stats.waiting_orders ?? stats.pending_orders)}</span>
           </div>
         </div>
 
@@ -386,14 +429,17 @@ export default function Dashboard() {
             <Check width={24} height={24} />
           </div>
           <div className="metric-content">
-            <span className="metric-value">{completedVal}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.completed_orders')} · {scopeLabel}</span>
+            <span className="metric-value">{fmtNum(stats.completed_period)}</span>
+            <span className="metric-label">{t('dashboard.kpiCards.completed_orders')} · {periodLabel}</span>
+            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.completed_orders_all_time) }))}
           </div>
           <DeltaBadge delta={stats.delta_completed_period} />
-          <div className="metric-trend positive">
-            <StatUp width={14} height={14} />
-            <span>{t('dashboard.rate_label')}: {stats.success_rate_period || 0}%</span>
-          </div>
+          {stats.success_rate_period != null && (
+            <div className="metric-trend positive">
+              <StatUp width={14} height={14} />
+              <span>{t('dashboard.completion_rate', 'Completion rate')}: {stats.success_rate_period}%</span>
+            </div>
+          )}
         </div>
 
         <div className="metric-card tertiary">
@@ -401,12 +447,12 @@ export default function Dashboard() {
             <Wrench width={24} height={24} />
           </div>
           <div className="metric-content">
-            <span className="metric-value">{stats.available_mechanics || 0}<span style={{ fontSize: 13, fontWeight: 500, color: '#94a3b8' }}>/{stats.total_mechanics || 0}</span></span>
+            <span className="metric-value">{fmtNum(stats.available_mechanics)}<span style={{ fontSize: 13, fontWeight: 500, color: '#94a3b8' }}> / {fmtNum(stats.total_mechanics)}</span></span>
             <span className="metric-label">{t('dashboard.kpiCards.active_mechanics')}</span>
           </div>
-          <div className="metric-trend">
+          <div className="metric-trend neutral">
             <Activity width={14} height={14} />
-            <span>{t('dashboard.pending_label')}: {stats.pending_orders || 0}</span>
+            <span>{t('dashboard.on_a_job', 'On a job')}: {fmtNum(stats.busy_mechanics)} · {t('dashboard.off_duty', 'Off')}: {fmtNum(stats.offline_mechanics)}</span>
           </div>
         </div>
 
@@ -416,11 +462,8 @@ export default function Dashboard() {
           </div>
           <div className="metric-content">
             <span className="metric-value">{fmtMins(stats.avg_minutes_period)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.delivery_time')}</span>
-          </div>
-          <div className="metric-trend">
-            <Clock width={14} height={14} />
-            <span>{periodLabel}</span>
+            <span className="metric-label">{t('dashboard.kpiCards.delivery_time')} · {periodLabel}</span>
+            {!stats.avg_minutes_period && <span className="metric-sub">{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: isAll ? '' : periodPhrase })}</span>}
           </div>
         </div>
 
@@ -429,22 +472,21 @@ export default function Dashboard() {
             <DollarCircle width={24} height={24} />
           </div>
           <div className="metric-content">
-            <span className="metric-value" style={{ fontSize: 17 }}>{fmtAED(revenueVal)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.revenue', 'Revenue')} · {scopeLabel}</span>
+            <span className="metric-value" style={{ fontSize: 20 }}>{fmtAED(stats.revenue_period)}</span>
+            <span className="metric-label">{t('dashboard.kpiCards.revenue', 'Revenue')} · {periodLabel}</span>
+            {allTimeNote(t('dashboard.amount_all_time', '{{amount}} all time', { amount: fmtAED(stats.revenue_all_time) }))}
           </div>
-          {usePeriod && <DeltaBadge delta={stats.delta_revenue_period} />}
+          <DeltaBadge delta={stats.delta_revenue_period} />
         </div>
 
-        {/* The fixed "Revenue This Month" tile was removed — the revenue tile
-            above already follows the period switcher, so on the month view the
-            two showed the identical figure. */}
         <div className="metric-card accent">
-          <div className="metric-icon" style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981' }}>
-            <Wallet width={24} height={24} />
+          <div className="metric-icon" style={{ background: 'rgba(148,163,184,0.15)', color: '#64748b' }}>
+            <WarningTriangle width={24} height={24} />
           </div>
           <div className="metric-content">
-            <span className="metric-value">{cancelledVal}</span>
-            <span className="metric-label">{t('statuses.cancelled')} · {scopeLabel}</span>
+            <span className="metric-value">{fmtNum(cancelledVal)}</span>
+            <span className="metric-label">{woLabel(t, 'cancelled')} · {periodLabel}</span>
+            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.cancelled_all_time) }))}
           </div>
         </div>
       </div>
@@ -460,11 +502,16 @@ export default function Dashboard() {
           <div className="chart-header">
             <div>
               <h3>{t('dashboard.work_order_volume', 'Work Order Volume')} · {periodLabel}</h3>
-              <p>{t('dashboard.daily_volume_trend')}</p>
+              <p>{period === 'all' ? t('dashboard.monthly_volume_trend', 'Work orders and completions per month') : t('dashboard.daily_volume_trend')}</p>
             </div>
           </div>
           <div className="chart-body">
-            <Line data={lineData} options={lineOptions} />
+            {chart.some(d => d.orders > 0 || d.delivered > 0)
+              ? <Line data={lineData} options={lineOptions} />
+              : <div className="chart-empty">
+                  <span>{t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}</span>
+                  <button onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
+                </div>}
           </div>
         </div>
 
@@ -486,7 +533,7 @@ export default function Dashboard() {
               and the number underneath always agree. */}
           <div className="pipeline-total">
             <span className="total-label">{t('dashboard.total_work_orders', 'Total Work Orders')}</span>
-            <span className="total-value">{statusTotal}</span>
+            <span className="total-value">{fmtNum(statusTotal)}</span>
           </div>
         </div>
       </div>}
@@ -550,7 +597,7 @@ export default function Dashboard() {
         <div className="recent-card">
           <div className="card-header">
             <h3><MapPin width={20} height={20} /> {t('dashboard.top_zones')}</h3>
-            <Link to="/service-bays" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>
+            {hasModule(user, 'service-bays') && <Link to="/service-bays" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>}
           </div>
           <div className="card-body">
             {topServiceBays.length === 0 ? (
@@ -570,7 +617,7 @@ export default function Dashboard() {
                       <span>{bay.bay_type ? bay.bay_type.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()) : bay.bay_number}</span>
                     </div>
                     <span className="status-badge" style={{ background: '#fff7ed', color: '#f97316' }}>
-                      {bay.orders_count || 0} orders
+                      {fmtNum(bay.orders_count)} {t('dashboard.orders_short', 'orders')}
                     </span>
                   </div>
                 ))}
@@ -580,13 +627,19 @@ export default function Dashboard() {
         </div>
         )}
 
-        {widgetVis.mechanics && topMechanics.length > 0 && (
+        {widgetVis.mechanics && (
         <div className="recent-card">
           <div className="card-header">
-            <h3><DeliveryTruck width={20} height={20} /> {t('dashboard.top_mechanics')}</h3>
-            <Link to="/mechanics" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>
+            <h3><Wrench width={20} height={20} /> {t('dashboard.top_mechanics')}</h3>
+            {hasModule(user, 'mechanics') && <Link to="/mechanics" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>}
           </div>
           <div className="card-body">
+            {topMechanics.length === 0 ? (
+              <div className="empty-state-mini">
+                <Wrench width={32} height={32} />
+                <p>{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: period === 'all' ? '' : periodPhrase })}</p>
+              </div>
+            ) : (
             <div className="recent-list">
               {topMechanics.slice(0, 5).map((mechanic, i) => (
                 <div key={i} className="recent-item">
@@ -595,15 +648,16 @@ export default function Dashboard() {
                   </div>
                   <div className="recent-info">
                     <strong>{mechanic.full_name}</strong>
-                    <span>{mechanic.specialty ? mechanic.specialty.replace(/_/g, ' ') : t('dashboard.mechanic')}</span>
+                    <span>{mechanic.specialty ? mechanic.specialty.replace(/_/g, ' ') : t('dashboard.technician', 'Technician')}</span>
                   </div>
                   <span className="status-badge active"
                     style={{ background: '#f0fdf4', color: '#16a34a' }}>
-                    {mechanic.jobs_completed || mechanic.total_deliveries || 0} {t('dashboard.jobs_short', 'jobs')}
+                    {mechanic.jobs_completed || 0} {t('dashboard.jobs_short', 'jobs')}
                   </span>
                 </div>
               ))}
             </div>
+            )}
           </div>
         </div>
         )}
@@ -625,23 +679,23 @@ export default function Dashboard() {
               <div className="recent-list">
                 {recentWorkOrders.slice(0, 5).map((order) => {
                   const vehicleLabel = [order.vehicle_make, order.vehicle_model].filter(Boolean).join(' ');
-                  const primary = order.recipient_name || order.customer_name || t('orders.walk_in', 'Walk-in');
+                  const primary = order.customer_name || t('orders.walk_in', 'Walk-in');
                   const secondaryBits = [];
                   if (vehicleLabel) secondaryBits.push(vehicleLabel);
                   if (order.vehicle_plate_number) secondaryBits.push(order.vehicle_plate_number);
                   if (!secondaryBits.length && order.mechanic_name) secondaryBits.push(order.mechanic_name);
-                  secondaryBits.push(new Date(order.created_at).toLocaleTimeString('en-AE', { hour: '2-digit', minute: '2-digit', hour12: true }));
+                  secondaryBits.push(fmtWhen(order.created_at));
                   return (
                     <div key={order.id} className="recent-item">
-                      <div className="recent-avatar" style={{ background: statusColor(order.status), fontSize: 10 }}>
+                      <div className="recent-avatar" style={{ background: stageColor(order), fontSize: 10 }}>
                         {order.work_order_number?.slice(-3) || '#'}
                       </div>
                       <div className="recent-info">
                         <strong>{primary}</strong>
                         <span>{secondaryBits.join(' \u00B7 ')}</span>
                       </div>
-                      <span className="status-badge" style={{ background: `${statusColor(order.status)}18`, color: statusColor(order.status) }}>
-                        {statusLabel(order.status)}
+                      <span className="status-badge" style={{ background: `${stageColor(order)}18`, color: stageColor(order) }}>
+                        {woLabel(t, order, 'short')}
                       </span>
                     </div>
                   );
@@ -658,42 +712,24 @@ export default function Dashboard() {
       <div className="quick-actions-section">
         <h3>{t('dashboard.quick_actions')}</h3>
         <div className="quick-actions-grid">
-          <Link to="/work-orders" className="quick-action-card">
-            <div className="quick-action-icon"><Package width={24} height={24} /></div>
-            <span>{t('dashboard.new_order')}</span>
-          </Link>
-          <Link to="/mechanics" className="quick-action-card">
-            <div className="quick-action-icon"><DeliveryTruck width={24} height={24} /></div>
-            <span>{t('dashboard.add_mechanic')}</span>
-          </Link>
-          <Link to="/job-assignment" className="quick-action-card">
-            <div className="quick-action-icon"><MapPin width={24} height={24} /></div>
-            <span>{t('dashboard.job-assignment')}</span>
-          </Link>
-          <Link to="/service-tracking" className="quick-action-card">
-            <div className="quick-action-icon" style={{ background: '#e0f2fe' }}><MapPin width={24} height={24} color="#0369a1" /></div>
-            <span>{t('dashboard.track_shipments')}</span>
-          </Link>
-          <Link to="/live-map" className="quick-action-card">
-            <div className="quick-action-icon" style={{ background: '#fce7f3' }}><MapPin width={24} height={24} color="#be185d" /></div>
-            <span>{t('dashboard.live_map')}</span>
-          </Link>
-          <Link to="/customers" className="quick-action-card">
-            <div className="quick-action-icon"><Activity width={24} height={24} /></div>
-            <span>{t('dashboard.customers')}</span>
-          </Link>
-          <Link to="/bulk-import" className="quick-action-card">
-            <div className="quick-action-icon" style={{ background: '#ede9fe' }}><Package width={24} height={24} color="#7c3aed" /></div>
-            <span>{t('dashboard.bulk_import')}</span>
-          </Link>
-          <Link to="/wallet" className="quick-action-card">
-            <div className="quick-action-icon"><DollarCircle width={24} height={24} /></div>
-            <span>{t('dashboard.wallet')}</span>
-          </Link>
-          <Link to="/reports" className="quick-action-card">
-            <div className="quick-action-icon"><StatUp width={24} height={24} /></div>
-            <span>{t('dashboard.reports')}</span>
-          </Link>
+          {[
+            { to: '/work-orders?new=1', icon: Plus, label: t('dashboard.new_order'), bg: '#fff7ed', color: '#ea580c', cap: 'job.open' },
+            { to: '/estimates?new=1', icon: Page, label: t('dashboard.new_estimate', 'New Estimate'), bg: '#eef2ff', color: '#4f46e5', cap: 'estimate.raise' },
+            { to: '/estimates', icon: ClipboardCheck, label: t('common.estimates', 'Estimates'), mod: 'estimates' },
+            { to: '/store', icon: Page, label: t('common.store', 'Store'), mod: 'store' },
+            { to: '/job-assignment', icon: Group, label: t('dashboard.job-assignment'), mod: 'job-assignment' },
+            { to: '/team-leader', icon: Group, label: t('common.team_board', 'Team Board'), mod: 'team-leader' },
+            { to: '/fleet-intake', icon: Truck, label: t('common.fleet_intake', 'Fleet Intake'), mod: 'fleet-intake' },
+            { to: '/customers', icon: User, label: t('dashboard.customers'), mod: 'customers' },
+            { to: '/reports', icon: StatUp, label: t('dashboard.reports'), mod: 'reports' },
+          ].filter(a => (!a.cap || canDo(user, a.cap)) && (!a.mod || hasModule(user, a.mod))).map(a => (
+            <Link key={a.to} to={a.to} className="quick-action-card">
+              <div className="quick-action-icon" style={a.bg ? { background: a.bg } : undefined}>
+                <a.icon width={24} height={24} color={a.color} />
+              </div>
+              <span>{a.label}</span>
+            </Link>
+          ))}
         </div>
       </div>
     </div>

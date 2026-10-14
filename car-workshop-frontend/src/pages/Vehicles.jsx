@@ -14,10 +14,12 @@ import {
 import api from '../lib/api';
 import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
 import { AuthContext } from '../context/AuthContext';
+import { canDo } from '../lib/permissions';
 import Toast, { useToast } from '../components/Toast';
 import Loader from '../components/Loader';
 import PlateNumber from '../components/PlateNumber';
 import { fmtCurrency } from '../utils/currency';
+import { woLabel, woTone } from '../lib/statusLabels';
 import './CRMPages.css';
 
 const EMPTY_FORM = {
@@ -34,19 +36,6 @@ const FUEL_META = {
   hybrid:   { label: 'Hybrid',   color: '#10b981', bg: '#d1fae5' },
   electric: { label: 'Electric', color: '#159fd9', bg: '#dbeafe' },
   other:    { label: 'Other',    color: '#8b5cf6', bg: '#ede9fe' },
-};
-
-/* ── WorkOrder status → color chip ── */
-const WO_STATUS_META = {
-  pending:          { color: '#b45309', bg: '#fef3c7' },
-  confirmed:        { color: '#2563eb', bg: '#dbeafe' },
-  assigned:         { color: '#1d4ed8', bg: '#dbeafe' },
-  accepted:         { color: '#1565C0', bg: '#e0e7ff' },
-  in_progress:      { color: '#0e7490', bg: '#cffafe' },
-  ready_for_pickup: { color: '#c2410c', bg: '#ffedd5' },
-  completed:        { color: '#15803d', bg: '#dcfce7' },
-  failed:           { color: '#dc2626', bg: '#fee2e2' },
-  cancelled:        { color: '#b91c1c', bg: '#fee2e2' },
 };
 
 const fmtDate = (d) => {
@@ -102,8 +91,11 @@ function VehKPI({ icon: Icon, label, value, sub, color }) {
 
 export default function Vehicles() {
   const { t } = useTranslation();
-  const { workshop } = useContext(AuthContext);
+  const { workshop, user } = useContext(AuthContext);
   const { toasts, showToast } = useToast();
+  // Adding, editing and removing vehicles — and opening a job card — is the
+  // job.open roles' work (Service Advisor, Supervisor, managers).
+  const mayEdit = canDo(user, 'job.open');
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [vehicles, setVehicles] = useState([]);
@@ -257,9 +249,9 @@ export default function Vehicles() {
             </div>
           )}
         </div>
-        <button className="veh-add-btn" onClick={openCreate}>
+        {mayEdit && <button className="veh-add-btn" onClick={openCreate}>
           <Plus width={18} height={18} /> {t('vehicles.add', 'Add Vehicle')}
-        </button>
+        </button>}
       </div>
 
       {/* ── KPI cards ── */}
@@ -331,7 +323,7 @@ export default function Vehicles() {
           <div className="veh-empty-icon"><Car width={40} height={40} /></div>
           <h3>{t('vehicles.empty', 'No vehicles found')}</h3>
           <p>{t('vehicles.empty_hint', 'Add a customer vehicle to start tracking its service history.')}</p>
-          <button className="veh-add-btn" onClick={openCreate}><Plus width={16} height={16} /> {t('vehicles.add', 'Add Vehicle')}</button>
+          {mayEdit && <button className="veh-add-btn" onClick={openCreate}><Plus width={16} height={16} /> {t('vehicles.add', 'Add Vehicle')}</button>}
         </div>
       ) : view === 'grid' ? (
         <div className="veh-grid">
@@ -382,10 +374,10 @@ export default function Vehicles() {
                   <div className="veh-foot-stat" title={t('vehicles.last_service', 'Last service')}>
                     <Calendar width={14} height={14} /> {last || t('vehicles.never', 'Never')}
                   </div>
-                  <div className="veh-card-actions" onClick={(e) => e.stopPropagation()}>
+                  {mayEdit && <div className="veh-card-actions" onClick={(e) => e.stopPropagation()}>
                     <button title={t('common.edit', 'Edit')} onClick={() => openEdit(v)}><EditPencil width={15} height={15} /></button>
                     <button className="danger" title={t('common.delete', 'Delete')} onClick={() => setConfirmDelete(v)}><Trash width={15} height={15} /></button>
-                  </div>
+                  </div>}
                 </div>
               </div>
             );
@@ -434,8 +426,10 @@ export default function Vehicles() {
                     </div>
                   </td>
                   <td className="veh-tactions" onClick={(e) => e.stopPropagation()}>
-                    <button title={t('common.edit', 'Edit')} onClick={() => openEdit(v)}><EditPencil width={16} height={16} /></button>
-                    <button className="danger" title={t('common.delete', 'Delete')} onClick={() => setConfirmDelete(v)}><Trash width={16} height={16} /></button>
+                    {mayEdit && <>
+                      <button title={t('common.edit', 'Edit')} onClick={() => openEdit(v)}><EditPencil width={16} height={16} /></button>
+                      <button className="danger" title={t('common.delete', 'Delete')} onClick={() => setConfirmDelete(v)}><Trash width={16} height={16} /></button>
+                    </>}
                   </td>
                 </tr>
               ))}
@@ -528,14 +522,18 @@ export default function Vehicles() {
                   {detail.notes && <p className="veh-notes">{detail.notes}</p>}
 
                   {/* Actions */}
-                  <div className="veh-drawer-actions">
+                  {mayEdit && <div className="veh-drawer-actions">
                     <button className="veh-add-btn" onClick={() => openEdit(detail)}>
                       <EditPencil width={15} height={15} /> {t('common.edit', 'Edit')}
                     </button>
-                    <Link to={`/work-orders?vehicle_id=${detail.id}&customer_id=${detail.customer_id || ''}`} className="veh-secondary-btn">
-                      <Wrench width={15} height={15} /> {t('vehicles.new_work_order', 'New Work Order')}
-                    </Link>
-                  </div>
+                    {/* The job card wizard opens with this vehicle's owner (and
+                        the vehicle, where the wizard supports it). */}
+                    {detail.customer_id && (
+                      <Link to={`/work-orders?customer_id=${detail.customer_id}&vehicle_id=${detail.id}`} className="veh-secondary-btn">
+                        <Wrench width={15} height={15} /> {t('vehicles.new_work_order', 'New Work Order')}
+                      </Link>
+                    )}
+                  </div>}
 
                   {/* Service history timeline */}
                   <h4 className="veh-section-title">
@@ -547,7 +545,9 @@ export default function Vehicles() {
                   ) : (
                     <div className="veh-timeline">
                       {(detail.work_orders || []).map((wo) => {
-                        const st = WO_STATUS_META[wo.status] || { color: '#64748b', bg: '#e2e8f0' };
+                        // Workshop words and colours from the shared helper — the
+                        // chip used to print the raw enum ("ready for pickup").
+                        const st = woTone(wo);
                         return (
                           <Link key={wo.id} to={`/work-orders/${wo.id}`} className="veh-wo">
                             <span className="veh-wo-dot" style={{ background: st.color }} />
@@ -557,8 +557,8 @@ export default function Vehicles() {
                                 <span className="veh-wo-amount">{fmtCurrency(wo.total_amount, workshop?.currency)}</span>
                               </div>
                               <div className="veh-wo-bot">
-                                <span className="veh-wo-status" style={{ background: st.bg, color: st.color }}>
-                                  {String(wo.status || '').replace(/_/g, ' ')}
+                                <span className="veh-wo-status" style={{ background: st.bg, color: st.color, textTransform: 'none' }}>
+                                  {woLabel(t, wo)}
                                 </span>
                                 <span className="veh-muted">{fmtDate(wo.created_at)}</span>
                               </div>

@@ -16,8 +16,10 @@ import './PlanBadge.css';
 import './UpgradeCalc.css';
 
 const STRIPE_PK = import.meta.env.VITE_STRIPE_PK;
-if (!STRIPE_PK) console.error('[Stripe] VITE_STRIPE_PK not set — payments will not work');
-const stripePromise = loadStripe(STRIPE_PK);
+// Only start Stripe when there is a key. This module loads on every page, so
+// loadStripe(undefined) threw an uncaught error on all of them — including
+// the public customer pages.
+const stripePromise = STRIPE_PK ? loadStripe(STRIPE_PK) : null;
 
 const API_BASE = import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, '') : '';
 

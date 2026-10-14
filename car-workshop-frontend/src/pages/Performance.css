@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════
-   Performance — SLA & Mechanic Performance Dashboard
+   Performance — SLA & Technician Performance Dashboard
    Prefix: perf-
    ═══════════════════════════════════════════════════════════ */
 
@@ -25,7 +25,7 @@
   transform: translateY(-2px);
   box-shadow: 0 4px 20px rgba(0,0,0,0.06);
 }
-.perf-stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+.perf-stat-card::before { content: ''; position: absolute; inset-block-start: 0; inset-inline: 0; block-size: 3px; }
 .perf-stat-card.primary::before { background: #f97316; }
 .perf-stat-card.success::before { background: #16a34a; }
 .perf-stat-card.warning::before { background: #d97706; }
@@ -54,7 +54,7 @@
   border-bottom: 2px solid #f1f5f9;
 }
 .perf-tab {
-  padding: 10px 20px; font-size: 13px; font-weight: 600;
+  min-block-size: 44px; padding: 10px 20px; font-size: 13px; font-weight: 600;
   color: #94a3b8; cursor: pointer; border: none; background: none;
   position: relative; transition: color 0.2s;
   display: flex; align-items: center; gap: 6px;
@@ -62,8 +62,8 @@
 .perf-tab:hover { color: #1e293b; }
 .perf-tab.active { color: #f97316; }
 .perf-tab.active::after {
-  content: ''; position: absolute; bottom: -2px; left: 0; right: 0;
-  height: 2px; background: #f97316; border-radius: 2px 2px 0 0;
+  content: ''; position: absolute; inset-block-end: -2px; inset-inline: 0;
+  block-size: 2px; background: #f97316; border-radius: 2px 2px 0 0;
 }
 
 /* ── Chart Cards ───────────────────────────────────────── */
@@ -101,7 +101,39 @@
   justify-content: center;
 }
 
-/* ── Mechanic Scorecard Table ────────────────────────────── */
+/* ── Status bars (Closed · Work in progress · Quality check · Ready for
+      collection · Waiting · Cancelled) ─────────────────────────────── */
+.perf-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  inline-size: 100%;
+  block-size: 100%;
+  padding-block-end: 8px;
+}
+.perf-bar {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  text-align: center;
+}
+.perf-bar-fill {
+  min-block-size: 4px;
+  margin-block-end: 6px;
+  border-start-start-radius: 6px;
+  border-start-end-radius: 6px;
+  transition: block-size 0.6s ease;
+}
+.perf-bar-count { font-size: 16px; font-weight: 800; color: #1e293b; }
+.perf-bar-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: #64748b;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+/* ── Technician Scorecard Table ──────────────────────────── */
 .perf-table-wrap {
   background: #fff; border-radius: 14px;
   border: 1px solid #f1f5f9; overflow-x: auto;
@@ -110,7 +142,7 @@
 .perf-table thead th {
   font-size: 11px; text-transform: uppercase; color: #94a3b8;
   letter-spacing: 0.05em; padding: 14px 16px; font-weight: 700;
-  text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap;
+  text-align: start; border-bottom: 1px solid #f1f5f9; white-space: nowrap;
 }
 .perf-table tbody td {
   font-size: 13px; padding: 14px 16px;
@@ -121,7 +153,7 @@
 .perf-table tbody tr:hover { background: #fafbfc; }
 .perf-table tbody tr:last-child td { border-bottom: none; }
 
-/* ── Mechanic Row ────────────────────────────────────────── */
+/* ── Technician Row ──────────────────────────────────────── */
 .perf-mechanic-cell {
   display: flex; align-items: center; gap: 12px;
 }
@@ -145,7 +177,7 @@
 .perf-rating-star.empty { color: #e2e8f0; }
 .perf-rating-value {
   font-size: 12px; font-weight: 700; color: #1e293b;
-  margin-left: 6px;
+  margin-inline-start: 6px;
 }
 
 /* ── Progress Bar ──────────────────────────────────────── */
@@ -170,8 +202,8 @@
 .perf-progress-pct {
   font-size: 12px;
   font-weight: 700;
-  width: 42px;
-  text-align: right;
+  inline-size: 42px;
+  text-align: end;
 }
 
 /* ── SLA Gauge ─────────────────────────────────────────── */
@@ -222,13 +254,13 @@
   display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center;
 }
 .perf-filter-select {
-  height: 38px; padding: 0 12px; border: 1px solid #e0e0e0;
+  height: 44px; padding: 0 12px; border: 1px solid #e0e0e0;
   border-radius: 10px; font-size: 13px; background: #fff;
   cursor: pointer; min-width: 140px;
 }
 .perf-filter-select:focus { outline: none; border-color: #f97316; }
 .perf-date-input {
-  height: 38px; padding: 0 12px; border: 1px solid #e0e0e0;
+  height: 44px; padding: 0 12px; border: 1px solid #e0e0e0;
   border-radius: 10px; font-size: 13px; background: #fff;
 }
 .perf-date-input:focus { outline: none; border-color: #f97316; }
@@ -268,6 +300,22 @@
   .perf-stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
   .perf-charts-grid { grid-template-columns: 1fr; }
   .perf-sla-grid { grid-template-columns: repeat(2, 1fr); }
-  .perf-filters { flex-direction: column; }
+  .perf-filters { flex-direction: column; align-items: stretch; }
   .perf-tabs { overflow-x: auto; }
+}
+
+/* Phones: one column of SLA rings, tighter bars, and the grids may shrink
+   below their 200/220px minimums instead of pushing the page sideways. */
+@media (max-width: 480px) {
+  .perf-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .perf-stat-card { padding: 14px; }
+  .perf-stat-card-row { gap: 10px; }
+  .perf-stat-icon { width: 38px; height: 38px; }
+  .perf-stat-val { font-size: 18px; }
+  .perf-sla-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .perf-sla-card { padding: 14px 10px; }
+  .perf-chart-card { padding: 16px 12px; }
+  .perf-bars { gap: 4px; }
+  .perf-bar-count { font-size: 14px; }
+  .perf-bar-label { font-size: 9px; }
 }

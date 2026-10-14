@@ -3,18 +3,19 @@ import { useNavigate } from 'react-router-dom';
 import {
   Group, User, Search, EditPencil, Trash, Plus,
   Mail, Phone, Building, MapPin, Download, NavArrowRight, NavArrowLeft,
-  WarningTriangle, Xmark, CheckCircle, Package, DeliveryTruck,
+  WarningTriangle, Xmark, CheckCircle, Package, Car, PasteClipboard,
   StatsUpSquare, Wallet, Filter, Eye, Clock,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
 import { TableSkeleton } from '../components/Loader';
-import { shareViaWhatsApp, buildCustomerMessage } from '../lib/whatsapp';
 import Toast, { useToast } from '../components/Toast';
 import PhoneInputShared from '../components/PhoneInput';
 import { useTranslation } from 'react-i18next';
 import { AuthContext } from '../context/AuthContext';
+import { canDo } from '../lib/permissions';
 import { downloadCsv, toCsv, csvCell } from '../utils/csv';
+import { woLabel, woTone } from '../lib/statusLabels';
 
 /* ── WhatsApp SVG Icon ── */
 const WhatsAppIcon = ({ width = 16, height = 16, color = 'currentColor' }) => (
@@ -31,11 +32,27 @@ const TYPE_META = {
   other:      { bg: '#f1f5f9', color: '#475569', label: 'Other',               desc: 'Other customer arrangement' },
 };
 
-const CATEGORIES = ['mechanical','body_paint','electrical','tyres','ac_service','inspection','other'];
-const STATUS_COLORS = {
-  pending:'#f59e0b', confirmed:'#3b82f6', assigned:'#8b5cf6', picked_up:'#06b6d4',
-  in_transit:'#f97316', delivered:'#16a34a', failed:'#dc2626', returned:'#6b7280',
+// Step 1 of the workshop workflow classifies every customer: Internal
+// (Fleet / Insurance / Asset) or External (Fleet / Insurance / Walk-in).
+// Asset is internal-only and Walk-in external-only — the server refuses the
+// other combinations with a 400, so the form never offers them.
+const CLASS_META = {
+  internal: { bg: '#e0e7ff', color: '#3730a3' },
+  external: { bg: '#f1f5f9', color: '#334155' },
 };
+const SUB_META = {
+  fleet:     { bg: '#dcfce7', color: '#15803d' },
+  insurance: { bg: '#dbeafe', color: '#1d4ed8' },
+  asset:     { bg: '#fae8ff', color: '#a21caf' },
+  walkin:    { bg: '#ffedd5', color: '#c2410c' },
+};
+const SUBS_BY_CLASS = {
+  internal: ['fleet', 'insurance', 'asset'],
+  external: ['fleet', 'insurance', 'walkin'],
+};
+const ALL_SUBS = ['fleet', 'insurance', 'asset', 'walkin'];
+
+const CATEGORIES = ['mechanical','body_paint','electrical','tyres','ac_service','inspection','other'];
 const INPUT = { width:'100%', padding:'10px 13px', borderRadius:9, border:'1px solid #e2e8f0', fontSize:14, boxSizing:'border-box', outline:'none' };
 const LABEL = { display:'block', fontSize:12, fontWeight:700, color:'#374151', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.04em' };
 const LIMIT = 10;
@@ -47,9 +64,21 @@ const emptyForm = {
   address_line1:'', area:'', city:'', emirate:'',
   service_bay_id:'', latitude:'', longitude:'',
   credit_limit:'', notes:'', is_active:true,
+  // New customers start as External → Walk-in, the same default the server
+  // applies when nothing is sent; the form makes it visible and changeable.
+  customer_class:'external', customer_subcategory:'walkin',
 };
 const EMPTY_VEHICLE = { make:'', model:'', year:'', plate_number:'', vin:'', color:'', mileage:'', fuel_type:'petrol', transmission:'automatic' };
-const FUEL_TYPES = ['petrol', 'diesel', 'hybrid', 'electric', 'lpg'];
+// The values the vehicles table accepts (an 'lpg' option could never be saved).
+const FUEL_TYPES = ['petrol', 'diesel', 'hybrid', 'electric', 'other'];
+const FUEL_LABELS = { petrol: 'Petrol', diesel: 'Diesel', hybrid: 'Hybrid', electric: 'Electric', other: 'Other' };
+
+// Changing a customer's classification (Internal removes the estimate
+// approval) is the Workshop Manager's call; job.open may only fill in a
+// missing external subcategory (backend customers.js).
+const MANAGER_ROLES = ['admin', 'super_admin', 'general_manager', 'workshop_manager'];
+const isManager = u => !!u && (u.is_owner === true || Number(u.is_owner) === 1
+  || MANAGER_ROLES.includes(u.role) || MANAGER_ROLES.includes(u.role_slug));
 
 /* ── Helpers ── */
 function Avatar({ name, size = 44 }) {
@@ -73,12 +102,17 @@ function KPICard({ icon: Icon, label, value, sub, color }) {
         display:'flex', alignItems:'center', justifyContent:'center', marginBottom:12 }}>
         <Icon width={21} height={21} color={color} strokeWidth={1.8} />
       </div>
-      <div style={{ fontSize:30, fontWeight:900, color:'#1e293b', lineHeight:1 }}>{value}</div>
+      <div style={{ fontSize:30, fontWeight:900, color:'#1e293b', lineHeight:1 }}>{value !== '' && value != null && Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-AE') : value}</div>
       <div style={{ fontSize:13, color:'#64748b', marginTop:5, fontWeight:500 }}>{label}</div>
       {sub && <div style={{ fontSize:11, color:'#94a3b8', marginTop:2 }}>{sub}</div>}
     </div>
   );
 }
+
+// Work order counts as the API sends them (total_/completed_work_orders), with
+// the delivery-era names as a fallback for anything still sending those.
+const woCount = c => parseInt(c?.total_work_orders ?? c?.total_orders) || 0;
+const woDone  = c => parseInt(c?.completed_work_orders ?? c?.delivered_orders) || 0;
 
 function StatusPill({ active }) {
   const { t } = useTranslation();
@@ -88,6 +122,38 @@ function StatusPill({ active }) {
       padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>
       <span style={{ width:7, height:7, borderRadius:'50%', background:active?'#16a34a':'#dc2626', display:'inline-block' }} />
       {active ? t('customers.status.active') : t('customers.status.inactive')}
+    </span>
+  );
+}
+
+/* Internal/External + subcategory, e.g. "Internal · Fleet". */
+function classLabels(t) {
+  return {
+    cls: {
+      internal: t('customers.class.internal', 'Internal'),
+      external: t('customers.class.external', 'External'),
+    },
+    sub: {
+      fleet: t('customers.class.fleet', 'Fleet'),
+      insurance: t('customers.class.insurance', 'Insurance'),
+      asset: t('customers.class.asset', 'Asset'),
+      walkin: t('customers.class.walkin', 'Walk-in'),
+    },
+  };
+}
+
+function ClassBadge({ cls, sub, small }) {
+  const { t } = useTranslation();
+  if (!cls && !sub) return null;
+  const L = classLabels(t);
+  const cm = CLASS_META[cls] || CLASS_META.external;
+  const sm = SUB_META[sub];
+  const pad = small ? '2px 8px' : '3px 10px';
+  return (
+    <span style={{ display:'inline-flex', alignItems:'stretch', borderRadius:20, overflow:'hidden',
+      fontSize:small ? 11 : 12, fontWeight:700, border:`1px solid ${cm.color}22`, whiteSpace:'nowrap' }}>
+      <span style={{ background:cm.bg, color:cm.color, padding:pad }}>{L.cls[cls] || L.cls.external}</span>
+      {sm && <span style={{ background:sm.bg, color:sm.color, padding:pad }}>{L.sub[sub]}</span>}
     </span>
   );
 }
@@ -283,9 +349,16 @@ function LocationPickerMap({ lat, lng, onPick }) {
 export default function Customers() {
   const { t, i18n } = useTranslation();
   const isRTL = i18n.language === 'ar';
-  const { workshop } = useContext(AuthContext);
+  const { workshop, user } = useContext(AuthContext);
   const cur = workshop?.currency || 'AED';
   const navigate = useNavigate();
+  // Creating and editing customers is the job.open roles' work (Service
+  // Advisor, Supervisor, managers); others only look.
+  const mayEdit = canDo(user, 'job.open');
+  // Portal access is given by the desk that deals with the customer (the
+  // server's rule in routes/customers.js: Service Advisor and managers).
+  const mayInvite = canDo(user, 'estimate.raise') || canDo(user, 'customer.approval') || canDo(user, 'delivery.handover');
+  const manager = isManager(user);
   const [customers,       setCustomers]       = useState([]);
   const [stats,         setStats]         = useState({ total: 0, active: 0, business: 0, fleet: 0, total_work_orders: 0 });
   const [loading,       setLoading]       = useState(true);
@@ -293,6 +366,8 @@ export default function Customers() {
   const [page,          setPage]          = useState(1);
   const [search,        setSearch]        = useState('');
   const [typeFilter,    setTypeFilter]    = useState('');
+  const [classFilter,   setClassFilter]   = useState('');
+  const [subFilter,     setSubFilter]     = useState('');
 
   const [statusFilter,  setStatusFilter]  = useState('');
   const [showForm,      setShowForm]      = useState(false);
@@ -304,6 +379,7 @@ export default function Customers() {
   const [saving,        setSaving]        = useState(false);
   const [formError,     setFormError]     = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [dupExisting, setDupExisting] = useState(null); // 409 DUPLICATE_PHONE → { id, full_name, phone, … }
   const [exporting, setExporting] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [phoneCode, setPhoneCode] = useState('+971');
@@ -321,6 +397,35 @@ export default function Customers() {
 
   /* ── Toast ── */
   const { toasts, showToast } = useToast();
+
+  /* ── Customer portal access by WhatsApp ──
+     POST /customers/:id/portal-access creates the customer's portal login (if
+     missing) and a link to set their password; the answer's whatsapp_url opens
+     the advisor's WhatsApp with the message. The window is opened inside the
+     click — one opened after the request would be blocked as a pop-up. E-mail
+     and copy-link are on the customer's CRM page (/crm/customers/:id). */
+  const [portalBusy, setPortalBusy] = useState(false);
+  const sendPortalAccess = async (c) => {
+    if (portalBusy || !c?.id) return;
+    setPortalBusy(true);
+    const win = window.open('', '_blank');
+    const failed = t('portal.access.err', 'Could not give portal access.');
+    try {
+      const res = await api.post(`/customers/${c.id}/portal-access`, { channel: 'whatsapp' });
+      if (!res.success || !res.whatsapp_url) {
+        if (win) win.close();
+        showToast(res.message || failed, 'error');
+        return;
+      }
+      if (win) win.location.href = res.whatsapp_url; else window.open(res.whatsapp_url, '_blank');
+      showToast(t('portal.access.whatsapp_opened', 'WhatsApp opened with the message — press send there.'));
+    } catch (e) {
+      if (win) win.close();
+      showToast(e?.message || failed, 'error');
+    } finally {
+      setPortalBusy(false);
+    }
+  };
 
   /* ── Steps ── */
   // Vehicle step only makes sense on creation — editing an existing customer
@@ -355,6 +460,8 @@ export default function Customers() {
     const params = new URLSearchParams({ page, limit: LIMIT });
     if (search)        params.set('search',  search);
     if (typeFilter)    params.set('type',    typeFilter);
+    if (classFilter)   params.set('customer_class', classFilter);
+    if (subFilter)     params.set('customer_subcategory', subFilter);
     const res = await api.get(`/customers?${params}`);
     if (res.success) {
       let data = res.data || [];
@@ -364,7 +471,7 @@ export default function Customers() {
       setTotal(res.pagination?.total || data.length);
     }
     setLoading(false);
-  }, [search, typeFilter, statusFilter, page]);
+  }, [search, typeFilter, classFilter, subFilter, statusFilter, page]);
 
   useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
 
@@ -372,7 +479,9 @@ export default function Customers() {
     setDrawer(customer);
     setDrawerLoading(true);
     const res = await api.get(`/customers/${customer.id}`);
-    if (res.success) { setDrawer(res.data); setDrawerWorkOrders(res.data.orders || []); }
+    // GET /customers/:id sends the recent jobs as work_orders (orders is the
+    // courier-era name, so the list never showed).
+    if (res.success) { setDrawer(res.data); setDrawerWorkOrders(res.data.work_orders || res.data.orders || []); }
     setDrawerLoading(false);
   };
 
@@ -390,7 +499,9 @@ export default function Customers() {
     [pCode, pNum] = extractCode(c.phone);
     [paCode, paNum] = extractCode(c.phone_alt);
     setPhoneCode(pCode); setPhoneAltCode(paCode);
-    setForm({ ...emptyForm, ...c, phone: pNum, phone_alt: paNum });
+    setForm({ ...emptyForm, ...c, phone: pNum, phone_alt: paNum,
+      customer_class: c.customer_class || 'external',
+      customer_subcategory: c.customer_subcategory || '' });
     setFormError(''); setStep(1);
     setShowForm(true);
   };
@@ -409,6 +520,12 @@ export default function Customers() {
       if (!form.full_name.trim()) { setFormError(t('customers.validation.full_name_required')); return false; }
       if (!form.phone.trim())     { setFormError(t('customers.validation.phone_required')); return false; }
     }
+    if (step === 2 && form.customer_class === 'internal' && !form.customer_subcategory) {
+      // An internal account with no subcategory never shows up in the job
+      // card wizard, which lists internal accounts by Fleet/Insurance/Asset.
+      setFormError(t('customers.validation.internal_sub_required', 'Choose Fleet, Insurance or Asset for an internal customer.'));
+      return false;
+    }
     setFormError('');
     return true;
   };
@@ -426,7 +543,22 @@ export default function Customers() {
       client_category: form.customer_category, // backend field is client_category, not customer_category
       phone: form.phone ? `${phoneCode}${form.phone}` : '',
       phone_alt: form.phone_alt ? `${phoneAltCode}${form.phone_alt}` : '',
+      customer_class: form.customer_class || 'external',
+      // '' means "not set": sent as null, which the server stores as no subcategory.
+      customer_subcategory: form.customer_subcategory || null,
     };
+    if (payload.customer_class === 'internal' && !payload.customer_subcategory) {
+      setSaving(false); setStep(2);
+      setFormError(t('customers.validation.internal_sub_required', 'Choose Fleet, Insurance or Asset for an internal customer.'));
+      return;
+    }
+    if (selected && !manager) {
+      // Not a manager: the classification is sent only to fill in a missing
+      // external subcategory; otherwise it is left exactly as it is.
+      delete payload.customer_class;
+      if (selected.customer_subcategory || !payload.customer_subcategory || selected.customer_class === 'internal') delete payload.customer_subcategory;
+    }
+    setDupExisting(null);
     const res = selected
       ? await api.put(`/customers/${selected.id}`, payload)
       : await api.post('/customers', payload);
@@ -447,14 +579,20 @@ export default function Customers() {
       fetchCustomers();
       fetchStats();
       if (drawer && drawer.id === selected?.id) setDrawer(res.data);
-    } else { setFormError(res.message || t('customers.toast.save_failed')); }
+    } else {
+      // Same mobile number already on file (any format): offer that customer.
+      if (res.code === 'DUPLICATE_PHONE' && res.existing) setDupExisting(res.existing);
+      setFormError(res.message || t('customers.toast.save_failed'));
+    }
     setSaving(false);
   };
 
   const handleToggle = async (c, e) => {
     e?.stopPropagation();
     const newActive = !c.is_active;
-    const res = await api.put(`/customers/${c.id}`, { ...c, is_active: newActive });
+    // eslint-disable-next-line no-unused-vars
+    const { customer_class, customer_subcategory, ...rest } = c; // activation never touches the classification
+    const res = await api.put(`/customers/${c.id}`, { ...rest, is_active: newActive });
     if (res.success) {
       showToast(newActive ? t('customers.toast.activated', { name: c.full_name }) : t('customers.toast.deactivated', { name: c.full_name }));
       fetchCustomers();
@@ -485,6 +623,8 @@ export default function Customers() {
     const params = new URLSearchParams({ limit: 10000 });
     if (search)        params.set('search',  search);
     if (typeFilter)    params.set('type',    typeFilter);
+    if (classFilter)   params.set('customer_class', classFilter);
+    if (subFilter)     params.set('customer_subcategory', subFilter);
     const res = await api.get(`/customers?${params}`);
     setExporting(false);
     if (!res.success) { showToast(t('customers.toast.export_failed'), 'error'); return; }
@@ -492,11 +632,12 @@ export default function Customers() {
     let filtered = data;
     if (statusFilter === 'active')   filtered = filtered.filter(c => !!c.is_active);
     if (statusFilter === 'inactive') filtered = filtered.filter(c => !c.is_active);
-    const headers = ['ID','Name','Company','Type','Phone','Email','City','WorkOrders','Delivered','Credit Limit','Status'];
+    const headers = ['ID','Name','Company','Type','Class','Subcategory','Phone','Email','City','WorkOrders','Completed','Credit Limit','Status'];
     const rows = filtered.map(c => [
       c.id, c.full_name, c.company_name||'', TYPE_META[c.type]?.label||c.type,
+      c.customer_class||'', c.customer_subcategory||'',
       c.phone, c.email||'', c.city||'',
-      c.total_orders||0, c.delivered_orders||0, c.credit_limit||0,
+      woCount(c), woDone(c), c.credit_limit||0,
       c.is_active?'Active':'Inactive',
     ]);
     // SR-15 — quoting was correct but a leading = + @ was still a formula.
@@ -507,10 +648,20 @@ export default function Customers() {
     a.click();
   };
 
-  const clearFilters = () => { setSearch(''); setTypeFilter(''); setStatusFilter(''); setPage(1); };
-  const hasFilters   = search || typeFilter || statusFilter;
+  const clearFilters = () => { setSearch(''); setTypeFilter(''); setClassFilter(''); setSubFilter(''); setStatusFilter(''); setPage(1); };
+  const hasFilters   = search || typeFilter || classFilter || subFilter || statusFilter;
+  const CL = classLabels(t);
+  // Subcategories that exist for the chosen class (all four when no class is picked).
+  const subFilterOptions = classFilter ? SUBS_BY_CLASS[classFilter] : ALL_SUBS;
+  const setFormClass = (cls) => setForm(p => ({
+    ...p,
+    customer_class: cls,
+    // Keep the subcategory if it is valid for the new class (fleet, insurance);
+    // drop it if not (asset is internal-only, walk-in external-only).
+    customer_subcategory: SUBS_BY_CLASS[cls].includes(p.customer_subcategory) ? p.customer_subcategory : '',
+  }));
   const activeCount  = customers.filter(c => !!c.is_active).length;
-  const totalWorkOrders  = customers.reduce((s,c) => s + (parseInt(c.total_orders)||0), 0);
+  const totalWorkOrders  = customers.reduce((s,c) => s + woCount(c), 0);
 
   /* ── Render ── */
   return (
@@ -523,7 +674,7 @@ export default function Customers() {
             <Group width={28} height={28} color="#f97316" /> {t('customers.page.title')}
           </h2>
           <p style={{ margin:'5px 0 0', color:'#64748b', fontSize:14 }}>
-            {t('customers.page.subtitle', { total, activeCount })}
+            {t('customers.page.subtitle', { total: Number(total).toLocaleString('en-AE'), activeCount: Number(stats.active || 0).toLocaleString('en-AE') })}
           </p>
         </div>
         <div style={{ display:'flex', gap:10 }}>
@@ -533,13 +684,13 @@ export default function Customers() {
               display:'flex', alignItems:'center', gap:7, opacity:exporting?0.6:1 }}>
             <Download width={15} height={15} /> {exporting ? t('customers.button.exporting') : t('customers.button.export_csv')}
           </button>
-          <button onClick={openCreate}
+          {mayEdit && <button onClick={openCreate}
             style={{ padding:'10px 22px', borderRadius:10, border:'none',
               background:'linear-gradient(135deg,#f97316,#ea580c)', color:'#fff',
               cursor:'pointer', fontWeight:700, fontSize:14, display:'flex', alignItems:'center', gap:7,
               boxShadow:'0 4px 14px rgba(249,115,22,0.38)' }}>
             <Plus width={16} height={16} /> {t('customers.button.new_customer')}
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -548,7 +699,7 @@ export default function Customers() {
         <KPICard icon={Group}          label={t('customers.kpi.total_customers')} value={stats.total || 0}                                                                sub={t('customers.kpi.active_count', { count: stats.active || 0 })} color="#f97316" />
         <KPICard icon={Package}        label={t('customers.kpi.total_orders')}    value={stats.total_work_orders || 0}                                                    sub={t('customers.kpi.all_time')}                                    color="#3b82f6" />
         <KPICard icon={Building}       label="Business"                           value={stats.business || 0}                                                             sub="Company / corporate accounts"                                   color="#8b5cf6" />
-        <KPICard icon={DeliveryTruck}  label="Fleet"                              value={stats.fleet || 0}                                                                sub="Managed fleet accounts"                                         color="#10b981" />
+        <KPICard icon={Car}            label="Fleet"                              value={stats.fleet || 0}                                                                sub="Managed fleet accounts"                                         color="#10b981" />
       </div>
 
       {/* Filter Bar */}
@@ -566,6 +717,24 @@ export default function Customers() {
           style={{ ...INPUT, width:148 }}>
           <option value="">{t("common.all_types")}</option>
           {Object.entries(TYPE_META).map(([t,m]) => <option key={t} value={t}>{m.label}</option>)}
+        </select>
+        <select value={classFilter} aria-label={t('customers.class.filter_class', 'Internal / External')}
+          onChange={e=>{
+            const v = e.target.value;
+            setClassFilter(v);
+            if (v && subFilter && !SUBS_BY_CLASS[v].includes(subFilter)) setSubFilter('');
+            setPage(1);
+          }}
+          style={{ ...INPUT, width:150 }}>
+          <option value="">{t('customers.class.all_classes', 'Internal & External')}</option>
+          <option value="internal">{CL.cls.internal}</option>
+          <option value="external">{CL.cls.external}</option>
+        </select>
+        <select value={subFilter} aria-label={t('customers.class.filter_sub', 'Subcategory')}
+          onChange={e=>{ setSubFilter(e.target.value); setPage(1); }}
+          style={{ ...INPUT, width:150 }}>
+          <option value="">{t('customers.class.all_subs', 'All subcategories')}</option>
+          {subFilterOptions.map(sv => <option key={sv} value={sv}>{CL.sub[sv]}</option>)}
         </select>
 
         <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
@@ -618,7 +787,7 @@ export default function Customers() {
             </div>
             {hasFilters
               ? <button onClick={clearFilters} style={{ padding:'10px 24px', borderRadius:10, border:'1px solid #e2e8f0', background:'#fff', cursor:'pointer', fontWeight:600 }}>{t("common.clear_filters")}</button>
-              : <button onClick={openCreate}   style={{ padding:'11px 28px', borderRadius:10, border:'none', background:'#f97316', color:'#fff', cursor:'pointer', fontWeight:700, fontSize:15 }}>{t('customers.button.add_first')}</button>
+              : mayEdit && <button onClick={openCreate}   style={{ padding:'11px 28px', borderRadius:10, border:'none', background:'#f97316', color:'#fff', cursor:'pointer', fontWeight:700, fontSize:15 }}>{t('customers.button.add_first')}</button>
             }
           </div>
         ) : (
@@ -660,6 +829,11 @@ export default function Customers() {
                         </td>
                         <td style={{ padding:'13px 16px' }}>
                           <span style={{ background:tm.bg, color:tm.color, padding:'4px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>{tm.label}</span>
+                          {customer.customer_class && (
+                            <div style={{ marginTop:6 }}>
+                              <ClassBadge cls={customer.customer_class} sub={customer.customer_subcategory} small />
+                            </div>
+                          )}
                         </td>
                         <td style={{ padding:'13px 16px' }}>
                           <div style={{ fontSize:13, fontWeight:600, color:'#1e293b', display:'flex', alignItems:'center', gap:5 }}>
@@ -677,10 +851,10 @@ export default function Customers() {
                           </div>
                         </td>
                         <td style={{ padding:'13px 16px' }}>
-                          <div style={{ fontSize:17, fontWeight:800, color:'#1e293b' }}>{customer.total_orders||0}</div>
-                          {parseInt(customer.delivered_orders)>0 && (
+                          <div style={{ fontSize:17, fontWeight:800, color:'#1e293b' }}>{woCount(customer).toLocaleString('en-AE')}</div>
+                          {woDone(customer)>0 && (
                             <div style={{ fontSize:11, color:'#16a34a', fontWeight:600, display:'flex', alignItems:'center', gap:3 }}>
-                              <CheckCircle width={11} height={11} /> {t('customers.table.done', { count: customer.delivered_orders })}
+                              <CheckCircle width={11} height={11} /> {t('customers.table.done', { count: woDone(customer) })}
                             </div>
                           )}
                         </td>
@@ -699,7 +873,7 @@ export default function Customers() {
                         </td>
                         <td style={{ padding:'13px 16px' }}><StatusPill active={isActive} /></td>
                         <td style={{ padding:'13px 16px' }} onClick={e=>e.stopPropagation()}>
-                          <div style={{ display:'flex', gap:6 }}>
+                          {mayEdit && <div style={{ display:'flex', gap:6 }}>
                             <button onClick={e=>openEdit(customer,e)}
                               style={{ padding:'6px 11px', borderRadius:8, border:'1px solid #e2e8f0', background:'#fff',
                                 cursor:'pointer', fontSize:13, fontWeight:600, color:'#374151',
@@ -712,7 +886,7 @@ export default function Customers() {
                                 display:'flex', alignItems:'center' }}>
                               <Trash width={13} height={13} />
                             </button>
-                          </div>
+                          </div>}
                         </td>
                       </tr>
                     );
@@ -752,7 +926,7 @@ export default function Customers() {
                       {isRTL ? <NavArrowRight width={13} height={13} /> : <NavArrowLeft width={13} height={13} />} {t('common.prev')}
                     </button>
                     {pageNumbers.map((p, i) => p === '...' ? (
-                      <span key={i} style={{ padding:'4px 8px', color:'#94a3b8', fontSize:12 }}>…</span>
+                      <span key={`gap-${i}`} style={{ padding:'4px 8px', color:'#94a3b8', fontSize:12 }}>…</span>
                     ) : (
                       <button key={p} onClick={()=>setPage(p)}
                         style={{ padding:'6px 11px', borderRadius:6, border:'1px solid #e2e8f0',
@@ -803,6 +977,7 @@ export default function Customers() {
                   )}
                   <div style={{ marginTop:8, display:'flex', gap:8, flexWrap:'wrap' }}>
                     <StatusPill active={!!drawer.is_active} />
+                    {drawer.customer_class && <ClassBadge cls={drawer.customer_class} sub={drawer.customer_subcategory} />}
                     {drawer.type && (
                       <span style={{ background:TYPE_META[drawer.type]?.bg, color:TYPE_META[drawer.type]?.color,
                         padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>
@@ -813,37 +988,39 @@ export default function Customers() {
                 </div>
               </div>
               <div style={{ display:'flex', gap:10 }}>
-                <button onClick={e=>openEdit(drawer,e)}
+                {mayEdit && <button onClick={e=>openEdit(drawer,e)}
                   style={{ flex:1, padding:'10px', borderRadius:10, border:'none',
                     background:'#f97316', color:'#fff', cursor:'pointer', fontWeight:700, fontSize:14,
                     display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
                   <EditPencil width={15} height={15} /> {t('customers.button.edit_customer')}
-                </button>
-                <button onClick={() => navigate(`/work-orders?customer_id=${drawer.id}`)}
+                </button>}
+                {/* Opens the job card wizard with this customer (any customer —
+                    the wizard loads it by id). Active customers only. */}
+                {mayEdit && !!drawer.is_active && <button onClick={() => navigate(`/work-orders?customer_id=${drawer.id}`)}
                   style={{ flex:1, padding:'10px', borderRadius:10, border:'none',
                     background:'#16a34a', color:'#fff', cursor:'pointer', fontWeight:700, fontSize:14,
                     display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
                   <Package width={15} height={15} /> {t('customers.button.new_order')}
-                </button>
-                <button onClick={e=>handleToggle(drawer,e)}
+                </button>}
+                {mayEdit && <button onClick={e=>handleToggle(drawer,e)}
                   style={{ flex:1, padding:'10px', borderRadius:10, border:'1px solid rgba(255,255,255,0.2)',
                     background:'rgba(255,255,255,0.08)', color:'#fff', cursor:'pointer', fontWeight:600, fontSize:14,
                     display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
                   {!!drawer.is_active ? <Xmark width={14} height={14} /> : <CheckCircle width={14} height={14} />}
                   {!!drawer.is_active ? t('customers.button.deactivate') : t('customers.button.activate')}
-                </button>
+                </button>}
               </div>
-              <div style={{ marginTop:10 }}>
-                <button onClick={() => {
-                  const portalUrl = window.location.origin + '/merchant/login';
-                  const msg = buildCustomerMessage(drawer, t, portalUrl);
-                  shareViaWhatsApp(drawer.phone, msg);
-                }}
-                  className="wa-share-btn wa-share-btn-full"
-                  title={t('whatsapp.share_credentials', 'Share Portal Access via WhatsApp')}>
-                  <WhatsAppIcon width={15} height={15} color="#fff" /> {t('whatsapp.share_portal_access', 'Share Portal Access via WhatsApp')}
-                </button>
-              </div>
+              {mayInvite && (
+                <div style={{ marginTop:10 }}>
+                  <button type="button" onClick={() => sendPortalAccess(drawer)} disabled={portalBusy}
+                    className="wa-share-btn wa-share-btn-full"
+                    title={t('portal.access.whatsapp_hint', 'Sends the customer a link to set their portal password (works for 7 days).')}>
+                    <WhatsAppIcon width={15} height={15} color="#fff" /> {portalBusy
+                      ? t('portal.access.sending', 'Sending…')
+                      : t('whatsapp.share_portal_access', 'Share Portal Access via WhatsApp')}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div style={{ padding:22, flex:1 }}>
@@ -855,8 +1032,8 @@ export default function Customers() {
                     {(() => {
                       const creditVal = parseFloat(drawer.credit_limit) || 0;
                       const drawerKpiStats = [
-                        { label: t('customers.drawer.total_orders'), Icon: Package, value: drawer.total_orders || 0, color: '#3b82f6' },
-                        { label: t('customers.drawer.delivered'), Icon: CheckCircle, value: drawer.delivered_orders || 0, color: '#16a34a' },
+                        { label: t('customers.drawer.total_orders'), Icon: Package, value: woCount(drawer), color: '#3b82f6' },
+                        { label: t('customers.drawer.delivered'), Icon: CheckCircle, value: woDone(drawer), color: '#16a34a' },
                         { label: t('customers.drawer.credit_limit'), Icon: Wallet, value: creditVal > 0 ? `${cur} ${creditVal.toFixed(0)}` : t('customers.drawer.no_limit'), color: '#8b5cf6' },
                         { label: t('customers.profile.location'), Icon: MapPin, value: (() => { const parts = [drawer.city, drawer.area, drawer.emirate].filter(Boolean).map(p => p === 'Dubai' ? 'Abu Dhabi' : p); return parts.length ? [...new Set(parts)].join(', ') : t('customers.default_location', 'Abu Dhabi'); })(), color: '#f97316' },
                       ];
@@ -909,12 +1086,14 @@ export default function Customers() {
                         display:'flex', justifyContent:'space-between', alignItems:'center',
                         textTransform:'uppercase', letterSpacing:'0.05em' }}>
                         <span style={{ display:'flex', alignItems:'center', gap:7 }}>
-                          <DeliveryTruck width={15} height={15} color="#f97316" /> {t('customers.drawer.recent_orders')}
+                          <PasteClipboard width={15} height={15} color="#f97316" /> {t('customers.drawer.recent_orders')}
                         </span>
                         <span style={{ color:'#94a3b8', fontSize:12, fontWeight:400, textTransform:'none' }}>{drawerWorkOrders.length} {t('customers.total_label')}</span>
                       </div>
                       {drawerWorkOrders.slice(0,8).map(o => {
-                        const sc = STATUS_COLORS[o.status]||'#94a3b8';
+                        // Workshop words and colours from the shared helper (the
+                        // old map was keyed on courier statuses, so every chip was grey).
+                        const sc = woTone(o);
                         return (
                           <div key={o.id} style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
                             padding:'9px 0', borderBottom:'1px solid #f8fafc' }}>
@@ -923,9 +1102,9 @@ export default function Customers() {
                               <div style={{ fontSize:11, color:'#94a3b8', marginTop:1 }}>{new Date(o.created_at).toLocaleDateString()}</div>
                             </div>
                             <div style={{ textAlign: isRTL ? 'left' : 'right' }}>
-                              <span style={{ background:sc+'20', color:sc, padding:'3px 9px',
-                                borderRadius:20, fontSize:11, fontWeight:700, textTransform:'capitalize' }}>
-                                {o.status?.replace(/_/g,' ')}
+                              <span style={{ background:sc.bg, color:sc.color, padding:'3px 9px',
+                                borderRadius:20, fontSize:11, fontWeight:700 }}>
+                                {woLabel(t, o)}
                               </span>
                               {o.total_amount && (
                                 <div style={{ fontSize:12, color:'#64748b', marginTop:3, fontWeight:600 }}>
@@ -1016,6 +1195,13 @@ export default function Customers() {
                     borderRadius:8, marginBottom:16, fontSize:14,
                     display:'flex', alignItems:'center', gap:8 }}>
                     <WarningTriangle width={16} height={16} /> {formError}
+                    {dupExisting && (
+                      <button type="button" onClick={() => { setShowForm(false); setSelected(null); openDrawer(dupExisting); setDupExisting(null); }}
+                        style={{ marginInlineStart:'auto', padding:'5px 10px', borderRadius:8, border:'1px solid #fca5a5', background:'#fff',
+                          color:'#b91c1c', fontWeight:700, fontSize:12.5, cursor:'pointer', whiteSpace:'nowrap' }}>
+                        {t('customers.button.open_existing', 'Open {{name}}', { name: dupExisting.full_name })}
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1080,6 +1266,75 @@ export default function Customers() {
                 {/* ── Step 2: Business Info ── */}
                 {step === 2 && (
                   <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+
+                    {/* Step 1 classification: Internal / External, then the subcategory.
+                        Subcategory options follow the class — Asset only for
+                        Internal, Walk-in only for External. */}
+                    <div style={{ gridColumn:'1/-1' }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+                        <div style={{ width:3, height:18, borderRadius:4, background:'#3730a3' }} />
+                        <span style={{ fontSize:11, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'0.07em' }}>
+                          {t('customers.class.section', 'Classification')} <span style={{ color:'#f97316' }}>*</span>
+                        </span>
+                      </div>
+                      <div role="radiogroup" aria-label={t('customers.class.section', 'Classification')}
+                        style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))', gap:8, marginBottom:12 }}>
+                        {[
+                          { v:'internal', desc:t('customers.class.internal_desc', 'Group fleet, insurance and company assets') },
+                          { v:'external', desc:t('customers.class.external_desc', 'Outside fleets, insurers and walk-in customers') },
+                        ].map(({ v, desc }) => {
+                          const on = form.customer_class === v;
+                          const m = CLASS_META[v];
+                          // Only a manager picks or changes the class.
+                          const locked = !manager && !on;
+                          return (
+                            <button type="button" key={v} role="radio" aria-checked={on} disabled={locked} onClick={() => !locked && setFormClass(v)}
+                              style={{ padding:'12px 14px', borderRadius:12, cursor: locked ? 'not-allowed' : 'pointer', textAlign: isRTL ? 'right' : 'left', opacity: locked ? 0.5 : 1,
+                                border: on ? `2px solid ${m.color}` : '2px solid #e2e8f0', background: on ? m.bg : '#fff', outline:'none' }}>
+                              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+                                <span style={{ fontWeight:800, fontSize:14, color: on ? m.color : '#374151' }}>{CL.cls[v]}</span>
+                                {on && <CheckCircle width={16} height={16} color={m.color} />}
+                              </div>
+                              <div style={{ fontSize:11, color: on ? m.color : '#94a3b8', marginTop:2 }}>{desc}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <label style={LABEL}>
+                        {t('customers.class.subcategory', 'Subcategory')}
+                        {form.customer_class === 'internal'
+                          ? <span style={{ color:'#f97316' }}> *</span>
+                          : <span style={{ color:'#94a3b8', fontWeight:400, textTransform:'none', letterSpacing:0 }}> ({t('customers.form.optional', 'optional')})</span>}
+                      </label>
+                      <div role="radiogroup" aria-label={t('customers.class.subcategory', 'Subcategory')} style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                        {SUBS_BY_CLASS[form.customer_class || 'external'].map(sv => {
+                          const on = form.customer_subcategory === sv;
+                          const m = SUB_META[sv];
+                          // A subcategory already on file is changed by a manager only.
+                          const locked = !manager && !!selected?.customer_subcategory;
+                          return (
+                            <button type="button" key={sv} role="radio" aria-checked={on} disabled={locked && !on}
+                              onClick={() => !locked && set('customer_subcategory', on && form.customer_class !== 'internal' ? '' : sv)}
+                              style={{ padding:'9px 16px', borderRadius:999, cursor: locked ? 'not-allowed' : 'pointer', fontWeight:700, fontSize:13, opacity: locked && !on ? 0.5 : 1,
+                                border: on ? `2px solid ${m.color}` : '2px solid #e2e8f0',
+                                background: on ? m.bg : '#fff', color: on ? m.color : '#475569',
+                                display:'inline-flex', alignItems:'center', gap:6 }}>
+                              {on && <CheckCircle width={13} height={13} />} {CL.sub[sv]}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ fontSize:11.5, color:'#94a3b8', marginTop:6 }}>
+                        {form.customer_class === 'internal'
+                          ? t('customers.class.internal_hint', 'Asset is for internal customers only.')
+                          : t('customers.class.external_hint', 'Walk-in is for external customers only. Tap a selected subcategory again to clear it.')}
+                      </div>
+                      {!manager && (
+                        <div style={{ fontSize:11.5, color:'#b45309', marginTop:6 }}>
+                          {t('customers.class.manager_only', 'Internal accounts, and changes to a classification already set, are made by the Workshop Manager.')}
+                        </div>
+                      )}
+                    </div>
 
                     {/* Customer type as visual cards */}
                     <div style={{ gridColumn:'1/-1' }}>
@@ -1411,7 +1666,7 @@ export default function Customers() {
                     <div>
                       <label style={LABEL}>Fuel type</label>
                       <select value={vehicleForm.fuel_type} onChange={e => setVeh('fuel_type', e.target.value)} style={INPUT}>
-                        {FUEL_TYPES.map(f => <option key={f} value={f}>{f}</option>)}
+                        {FUEL_TYPES.map(f => <option key={f} value={f}>{t(`vehicles.fuel_${f}`, FUEL_LABELS[f])}</option>)}
                       </select>
                     </div>
                   </div>

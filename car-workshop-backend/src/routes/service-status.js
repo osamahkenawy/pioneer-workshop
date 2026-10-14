@@ -2,9 +2,11 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { sendSMS, interpolate } from '../lib/sms.js';
-import { notifyWorkOrderStatus, notifyCashCollected } from '../lib/notify.js';
 import { publicTrackingLimiter } from '../lib/rate-limits.js';
-import { issueSurveyOnClosure } from '../lib/survey-trigger.js';
+import { isTechnician } from '../lib/access.js';
+import { customerStatusUrl } from '../lib/customer-link.js';
+import { woLabel } from '../lib/status-labels.js';
+import { applyStatusChange, canSetStatus, statusNotAllowed } from './work-orders.js';
 
 const router = express.Router();
 
@@ -12,19 +14,43 @@ const router = express.Router();
  * Ported from delivery-service-backend/src/routes/tracking.js -> service-status.js
  *
  * Customer-facing vehicle SERVICE STATUS tracking (was package/order tracking).
- * `tracking_token` -> `service_status_token`; the public GET/:token endpoint
- * requires NO auth (customers use it to check on their vehicle).
+ * `tracking_token` -> `service_status_token`. The customer's status page now
+ * reads /api/public/service-status/:token (routes/public-service-status.js);
+ * the old public GET /:token here answers 410 MOVED.
  *
  * Status enum kept as the car_workshop.sql work_orders enum:
  *   pending, confirmed, assigned, accepted, in_progress, inspection,
  *   ready_for_pickup, completed, cancelled
  * (delivery-only statuses picked_up/in_transit/delivered/returned dropped —
  * see car_workshop.sql comment above the work_orders table).
+ *
+ * Who uses what:
+ *   - customers: nothing here any more (GET /:token is 410 MOVED);
+ *   - staff: the token tools (search, /:token/order, /:token/scan,
+ *     /:token/status, /:token/send-sms). A status change here follows the
+ *     same role rules and gates as PATCH /api/work-orders/:id/status;
+ *   - technicians: GET /my-orders only (deprecated). They book time and finish
+ *     jobs from My Jobs (/api/job-cards); every token tool refuses them.
  */
 
+// Technicians work from My Jobs. lib/access.js lets their login into this
+// router for /my-orders; everything else here is a staff tool.
+function refuseTechnician(req, res, next) {
+  if (!isTechnician(req.user)) return next();
+  return res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: 'Technicians update their work from My Jobs.' });
+}
+
 // GET /api/service-status/my-orders — MECHANIC: my assigned work orders (authenticated)
+//
+// DEPRECATED — the technician app reads its jobs from /api/job-cards (My
+// Jobs). Kept, slimmed, for the old screens and scripts/qa/security-test.mjs:
+// no customer contact details, no prices, pay or takings, and "active" is the
+// work still on the technician's bench (a job at quality check or ready for
+// collection is not theirs to act on).
+const MY_ORDERS_ACTIVE = "('assigned','accepted','in_progress')";
 router.get('/my-orders', authMiddleware, async (req, res) => {
   try {
+    res.set('Deprecation', 'true');
     // Find mechanic record linked to this user
     const [mechanic] = await query(
       'SELECT id, full_name, status FROM mechanics WHERE user_id = ? AND workshop_id = ?',
@@ -35,23 +61,24 @@ router.get('/my-orders', authMiddleware, async (req, res) => {
     }
 
     const { status: filterStatus } = req.query;
-    let statusFilter = "('assigned','accepted','in_progress','inspection','ready_for_pickup')"; // active by default
+    let statusFilter = MY_ORDERS_ACTIVE; // active by default
     if (filterStatus === 'completed') statusFilter = "('completed')";
     else if (filterStatus === 'cancelled') statusFilter = "('cancelled')";
     else if (filterStatus === 'all')       statusFilter = "('assigned','accepted','in_progress','inspection','ready_for_pickup','completed','cancelled')";
 
+    // No customer name, status link token, signature or proof photo: a
+    // technician sees the car and the work, not the customer (plan Q5).
     const orders = await query(
-      `SELECT o.id, o.work_order_number, o.service_status_token, o.status, o.work_order_type,
-              o.customer_name, o.customer_phone, o.customer_email,
-              o.dropoff_address, o.dropoff_lat, o.dropoff_lng,
-              o.payment_method, o.cash_amount, o.service_fee,
+      `SELECT o.id, o.work_order_number, o.status, o.work_order_type,
               o.service_category, o.special_instructions, o.notes,
               o.started_at, o.completed_at, o.failed_at,
-              o.completion_photo_url, o.signature_url,
-              o.created_at, sb.name as service_bay_name, c.full_name as customer_full_name
+              o.created_at, sb.name as service_bay_name,
+              o.description, o.odometer_in,
+              v.make AS vehicle_make, v.model AS vehicle_model, v.year AS vehicle_year,
+              v.plate_number AS vehicle_plate, v.vin AS vehicle_vin
        FROM work_orders o
        LEFT JOIN service_bays sb ON o.service_bay_id = sb.id
-       LEFT JOIN customers c ON o.customer_id = c.id
+       LEFT JOIN vehicles v ON o.vehicle_id = v.id
        WHERE o.mechanic_id = ? AND o.workshop_id = ? AND o.status IN ${statusFilter}
        ORDER BY FIELD(o.status, 'in_progress','inspection','ready_for_pickup','assigned','completed','cancelled'), o.created_at DESC`,
       [mechanic.id, req.workshopId]
@@ -61,85 +88,53 @@ router.get('/my-orders', authMiddleware, async (req, res) => {
     for (const order of orders) {
       try {
         order.parts = await query(
-          'SELECT id, part_number, name, quantity, unit_cost, total_cost, status FROM parts WHERE work_order_id = ? AND workshop_id = ? ORDER BY id ASC',
+          'SELECT id, part_number, name, quantity, status FROM parts WHERE work_order_id = ? AND workshop_id = ? ORDER BY id ASC',
           [order.id, req.workshopId]
         );
       } catch (_) { order.parts = []; }
+      // The job card's lines — for an estimate-born job, exactly what the
+      // customer approved. The technician works from these.
+      order.items = await query(
+        'SELECT id, name, item_type, quantity FROM work_order_items WHERE work_order_id = ? ORDER BY id',
+        [order.id]
+      ).catch(() => []);
     }
 
-    // Quick stats — today (active = all current, completed/cancelled/revenue = today by completed_at/cancelled_at)
-    const [statsRow] = await query(
+    // Counts only: today (active = on the bench now; completed/cancelled by
+    // completed_at/cancelled_at), all time, and per tab.
+    const [counts] = await query(
       `SELECT
-        SUM(CASE WHEN status IN ('assigned','accepted','in_progress','inspection','ready_for_pickup') THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN status = 'completed' AND DATE(completed_at) = CURDATE() THEN 1 ELSE 0 END) as completed_today,
-        SUM(CASE WHEN status = 'cancelled' AND DATE(cancelled_at) = CURDATE() THEN 1 ELSE 0 END) as cancelled_today,
-        SUM(CASE WHEN status = 'completed' AND DATE(completed_at) = CURDATE() THEN service_fee ELSE 0 END) as revenue_today
-       FROM work_orders WHERE mechanic_id = ? AND workshop_id = ?`,
-      [mechanic.id, req.workshopId]
-    );
-
-    // Use mechanic_earnings for accurate today revenue if available
-    let todayEarnings = 0;
-    try {
-      const [earnRow] = await query(
-        `SELECT COALESCE(SUM(net_amount), 0) as total FROM mechanic_earnings WHERE mechanic_id = ? AND workshop_id = ? AND DATE(created_at) = CURDATE()`,
-        [mechanic.id, req.workshopId]
-      );
-      if (parseFloat(earnRow?.total) > 0) todayEarnings = parseFloat(earnRow.total);
-    } catch (_) {}
-    if (todayEarnings > 0) statsRow.revenue_today = todayEarnings;
-
-    // All-time stats
-    const [allTime] = await query(
-      `SELECT
+        SUM(status IN ${MY_ORDERS_ACTIVE}) as active,
+        SUM(status = 'completed' AND DATE(completed_at) = CURDATE()) as completed_today,
+        SUM(status = 'cancelled' AND DATE(cancelled_at) = CURDATE()) as cancelled_today,
         COUNT(*) as total_orders,
         SUM(status = 'completed') as total_completed,
-        SUM(status = 'cancelled') as total_cancelled,
-        SUM(CASE WHEN status = 'completed' THEN service_fee ELSE 0 END) as total_revenue
+        SUM(status = 'cancelled') as total_cancelled
        FROM work_orders WHERE mechanic_id = ? AND workshop_id = ?`,
       [mechanic.id, req.workshopId]
     );
-
-    // Use mechanic_earnings for accurate all-time revenue if available
-    try {
-      const [allEarn] = await query(
-        `SELECT COALESCE(SUM(net_amount), 0) as total FROM mechanic_earnings WHERE mechanic_id = ? AND workshop_id = ?`,
-        [mechanic.id, req.workshopId]
-      );
-      if (parseFloat(allEarn?.total) > 0) allTime.total_revenue = parseFloat(allEarn.total);
-    } catch (_) {}
-
-    // Tab counts — all-time counts matching actually displayed orders per tab
-    const [tabCounts] = await query(
-      `SELECT
-        SUM(status IN ('assigned','accepted','in_progress','inspection','ready_for_pickup')) as active,
-        SUM(status = 'completed') as completed,
-        SUM(status = 'cancelled') as cancelled
-       FROM work_orders WHERE mechanic_id = ? AND workshop_id = ?`,
-      [mechanic.id, req.workshopId]
-    );
+    const n = v => parseInt(v || 0, 10);
 
     return res.json({
       success: true,
+      deprecated: true,
       data: {
         mechanic: { id: mechanic.id, name: mechanic.full_name, status: mechanic.status },
         orders,
         stats: {
-          active:    parseInt(statsRow?.active || 0),
-          completed: parseInt(statsRow?.completed_today || 0),
-          cancelled: parseInt(statsRow?.cancelled_today || 0),
-          revenue:   parseFloat(statsRow?.revenue_today || 0),
+          active:    n(counts?.active),
+          completed: n(counts?.completed_today),
+          cancelled: n(counts?.cancelled_today),
         },
         tabCounts: {
-          active:    parseInt(tabCounts?.active || 0),
-          completed: parseInt(tabCounts?.completed || 0),
-          cancelled: parseInt(tabCounts?.cancelled || 0),
+          active:    n(counts?.active),
+          completed: n(counts?.total_completed),
+          cancelled: n(counts?.total_cancelled),
         },
         allTimeStats: {
-          total_orders:     parseInt(allTime?.total_orders || 0),
-          total_completed:  parseInt(allTime?.total_completed || 0),
-          total_cancelled:  parseInt(allTime?.total_cancelled || 0),
-          total_revenue:    parseFloat(allTime?.total_revenue || 0),
+          total_orders:    n(counts?.total_orders),
+          total_completed: n(counts?.total_completed),
+          total_cancelled: n(counts?.total_cancelled),
         },
       },
     });
@@ -149,79 +144,22 @@ router.get('/my-orders', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/service-status/:token — PUBLIC (no auth needed for customers)
-router.get('/:token', publicTrackingLimiter, async (req, res) => {
-  try {
-    const [order] = await query(
-      `SELECT o.work_order_number, o.status, o.work_order_type, o.customer_name,
-              o.dropoff_address, o.dropoff_lat, o.dropoff_lng, o.scheduled_at,
-              o.started_at, o.completed_at, o.estimated_completion_at,
-              o.payment_method, o.cash_amount, o.service_fee,
-              m.full_name as mechanic_name, m.phone as mechanic_phone,
-              sb.name as service_bay_name
-       FROM work_orders o
-       LEFT JOIN mechanics m ON o.mechanic_id = m.id
-       LEFT JOIN service_bays sb ON o.service_bay_id = sb.id
-       WHERE o.service_status_token = ?`,
-      [req.params.token]
-    );
-    if (!order) return res.status(404).json({ success: false, message: 'Service status token not found' });
-
-    // SR-08 — this endpoint is unauthenticated: anyone holding the link sees
-    // this payload. The customer has a real need to phone the mechanic working
-    // on their car, so the number stays available while the job is live, but is
-    // withheld once the job is closed. Otherwise a link that gets forwarded or
-    // sits in a mailbox exposes an employee's personal number indefinitely.
-    // To withhold it entirely, drop the column from the SELECT above.
-    const ACTIVE_FOR_CONTACT = new Set(['assigned', 'accepted', 'in_progress', 'ready_for_pickup']);
-    if (!ACTIVE_FOR_CONTACT.has(String(order.status))) {
-      delete order.mechanic_phone;
-    }
-
-    const statusLogs = await query(
-      'SELECT status, note, lat, lng, created_at FROM work_order_status_logs WHERE work_order_id = (SELECT id FROM work_orders WHERE service_status_token = ?) ORDER BY created_at ASC',
-      [req.params.token]
-    );
-
-    // Completion photos (proof of work done)
-    let completionPhotos = [];
-    try {
-      completionPhotos = await query(
-        `SELECT cp.photo_url, cp.photo_type, cp.caption, cp.uploaded_at
-         FROM completion_photos cp JOIN work_orders wo ON cp.work_order_id = wo.id
-         WHERE wo.service_status_token = ? ORDER BY cp.uploaded_at ASC`,
-        [req.params.token]
-      );
-    } catch (_) {}
-
-    // Parts used on this work order
-    let parts = [];
-    try {
-      parts = await query(
-        `SELECT p.part_number, p.name, p.description, p.quantity, p.status
-         FROM parts p JOIN work_orders o2 ON p.work_order_id = o2.id
-         WHERE o2.service_status_token = ? ORDER BY p.id ASC`,
-        [req.params.token]
-      );
-    } catch (_) {}
-
-    return res.json({
-      success: true,
-      data: {
-        ...order,
-        status_logs: statusLogs,
-        completion_photos: completionPhotos,
-        parts,
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: 'Service status lookup failed' });
-  }
+// GET /api/service-status/:token — RETIRED. The customer's status page
+// (/service-status/:token, /track/:token) reads GET /api/public/service-status/:token
+// (routes/public-service-status.js, lib/customer-status.js), whose payload is
+// built for customers. This one answers 410 so nothing keeps reading the old
+// work order fields through it.
+router.get('/:token', publicTrackingLimiter, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.status(410).json({
+    success: false, code: 'MOVED',
+    message: 'This status link moved. Use /api/public/service-status/:token.',
+    url: `/api/public/service-status/${encodeURIComponent(req.params.token)}`,
+  });
 });
 
-// GET /api/service-status — search by work order number (authenticated)
-router.get('/', authMiddleware, async (req, res) => {
+// GET /api/service-status — search by work order number (authenticated, staff)
+router.get('/', authMiddleware, refuseTechnician, async (req, res) => {
   try {
     const { work_order_number } = req.query;
     if (!work_order_number) return res.status(400).json({ success: false, message: 'work_order_number required' });
@@ -236,9 +174,10 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/service-status/:token/order — MECHANIC: full work order data (authenticated)
-// Supports BOTH service status tokens AND part_number scans
-router.get('/:token/order', authMiddleware, async (req, res) => {
+// GET /api/service-status/:token/order — STAFF: full work order data (authenticated)
+// Supports BOTH service status tokens AND part_number scans. A technician
+// opens their own job card from My Jobs instead (any token here is any job).
+router.get('/:token/order', authMiddleware, refuseTechnician, async (req, res) => {
   try {
     const token = req.params.token;
     let scannedPartId = null;
@@ -309,42 +248,36 @@ router.get('/:token/order', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /api/service-status/:token/scan — log a scan event (mechanic/service-bay check-in)
-// Supports BOTH service status tokens AND part_number scans
-router.post('/:token/scan', authMiddleware, async (req, res) => {
+// POST /api/service-status/:token/scan — log a scan event (staff / service-bay check-in)
+// Supports BOTH service status tokens AND part_number scans.
+//
+// A scan is a record that the car or part was seen, nothing more: it never
+// moves the job. Status changes go through PATCH /:token/status (or the job
+// card screen), with the role rules, quality check and gate pass that apply.
+const SCAN_TYPES = ['checkin_scan', 'bay_in', 'bay_out', 'pickup_scan', 'completion_scan']; // work_order_scan_logs.scan_type
+router.post('/:token/scan', authMiddleware, refuseTechnician, async (req, res) => {
   try {
-    const { scan_type = 'checkin_scan', lat, lng, note } = req.body;
+    const { lat, lng, note } = req.body;
+    const scan_type = SCAN_TYPES.includes(req.body.scan_type) ? req.body.scan_type : 'checkin_scan';
     const token = req.params.token.trim();
 
     // 1. Try work order lookup first
     let [order] = await query(
-      'SELECT id, workshop_id, work_order_number, status, customer_phone, customer_name FROM work_orders WHERE service_status_token = ? AND workshop_id = ?',
+      'SELECT id, work_order_number FROM work_orders WHERE service_status_token = ? AND workshop_id = ?',
       [token, req.workshopId]
     );
 
     // 2. If not a work order token, try part_number lookup
     let part = null;
     if (!order) {
-      const upperToken = token.toUpperCase();
       [part] = await query(
-        `SELECT p.*, o.id as parent_work_order_id, o.work_order_number, o.status as work_order_status,
-                o.customer_phone as order_customer_phone, o.customer_name as order_customer_name
+        `SELECT p.id, p.part_number, o.id as parent_work_order_id, o.work_order_number
          FROM parts p
          JOIN work_orders o ON p.work_order_id = o.id
          WHERE p.part_number = ? AND p.workshop_id = ?`,
-        [upperToken, req.workshopId]
+        [token.toUpperCase(), req.workshopId]
       );
-      if (part) {
-        // Synthesize order reference from part's parent work order
-        order = {
-          id: part.parent_work_order_id,
-          workshop_id: req.workshopId,
-          work_order_number: part.work_order_number,
-          status: part.work_order_status,
-          customer_phone: part.order_customer_phone,
-          customer_name: part.order_customer_name,
-        };
-      }
+      if (part) order = { id: part.parent_work_order_id, work_order_number: part.work_order_number };
     }
 
     if (!order) return res.status(404).json({ success: false, message: 'Work order or part not found for this code' });
@@ -354,42 +287,7 @@ router.post('/:token/scan', authMiddleware, async (req, res) => {
       `INSERT INTO work_order_scan_logs (work_order_id, workshop_id, scanned_by, scan_type, lat, lng, note, scanned_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
       [order.id, req.workshopId, req.user?.id || null, scan_type, lat || null, lng || null, note || null]
-    ).catch(() => {});
-
-    // Auto-status transitions on certain scan types
-    let newOrderStatus = null;
-    const autoTransitions = {
-      bay_in:            { from: ['pending'],                        to: 'confirmed' },
-      pickup_scan:       { from: ['assigned','confirmed'],            to: 'in_progress' },
-      completion_scan:   { from: ['in_progress','ready_for_pickup'],  to: 'completed' },
-    };
-
-    if (autoTransitions[scan_type]) {
-      const t = autoTransitions[scan_type];
-      if (t.from.includes(order.status)) {
-        newOrderStatus = t.to;
-      }
-    }
-
-    if (newOrderStatus) {
-      const timestamps = {};
-      if (newOrderStatus === 'in_progress') timestamps.started_at = new Date();
-      if (newOrderStatus === 'completed')   timestamps.completed_at = new Date();
-      const setClause = ['status = ?', ...Object.keys(timestamps).map(k => `${k} = ?`)].join(', ');
-      const vals = [newOrderStatus, ...Object.values(timestamps), order.id, req.workshopId];
-      await execute(`UPDATE work_orders SET ${setClause} WHERE id = ? AND workshop_id = ?`, vals);
-      await execute(
-        'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-        [order.id, newOrderStatus, req.user?.id || null, `Auto-updated via ${scan_type}`]
-      );
-
-      // Same survey trigger as the main status route — a job closed by
-      // scanning has to behave like one closed from the UI.
-      if (newOrderStatus === 'completed') {
-        issueSurveyOnClosure({ workOrderId: order.id, workshopId: req.workshopId })
-          .catch(e => console.error('[SurveyTrigger] Error:', e.message));
-      }
-    }
+    ).catch(e => console.error('[ServiceStatus] scan log:', e.message));
 
     return res.json({
       success: true,
@@ -397,10 +295,9 @@ router.post('/:token/scan', authMiddleware, async (req, res) => {
         work_order_id: order.id,
         work_order_number: order.work_order_number,
         scan_type,
-        new_status: newOrderStatus,
         part: part ? { id: part.id, part_number: part.part_number } : null,
       },
-      message: newOrderStatus ? `Scanned – status updated to ${newOrderStatus}` : 'Scan logged',
+      message: 'Scan logged',
     });
   } catch (err) {
     console.error(err);
@@ -408,199 +305,76 @@ router.post('/:token/scan', authMiddleware, async (req, res) => {
   }
 });
 
-/* ── Status transition map (mechanic-side) ──────────────────────
-   Kept aligned with car_workshop.sql work_orders.status enum:
-   pending, confirmed, assigned, accepted, in_progress, ready_for_pickup,
-   completed, cancelled */
-const MECHANIC_TRANSITIONS = {
-  pending:           ['confirmed', 'cancelled'],
-  confirmed:         ['assigned', 'cancelled'],
-  assigned:          ['accepted', 'in_progress', 'cancelled'],
-  accepted:          ['in_progress', 'cancelled'],
-  in_progress:       ['ready_for_pickup', 'cancelled'],
-  ready_for_pickup:  ['completed', 'cancelled'],
-  completed:         [],
-  cancelled:         [],
-};
-
-// PATCH /api/service-status/:token/status — MECHANIC: update status by token (authenticated)
-// Supports BOTH service status tokens AND part_number scans
-router.patch('/:token/status', authMiddleware, async (req, res) => {
+// PATCH /api/service-status/:token/status — STAFF: change a job's status by its token (authenticated)
+//
+// The same change as PATCH /api/work-orders/:id/status, reached from a QR or
+// token: the role must hold the capability for the new status
+// (STATUS_CAPABILITIES), and applyStatusChange() applies the transition map,
+// the customer-approval, quality-check and gate-pass gates and every side
+// effect (status log, invoice, technician release, customer messages,
+// webhooks). Payment is recorded on the invoice, never here.
+router.patch('/:token/status', authMiddleware, refuseTechnician, async (req, res) => {
   try {
-    const { status, note, lat, lng, cash_collected_amount } = req.body;
+    const { status, note, lat, lng } = req.body;
     const validStatuses = ['confirmed','assigned','accepted','in_progress','ready_for_pickup','completed','cancelled'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status' });
     }
+    if (!canSetStatus(req.user, status)) return res.status(403).json(statusNotAllowed(status));
     const token = req.params.token.trim();
 
-    // 1. Try work order lookup first
-    let [order] = await query(
-      `SELECT o.*, c.email AS customer_email
-       FROM work_orders o
-       LEFT JOIN customers c ON o.customer_id = c.id
-       WHERE o.service_status_token = ? AND o.workshop_id = ?`,
+    const [order] = await query(
+      'SELECT id, status FROM work_orders WHERE service_status_token = ? AND workshop_id = ?',
       [token, req.workshopId]
     );
-
     if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
 
-    // Validate status transition
-    const allowed = MECHANIC_TRANSITIONS[order.status] || [];
-    if (order.status !== status && !allowed.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot change from "${order.status}" to "${status}". Allowed: ${allowed.join(', ') || 'none'}`,
-      });
+    if (order.status === status) {
+      return res.json({ success: true, message: `Already at ${woLabel(status)}`, new_status: status });
     }
 
-    const timestamps = {};
-    if (status === 'in_progress') timestamps.started_at = new Date();
-    if (status === 'completed')   timestamps.completed_at = new Date();
-    if (status === 'cancelled')   timestamps.cancelled_at = new Date();
-
-    // Handle cash collection on completion
-    const extraFields = {};
-    if (status === 'completed' && order.payment_method === 'cash') {
-      extraFields.cash_collected = order.cash_amount || 0;
-      extraFields.cash_collected_at = new Date();
-      if (cash_collected_amount != null && parseFloat(cash_collected_amount) > 0) {
-        extraFields.cash_amount = parseFloat(cash_collected_amount);
-        extraFields.cash_collected = parseFloat(cash_collected_amount);
-      }
-      extraFields.payment_status = 'paid';
-    }
-
-    const allFields = { ...timestamps, ...extraFields };
-    const setClause = ['status = ?', ...Object.keys(allFields).map(k => `${k} = ?`)].join(', ');
-    await execute(
-      `UPDATE work_orders SET ${setClause} WHERE id = ? AND workshop_id = ?`,
-      [status, ...Object.values(allFields), order.id, req.workshopId]
-    );
-    await execute(
-      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note, lat, lng) VALUES (?, ?, ?, ?, ?, ?)',
-      [order.id, status, req.user?.id || null, note || null, lat || null, lng || null]
-    );
-
-    // If completed, increment mechanic total jobs completed
-    if (status === 'completed' && order.mechanic_id) {
-      await execute('UPDATE mechanics SET total_jobs_completed = total_jobs_completed + 1 WHERE id = ?', [order.mechanic_id]);
-    }
-
-    if (status === 'completed') {
-      issueSurveyOnClosure({ workOrderId: order.id, workshopId: req.workshopId })
-        .catch(e => console.error('[SurveyTrigger] Error:', e.message));
-    }
-
-    // Release mechanic back to available when work order reaches terminal status
-    if (['completed','cancelled'].includes(status) && order.mechanic_id) {
-      const stillActive = await query(
-        "SELECT id FROM work_orders WHERE mechanic_id = ? AND id != ? AND status IN ('assigned','accepted','in_progress','ready_for_pickup') LIMIT 1",
-        [order.mechanic_id, order.id]
-      );
-      if (!stillActive.length) {
-        await execute("UPDATE mechanics SET status = 'available' WHERE id = ?", [order.mechanic_id]);
-        // Auto-cleanup GPS tracking data when mechanic has no more active work orders
-        await execute('DELETE FROM mechanic_locations WHERE mechanic_id = ?', [order.mechanic_id]).catch(() => {});
-      }
-    }
-
-    // ── Unified notifications: SMS + Email + Push + Socket.io ──
-    let enrichedOrder = { ...order };
-    if (order.mechanic_id) {
-      const [mechanicInfo] = await query('SELECT full_name, phone FROM mechanics WHERE id = ?', [order.mechanic_id]).catch(() => []);
-      if (mechanicInfo) {
-        enrichedOrder.mechanic_name = mechanicInfo.full_name;
-        enrichedOrder.mechanic_phone = mechanicInfo.phone;
-      }
-    }
-    notifyWorkOrderStatus({
-      order: enrichedOrder, status, workshopId: req.workshopId, changedBy: req.user?.id,
-    }).catch(e => console.error('[Notify] Error:', e.message));
-
-    // Cash collection notification
-    if (status === 'completed' && cash_collected_amount != null && parseFloat(cash_collected_amount) > 0) {
-      notifyCashCollected({
-        order: enrichedOrder, amount: cash_collected_amount, tenantId: req.workshopId,
-      }).catch(() => {});
-    }
-
-    return res.json({ success: true, message: `Work order marked as ${status}`, new_status: status });
+    const r = await applyStatusChange({ workOrderId: order.id, workshopId: req.workshopId, userId: req.user.id, status, note, lat, lng });
+    if (!r.ok) return res.status(r.http || 400).json({ success: false, ...(r.code ? { code: r.code } : {}), message: r.message, ...(r.extra || {}) });
+    return res.json({ success: true, message: `Status updated: ${woLabel(status)}`, new_status: status });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: 'Status update failed' });
   }
 });
 
-// POST /api/service-status/start-day — MECHANIC: batch-start all assigned work orders (assigned -> in_progress)
-router.post('/start-trip', authMiddleware, async (req, res) => {
-  try {
-    const [mechanic] = await query(
-      'SELECT id, full_name FROM mechanics WHERE user_id = ? AND workshop_id = ?',
-      [req.user.id, req.workshopId]
-    );
-    if (!mechanic) return res.status(404).json({ success: false, message: 'No mechanic profile' });
-
-    const assignedOrders = await query(
-      "SELECT id, work_order_number, service_status_token, customer_phone, customer_name, mechanic_id " +
-      "FROM work_orders WHERE mechanic_id = ? AND workshop_id = ? AND status = 'assigned'",
-      [mechanic.id, req.workshopId]
-    );
-    if (!assignedOrders.length) {
-      return res.json({ success: true, message: 'No assigned work orders to start', started: 0 });
-    }
-
-    const now = new Date();
-    const { lat, lng } = req.body || {};
-
-    for (const order of assignedOrders) {
-      await execute(
-        "UPDATE work_orders SET status = 'in_progress', started_at = ? WHERE id = ? AND workshop_id = ?",
-        [now, order.id, req.workshopId]
-      );
-      await execute(
-        'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note, lat, lng) VALUES (?, ?, ?, ?, ?, ?)',
-        [order.id, 'in_progress', req.user.id, 'Batch start — work started', lat || null, lng || null]
-      );
-
-      // Fire notification
-      notifyWorkOrderStatus({
-        order: { ...order, mechanic_name: mechanic.full_name },
-        status: 'in_progress', workshopId: req.workshopId, changedBy: req.user.id,
-      }).catch(() => {});
-    }
-
-    return res.json({
-      success: true,
-      message: `Work started! ${assignedOrders.length} work order(s) in progress`,
-      started: assignedOrders.length,
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: 'Failed to start work' });
-  }
+// POST /api/service-status/start-trip — RETIRED. It moved every assigned job
+// of the technician to in progress at once, with no time booked, and texted
+// every customer. Work starts per job card with Start (time booking).
+router.post('/start-trip', authMiddleware, (_req, res) => {
+  res.status(410).json({ success: false, code: 'MOVED', message: 'Start work with Start on the job card.' });
 });
 
-// POST /api/service-status/:token/send-sms — send the service status link via SMS to the customer
-router.post('/:token/send-sms', authMiddleware, async (req, res) => {
+// POST /api/service-status/:token/send-sms — STAFF: text the customer the link to their status page
+router.post('/:token/send-sms', authMiddleware, refuseTechnician, async (req, res) => {
   try {
     const token = req.params.token.trim();
     const [order] = await query(
-      'SELECT id, work_order_number, customer_phone, customer_name FROM work_orders WHERE service_status_token = ? AND workshop_id = ?',
+      `SELECT o.id, o.work_order_number, o.customer_phone, o.service_status_token,
+              v.make AS vehicle_make, v.model AS vehicle_model, v.plate_number AS vehicle_plate
+       FROM work_orders o
+       LEFT JOIN vehicles v ON v.id = o.vehicle_id
+       WHERE o.service_status_token = ? AND o.workshop_id = ?`,
       [token, req.workshopId]
     );
     if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-    if (!order.customer_phone) return res.status(400).json({ success: false, message: 'No customer phone on file' });
+    // Imported accounts can carry '-' as the phone.
+    if (!/\d/.test(String(order.customer_phone || ''))) return res.status(400).json({ success: false, message: 'No customer phone on file' });
 
-    const baseUrl = process.env.FRONTEND_URL || process.env.BASE_URL || 'https://app.pioneercarservice.com';
-    const link = `${baseUrl}/service-status/${token}`;
-    const message = interpolate(
-      'Hi {customer_name}, track your vehicle service status here: {link}',
-      { customer_name: order.customer_name || 'Customer', link }
-    );
+    const message = interpolate('Pioneer Car Service: follow your {vehicle}{plate} here: {link}', {
+      vehicle: [order.vehicle_make, order.vehicle_model].filter(Boolean).join(' ') || 'car',
+      plate: order.vehicle_plate ? ` (${order.vehicle_plate})` : '',
+      link: customerStatusUrl(order),
+    });
 
     const result = await sendSMS({ to: order.customer_phone, message, workshopId: req.workshopId });
-
+    if (!result?.success) {
+      return res.status(502).json({ success: false, message: 'The SMS could not be sent. Try again, or share the link another way.' });
+    }
     return res.json({ success: true, message: 'Service status link sent via SMS', data: result });
   } catch (err) {
     console.error(err);

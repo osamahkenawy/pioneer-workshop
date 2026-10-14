@@ -85,7 +85,7 @@ const SuperAdminOnboarding = () => {
           font_family: form.font_family, logo_url: form.logo_url, favicon_url: form.favicon_url
         }
       };
-      const res = await fetch(`${API}/super-admin/onboard-workshop`, {
+      const res = await fetch(`${API}/super-admin/onboard-tenant`, {
         method: 'POST', headers: headers(), body: JSON.stringify(body)
       });
       const data = await res.json();

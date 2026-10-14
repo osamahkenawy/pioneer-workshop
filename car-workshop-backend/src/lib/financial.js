@@ -37,6 +37,12 @@ export async function getFinancialConfig(workshopId) {
     commissionPercent: parsed.platform_commission_percent ?? parsed.mechanic_commission_percent ?? 0,
     vatEnabled: parsed.vat_enabled ?? false,
     vatRate: parsed.vat_rate ?? 5,           // UAE default 5%
+    // Raw settings values, undefined when the workshop never set them — so a
+    // caller can fall back to the platform default (config.vatEnabled, from
+    // VAT_ENABLED) instead of the `false` above. vatEnabled keeps its old
+    // default because existing job cards were priced with it.
+    vatEnabledSetting: parsed.vat_enabled,
+    vatRateSetting: parsed.vat_rate,
     vatNumber: parsed.vat_number ?? '',
     applyVatOnServiceFee: parsed.apply_vat_on_service_fee ?? true,
     applyVatOnCash: parsed.apply_vat_on_cash ?? false,
@@ -313,9 +319,11 @@ export async function recordMechanicEarning({ workshopId, mechanicId, workOrderI
     if (netEarning <= 0) return null; // no earning configured
 
     const result = await execute(
-      `INSERT INTO mechanic_earnings (workshop_id, mechanic_id, work_order_id, earning_type, base_amount, bonus, deductions, net_amount, status)
-       VALUES (?, ?, ?, 'service', ?, ?, 0, ?, 'pending')`,
-      [workshopId, mechanicId, workOrderId, baseAmount, cashBonus, netEarning]
+      // earning_type is ENUM('labor','tip','bonus','penalty'): 'service' was
+      // rejected, so no earning was ever recorded on completion.
+      `INSERT INTO mechanic_earnings (workshop_id, mechanic_id, work_order_id, earning_type, amount, base_amount, bonus, deductions, net_amount, status)
+       VALUES (?, ?, ?, 'labor', ?, ?, ?, 0, ?, 'pending')`,
+      [workshopId, mechanicId, workOrderId, netEarning, baseAmount, cashBonus, netEarning]
     );
 
     return { id: result.insertId, net_amount: netEarning };

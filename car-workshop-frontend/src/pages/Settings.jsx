@@ -1256,30 +1256,44 @@ const MODULE_SECTIONS = {
   analytics:  { label: 'Analytics', icon: <StatsUpSquare width={16} height={16} /> },
   config:     { label: 'Configuration', icon: <SettingsIcon width={16} height={16} /> },
   system:     { label: 'System', icon: <Wrench width={16} height={16} /> },
-  mechanic:     { label: 'Mechanic Tools', icon: <DeliveryTruck width={16} height={16} /> },
+  mechanic:     { label: 'Technician App', icon: <Wrench width={16} height={16} /> },
+  floor:      { label: 'Workshop Floor', icon: <Wrench width={16} height={16} /> },
+  store:      { label: 'Store', icon: <Package width={16} height={16} /> },
+  crm:        { label: 'CRM & Customer Care', icon: <StatsUpSquare width={16} height={16} /> },
 };
+
+/* Workflow responsibilities (backend lib/roles.js CAPABILITIES), Steps 1–7. */
+function CapabilityChips({ role, caps, t }) {
+  if (role.capabilities_all) return <span className="stg-cap-chip all">{t('settings.roles_tab.caps_all', 'All workflow steps (manager)')}</span>;
+  const list = (role.capabilities || []).map(k => caps.find(c => c.key === k)).filter(Boolean).sort((a, b) => a.step - b.step);
+  if (!list.length) return <span className="stg-cap-chip none">{t('settings.roles_tab.caps_none', 'No workflow steps')}</span>;
+  return list.map(c => <span key={c.key} className="stg-cap-chip" title={t(`settings.caps.${c.key.replace('.', '_')}`, c.label)}>{t('settings.roles_tab.step_n', 'Step {{n}}', { n: c.step })} · {t(`settings.caps_short.${c.key.replace('.', '_')}`, c.label)}</span>);
+}
 
 function RolesTab({ toast }) {
   const { t, i18n } = useTranslation();
   const isRTL = i18n.language === 'ar';
   const [roles, setRoles]         = useState([]);
   const [modules, setModules]     = useState([]);
+  const [caps, setCaps]           = useState([]);
   const [loading, setLoading]     = useState(true);
   const [editRole, setEditRole]   = useState(null);   // null = list view, object = editing
   const [showCreate, setShowCreate] = useState(false);
   const [saving, setSaving]       = useState(false);
 
-  const emptyForm = { name: '', name_ar: '', slug: '', description: '', modules: [] };
+  const emptyForm = { name: '', name_ar: '', slug: '', description: '', modules: [], capabilities: [], capsDefault: false };
   const [form, setForm] = useState(emptyForm);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [rolesRes, modsRes] = await Promise.all([
+    const [rolesRes, modsRes, capsRes] = await Promise.all([
       api.get('/settings/roles'),
       api.get('/settings/modules'),
+      api.get('/settings/capabilities'),
     ]);
     if (rolesRes.success) setRoles(rolesRes.data || []);
     if (modsRes.success) setModules(modsRes.data || []);
+    if (capsRes.success) setCaps(capsRes.data || []);
     setLoading(false);
   }, []);
 
@@ -1326,6 +1340,9 @@ function RolesTab({ toast }) {
       slug: role.slug,
       description: role.description || '',
       modules: Array.isArray(role.modules) ? [...role.modules] : [],
+      capabilities: Array.isArray(role.capabilities) ? [...role.capabilities] : [],
+      capsDefault: !role.capabilities_custom,
+      capsAll: !!role.capabilities_all,
     });
     setEditRole(role);
     setShowCreate(false);
@@ -1341,7 +1358,8 @@ function RolesTab({ toast }) {
     e.preventDefault();
     setSaving(true);
     if (editRole) {
-      const res = await api.put('/settings/roles/' + editRole.id, form);
+      const { capsDefault, capsAll, ...rest } = form;
+      const res = await api.put('/settings/roles/' + editRole.id, { ...rest, capabilities: capsDefault ? null : form.capabilities });
       if (res.success) {
         toast('success', t('settings.roles_tab.saved'));
         setEditRole(null);
@@ -1350,7 +1368,8 @@ function RolesTab({ toast }) {
         toast('error', res.message || t('settings.roles_tab.save_failed'));
       }
     } else {
-      const res = await api.post('/settings/roles', form);
+      const { capsDefault, capsAll, ...rest } = form;
+      const res = await api.post('/settings/roles', rest);
       if (res.success) {
         toast('success', t('settings.roles_tab.created'));
         setShowCreate(false);
@@ -1423,6 +1442,37 @@ function RolesTab({ toast }) {
                 <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                        placeholder={t('settings.roles_tab.description_placeholder')} />
               </div>
+            </div>
+
+            {/* Workflow responsibilities — who does which step of the job card (Steps 1–7) */}
+            <div className="stg-caps">
+              <div className="stg-caps-head">
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: '#1e293b' }}>{t('settings.roles_tab.caps_title', 'Workflow responsibilities (Steps 1–7)')}</div>
+                  <div className="stg-section-sub">{t('settings.roles_tab.caps_sub', 'What this role does on a job card. The system enforces it — buttons for other roles\' steps are hidden.')}</div>
+                </div>
+                {editRole && !form.capsAll && !form.capsDefault && (
+                  <button type="button" className="stg-btn-ghost" style={{ fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => { const d = roles.find(r => r.id === editRole.id); setForm(f => ({ ...f, capsDefault: true, capabilities: caps.filter(c => c.default_roles.includes(d?.slug)).map(c => c.key) })); }}>
+                    {t('settings.roles_tab.caps_reset', 'Reset to the process defaults')}
+                  </button>
+                )}
+              </div>
+              {form.capsAll ? (
+                <div className="stg-cap-chip all">{t('settings.roles_tab.caps_all', 'All workflow steps (manager)')}</div>
+              ) : (
+                <div className="stg-caps-grid">
+                  {[...caps].sort((a, b) => a.step - b.step).map(c => (
+                    <label key={c.key} className={`stg-cap ${form.capabilities.includes(c.key) ? 'on' : ''}`}>
+                      <input type="checkbox" checked={form.capabilities.includes(c.key)}
+                        onChange={() => setForm(f => ({ ...f, capsDefault: false, capabilities: f.capabilities.includes(c.key) ? f.capabilities.filter(k => k !== c.key) : [...f.capabilities, c.key] }))} />
+                      <span className="stg-cap-step">{t('settings.roles_tab.step_n', 'Step {{n}}', { n: c.step })}</span>
+                      <span>{t(`settings.caps.${c.key.replace('.', '_')}`, c.label)}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {form.capsDefault && !form.capsAll && editRole && <div className="stg-section-sub" style={{ marginTop: 6 }}>{t('settings.roles_tab.caps_default_note', 'Using the defaults from the workshop process for this role.')}</div>}
             </div>
 
             {/* Module permissions */}
@@ -1547,7 +1597,7 @@ function RolesTab({ toast }) {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: '#1e293b' }}>
                     {isRTL && role.name_ar ? role.name_ar : role.name}
-                    {role.is_system && (
+                    {!!role.is_system && (
                       <span style={{
                         marginInlineStart: 8, fontSize: 10, fontWeight: 700,
                         padding: '2px 8px', borderRadius: 20,
@@ -1569,6 +1619,7 @@ function RolesTab({ toast }) {
                       {t('settings.roles_tab.modules_count', { count: mCount })}
                     </span>
                   </div>
+                  {role.slug !== 'customer' && <div className="stg-cap-row"><CapabilityChips role={role} caps={caps} t={t} /></div>}
                 </div>
 
                 <div style={{ display: 'flex', gap: 6 }}>

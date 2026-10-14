@@ -7,6 +7,7 @@
  */
 import { createContext, useState, useEffect, useCallback } from 'react';
 import api, { setToken, getToken } from '../lib/api';
+import { disconnectSocket } from '../lib/socketClient';
 
 export const AuthContext = createContext(null);
 
@@ -50,6 +51,7 @@ export function AuthProvider({ children }) {
 
   const logout = useCallback(async () => {
     try { await api.post('/auth/logout'); } catch { /* ignore */ }
+    disconnectSocket(); // the next login gets a socket with its own token
     setToken(null);
     setUser(null);
     setWorkshop(null);

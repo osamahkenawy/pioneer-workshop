@@ -721,7 +721,8 @@ const VitalCard = ({ icon: Icon, color, label, value, unit, sub, pulse }) => (
       <Icon width={18} height={18} />
     </div>
     <div className="cx-vital-body">
-      <div className="cx-vital-value">{value}<span className="cx-vital-unit">{unit}</span></div>
+      {/* No unit on an empty reading: "—%" / "—/5" read as broken */}
+      <div className="cx-vital-value">{value}{value !== '—' && <span className="cx-vital-unit">{unit}</span>}</div>
       <div className="cx-vital-label">{label}</div>
       {sub && <div className="cx-vital-sub">{sub}</div>}
     </div>

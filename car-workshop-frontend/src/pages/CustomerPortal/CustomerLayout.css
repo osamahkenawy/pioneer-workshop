@@ -1,268 +1,143 @@
 /* ══════════════════════════════════════════════════════════════
- * CustomerLayout.css — Merchant Portal Shell — Premium Design v2
- * Modern, clean, professional sidebar + topbar
+ * CustomerLayout.css — the Customer Portal's frame.
+ * Desktop (≥ 992px): fixed sidebar. Phones: top bar + bottom tab bar.
+ * Logical properties throughout (Arabic, Urdu). Targets ≥ 44px.
  * ══════════════════════════════════════════════════════════════ */
 
-/* ── Container ──────────────────────────────────────── */
 .cl-container {
-  display: flex;
-  min-height: 100vh;
+  min-block-size: 100vh;
   background: #f4f6fb;
+  color: #0f172a;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* ── Sidebar ────────────────────────────────────────── */
+/* ── Sidebar (desktop) ───────────────────────────────── */
 .cl-sidebar {
-  width: 264px;
-  background: linear-gradient(175deg, #0c1222 0%, #151d32 40%, #1a2540 100%);
-  color: #cbd5e1;
-  display: flex;
-  flex-direction: column;
+  display: none;
   position: fixed;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  z-index: 1065;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
-  box-shadow: 4px 0 32px rgba(0, 0, 0, 0.12);
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 256px;
+  z-index: 50;
+  flex-direction: column;
+  background: #111a2e;
+  color: #cbd5e1;
 }
-.cl-sidebar.closed {
-  width: 72px;
-}
-
-/* ── Sidebar Header / Logo ──────────────────────────── */
 .cl-sidebar-header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 20px 18px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  min-height: 80px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 18px 16px;
+  border-block-end: 1px solid rgba(255, 255, 255, 0.08);
+  color: inherit; text-decoration: none;
+  min-block-size: 80px;
 }
 .cl-sidebar-logo {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  object-fit: contain;
-  flex-shrink: 0;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3), 0 0 0 2px rgba(255,255,255,0.08);
-  transition: transform 0.25s ease;
+  inline-size: 44px; block-size: 44px; flex: none;
+  border-radius: 12px; object-fit: contain; background: #fff;
 }
-.cl-sidebar-logo:hover {
-  transform: scale(1.05);
-}
-.cl-sidebar-brand {
-  font-size: 18px;
-  font-weight: 800;
-  color: #f8fafc;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: -0.4px;
-  line-height: 1.2;
-}
+.cl-sidebar-brand { display: flex; flex-direction: column; min-inline-size: 0; }
+.cl-sidebar-name { font-weight: 800; color: #f8fafc; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-sidebar-sub { font-size: 12px; color: #94a3b8; }
 
-/* ── Navigation ─────────────────────────────────────── */
-.cl-nav {
-  flex: 1;
-  padding: 16px 12px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.cl-nav::-webkit-scrollbar { width: 3px; }
-.cl-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
-
+.cl-nav { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 2px; }
 .cl-nav-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 14px;
-  border-radius: 12px;
-  color: #8892a4;
-  text-decoration: none;
-  font-size: 13.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  border: none;
-  background: none;
-  cursor: pointer;
-  width: 100%;
-  text-align: left;
   position: relative;
+  display: flex; align-items: center; gap: 12px;
+  inline-size: 100%;
+  min-block-size: 44px;
+  padding: 10px 14px;
+  border: none; border-radius: 12px;
+  background: none;
+  color: #cbd5e1;
+  font: inherit; font-size: 14px; font-weight: 500;
+  text-align: start; text-decoration: none;
+  cursor: pointer;
 }
-.cl-nav-item:hover {
-  background: rgba(255,255,255,0.06);
-  color: #e2e8f0;
-  transform: translateX(2px);
-}
-.cl-nav-item.active {
-  background: linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(249, 115, 22, 0.06) 100%);
-  color: #fb923c;
-  font-weight: 600;
-}
+.cl-nav-item:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+.cl-nav-item:focus-visible { outline: 3px solid #93c5fd; outline-offset: -3px; }
+.cl-nav-item.active { background: rgba(249, 115, 22, 0.16); color: #fdba74; font-weight: 700; }
 .cl-nav-item.active::before {
   content: '';
   position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3.5px;
-  border-radius: 0 4px 4px 0;
-  background: linear-gradient(180deg, #f97316, #fb923c);
-  box-shadow: 0 0 12px rgba(249, 115, 22, 0.5);
+  inset-inline-start: 0; inset-block: 8px;
+  inline-size: 4px; border-radius: 4px;
+  background: #f97316;
 }
+.cl-sidebar-footer { padding: 12px; border-block-start: 1px solid rgba(255, 255, 255, 0.08); }
+.cl-logout-btn:hover { color: #fecaca; background: rgba(239, 68, 68, 0.12); }
 
-.cl-nav-divider {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  color: #3e4a61;
-  padding: 22px 14px 8px;
-}
-.cl-nav-divider-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #3e4a61;
-  margin: 14px auto;
-}
+/* ── Main ────────────────────────────────────────────── */
+.cl-main { display: flex; flex-direction: column; min-block-size: 100vh; }
 
-.cl-sidebar-footer {
-  padding: 12px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-.cl-logout-btn {
-  color: #8892a4 !important;
-}
-.cl-logout-btn:hover {
-  color: #ef4444 !important;
-  background: rgba(239, 68, 68, 0.1) !important;
-}
-
-/* ── Overlay ────────────────────────────────────────── */
-.cl-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.5);
-  z-index: 1060;
-  backdrop-filter: blur(4px);
-}
-
-/* ── Main Content ───────────────────────────────────── */
-.cl-main {
-  flex: 1;
-  margin-left: 264px;
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.cl-sidebar-closed .cl-main {
-  margin-left: 72px;
-}
-
-/* ── Top Bar ────────────────────────────────────────── */
 .cl-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 32px;
-  height: 68px;
+  position: sticky; inset-block-start: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 16px;
+  min-block-size: 60px;
   background: #fff;
-  border-bottom: 1px solid #eef1f6;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+  border-block-end: 1px solid #e8ecf3;
 }
-.cl-menu-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 10px;
-  background: #f4f6fb;
-  color: #475569;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.cl-menu-btn:hover {
-  background: #e2e8f0;
-  color: #0f172a;
-  transform: scale(1.05);
-}
-
-.cl-topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.cl-user-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 14px 6px 6px;
-  border-radius: 14px;
-  transition: background 0.2s;
-  cursor: default;
-}
-.cl-user-info:hover {
-  background: #f8fafc;
-}
+.cl-topbar-brand { display: flex; align-items: center; gap: 10px; min-inline-size: 0; color: inherit; text-decoration: none; }
+.cl-topbar-logo { inline-size: 36px; block-size: 36px; flex: none; border-radius: 10px; object-fit: contain; }
+.cl-topbar-name { font-weight: 800; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-topbar-right { display: flex; align-items: center; gap: 4px; flex: none; }
+.cl-user-info { display: flex; align-items: center; gap: 10px; padding-inline-end: 4px; }
 .cl-avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 15px;
-  box-shadow: 0 3px 12px rgba(249, 115, 22, 0.3);
+  inline-size: 36px; block-size: 36px; border-radius: 10px;
+  display: grid; place-items: center;
+  background: #c2410c; color: #fff; font-weight: 700;
 }
-.cl-user-meta {
-  display: flex;
-  flex-direction: column;
+.cl-user-meta { display: none; flex-direction: column; }
+.cl-user-name { font-size: 14px; font-weight: 600; }
+.cl-user-role { font-size: 12px; color: #64748b; }
+.cl-icon-btn {
+  display: grid; place-items: center;
+  inline-size: 44px; block-size: 44px;
+  border: none; border-radius: 12px;
+  background: none; color: #475569; cursor: pointer;
 }
-.cl-user-name {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #0f172a;
-}
-.cl-user-role {
-  font-size: 11px;
-  color: #94a3b8;
-  font-weight: 500;
-}
+.cl-icon-btn:hover { background: #f1f5f9; color: #0f172a; }
+.cl-icon-btn:focus-visible { outline: 3px solid #2563eb; outline-offset: -3px; }
 
-/* ── Page Content ───────────────────────────────────── */
 .cl-content {
   flex: 1;
-  padding: 32px;
+  padding: 16px;
+  /* room for the tab bar on phones */
+  padding-block-end: calc(88px + env(safe-area-inset-bottom, 0px));
+  inline-size: 100%;
+  max-inline-size: 1040px;
+  margin-inline: auto;
+  box-sizing: border-box;
 }
 
-/* ── Responsive ─────────────────────────────────────── */
-@media (max-width: 992px) {
-  .cl-sidebar {
-    transform: translateX(-100%);
-    width: 264px !important;
-  }
-  .cl-sidebar.open {
-    transform: translateX(0);
-  }
-  .cl-main {
-    margin-left: 0 !important;
-  }
-  .cl-content { padding: 16px; }
-  .cl-topbar { padding: 0 16px; }
-  .cl-user-meta { display: none; }
+/* ── Tab bar (phones) ────────────────────────────────── */
+.cl-tabbar {
+  position: fixed;
+  inset-inline: 0; inset-block-end: 0;
+  z-index: 45;
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  background: #fff;
+  border-block-start: 1px solid #e2e8f0;
+  padding-block-end: env(safe-area-inset-bottom, 0px);
+  box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.06);
+}
+.cl-tab {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  min-block-size: 60px;
+  padding: 6px 2px;
+  color: #64748b;
+  font-size: 11px; font-weight: 600;
+  text-decoration: none;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.cl-tab.active { color: #c2410c; }
+.cl-tab:focus-visible { outline: 3px solid #2563eb; outline-offset: -3px; }
+
+@media (min-width: 992px) {
+  .cl-sidebar { display: flex; }
+  .cl-main { margin-inline-start: 256px; }
+  .cl-tabbar, .cl-only-phone, .cl-topbar-brand { display: none; }
+  .cl-topbar { justify-content: flex-end; padding-inline: 32px; min-block-size: 68px; }
+  .cl-user-meta { display: flex; }
+  .cl-content { padding: 32px; padding-block-end: 48px; }
 }

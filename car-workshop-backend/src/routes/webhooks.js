@@ -17,34 +17,35 @@ import express from 'express';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { managerForWrites } from '../lib/access.js';
 import { assertSafeOutboundUrl } from '../lib/url-guard.js';
 
 const router = express.Router();
 router.use(authMiddleware);
+// Creating webhook endpoints hands out access that bypasses staff roles; managers only.
+router.use(managerForWrites);
 
 // ── Available event types ─────────────────────────────────────
-// NOTE: renamed from delivery vocabulary (order.*, driver.*, return.*, cod.*)
-// to the work-order status enum used across the car-workshop backend:
-// pending/confirmed/assigned/accepted/in_progress/ready_for_pickup/completed/cancelled.
-// 'work_order.picked_up' / 'in_transit' dropped (no fit); replaced with
-// 'work_order.in_progress' and 'work_order.ready_for_pickup'.
+// Work order events follow the workshop's Steps 1–7 (lib/webhook-dispatcher.js
+// maps every work_orders.status to one). An endpoint subscribed to an older
+// name — work_order.created / confirmed / accepted / ready_for_pickup /
+// completed — still receives the event under that name (EVENT_ALIASES).
+// The courier events (failed, mechanic.location, cash_payment.settled) are
+// gone: nothing raises them.
 export const WEBHOOK_EVENTS = [
-  'work_order.created',
-  'work_order.confirmed',
+  'work_order.received',
+  'work_order.inspected',
+  'work_order.approved',
   'work_order.assigned',
-  'work_order.accepted',
   'work_order.in_progress',
-  'work_order.ready_for_pickup',
-  'work_order.completed',
-  'work_order.failed',
+  'work_order.quality_check',
+  'work_order.ready_for_collection',
+  'work_order.closed',
   'work_order.cancelled',
-  'mechanic.assigned',
-  'mechanic.location',
   'warranty_claim.created',
   'warranty_claim.approved',
   'warranty_claim.completed',
   'warranty_claim.refunded',
-  'cash_payment.settled',
 ];
 
 // ── Auto-create tables if they don't exist (called once at startup) ────

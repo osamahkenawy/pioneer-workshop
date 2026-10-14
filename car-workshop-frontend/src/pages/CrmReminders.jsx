@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Bell, Calendar, Send, Clock, CheckCircle, Refresh, Search, Phone, Mail,
-  ChatBubble, ChatBubbleSolid, Xmark, Car, MoreVert, SortDown,
+  ChatBubble, ChatBubbleSolid, Xmark, Car, MoreVert, SortDown, Page,
 } from 'iconoir-react';
 import api from '../lib/api';
 import './CRMPages.css';
@@ -98,6 +99,7 @@ export default function CrmReminders() {
   const [generating, setGenerating] = useState(false);
   const [banner, setBanner] = useState(null);
   const [menuId, setMenuId] = useState(null);
+  const navigate = useNavigate();
   const menuRef = useRef(null);
 
   // The search box used to refetch the list *and* the stats on every
@@ -181,6 +183,24 @@ export default function CrmReminders() {
       load();
     } catch (e) {
       setBanner({ kind: 'error', text: e?.message || 'Could not send that reminder.' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // The loop back to the start of the cycle: the customer answered the
+  // reminder, so it becomes an enquiry (source: reminder) and goes straight on
+  // to a quote — or a booking for a routine service.
+  async function replied(row, next) {
+    setMenuId(null);
+    setBusyId(row.id);
+    try {
+      const res = await api.post(`/crm/reminders/${row.id}/enquiry`);
+      if (!res?.success) { setBanner({ kind: 'error', text: res?.message || 'Could not open the enquiry.' }); return; }
+      const id = res.data.enquiry_id;
+      navigate(next === 'book' ? `/appointments?new=1&enquiry=${id}` : `/estimates?new=1&enquiry=${id}`);
+    } catch (e) {
+      setBanner({ kind: 'error', text: e?.message || 'Could not open the enquiry.' });
     } finally {
       setBusyId(null);
     }
@@ -408,6 +428,13 @@ export default function CrmReminders() {
                           {busy ? '…' : 'Send'}
                         </button>
                       )}
+                      {!closed && !r.converted_enquiry_id && (
+                        <button className="cs-send" disabled={busy} onClick={() => replied(r, 'quote')}
+                          title="The customer answered: open an enquiry and raise the quote">
+                          <Page width={15} height={15} />
+                          Replied → quote
+                        </button>
+                      )}
                       {r.status === 'sent' && (
                         <button
                           className="cs-send"
@@ -453,6 +480,11 @@ export default function CrmReminders() {
                                 >
                                   <Clock width={15} height={15} /> Snooze 90 days
                                 </button>
+                                {!r.converted_enquiry_id && (
+                                  <button role="menuitem" onClick={() => replied(r, 'book')}>
+                                    <Calendar width={15} height={15} /> Replied → book a visit
+                                  </button>
+                                )}
                                 {r.status !== 'booked' && (
                                   <button
                                     role="menuitem"

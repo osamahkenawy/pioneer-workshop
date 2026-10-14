@@ -1,12 +1,17 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { managerForWrites } from '../lib/access.js';
 import { requireFeature } from '../middleware/plan-gate.js';
 import { sendNotificationEmail } from '../lib/email.js';
 import { config } from '../config.js';
+import { CAPABILITIES, defaultCapabilities } from '../lib/roles.js';
 
 const router = express.Router();
 router.use(authMiddleware);
+// Users, roles and workshop configuration: any signed-in user could change
+// them, including giving themselves admin or resetting the owner's password.
+router.use(managerForWrites);
 
 // GET /api/settings — get all settings for the workshop
 router.get('/', async (req, res) => {
@@ -100,6 +105,9 @@ router.post('/users', async (req, res) => {
     if (!full_name || !username || !email || !password) {
       return res.status(400).json({ success: false, message: 'Name, username, email and password required' });
     }
+    if (role === 'super_admin' || (role === 'admin' && !req.user.is_owner && req.user.role !== 'admin')) {
+      return res.status(403).json({ success: false, message: 'You cannot assign that role.' });
+    }
     // Email format validation
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
       return res.status(400).json({ success: false, message: 'Invalid email format' });
@@ -114,8 +122,11 @@ router.post('/users', async (req, res) => {
 
     // ── D.2 Max Users Restriction (plan-gate aware) ─────────────
     {
-      let maxUsers = 5;
-      let currentPlan = 'starter';
+      // A workshop with no subscription row runs the platform for itself
+      // (Pioneer does): no seat limit. The SaaS default of 5 blocked adding
+      // any staff once ten already existed.
+      let maxUsers = Infinity;
+      let currentPlan = 'self_hosted';
 
       if (req.subscription && !req.subscription.bypass) {
         maxUsers = req.subscription.limits?.max_users || 5;
@@ -232,13 +243,27 @@ router.delete('/users/:id', async (req, res) => {
 // PUT /api/settings/users/:id — update user info / role / password
 router.put('/users/:id', async (req, res) => {
   try {
-    const [target] = await query('SELECT id, is_owner FROM users WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    const [target] = await query('SELECT id, is_owner, role FROM users WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    if (target.is_owner && !req.user.is_owner) {
+      return res.status(403).json({ success: false, message: 'Only the owner can change the owner account.' });
+    }
 
-    const { full_name, email, phone, role, password, is_active } = req.body;
+    const { full_name, email, phone, password, is_active } = req.body;
+    // A missing role used to default to 'dispatcher' — editing someone's
+    // phone number demoted them (the owner included). Keep the current role.
+    const role = req.body.role || target.role;
+    if (role !== target.role) {
+      if (String(target.id) === String(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'You cannot change your own role.' });
+      }
+      if (role === 'super_admin' || (role === 'admin' && !req.user.is_owner && req.user.role !== 'admin')) {
+        return res.status(403).json({ success: false, message: 'You cannot assign that role.' });
+      }
+    }
 
     let passwordClause = '';
-    const params = [full_name, email, phone || null, role || 'dispatcher',
+    const params = [full_name, email, phone || null, role,
                     is_active !== undefined ? Boolean(is_active) : true];
 
     if (password && password.trim()) {
@@ -422,37 +447,70 @@ router.delete('/categories/:id', async (req, res) => {
 ══════════════════════════════════════════════════════════════ */
 
 // All available modules in the system (for the UI checklist)
+// The sidebar's menu items, one key each (frontend components/Layout.jsx
+// moduleKey). This list used to be the delivery product's, so half the menu —
+// Estimates, Store, Team Board, Fleet Intake, Enquiries, Complaints, CRM —
+// could not be granted from Settings → Roles at all.
 const ALL_MODULES = [
-  { key: 'dashboard',          section: 'main',        label: 'Dashboard' },
-  { key: 'work-orders',        section: 'operations',  label: 'Work Orders' },
-  { key: 'job-assignment',     section: 'operations',  label: 'Job Assignment Board' },
-  { key: 'mechanics',          section: 'operations',  label: 'Mechanics' },
-  { key: 'customers',          section: 'operations',  label: 'Customers' },
-  { key: 'vehicles',           section: 'operations',  label: 'Vehicles' },
-  { key: 'service-status',     section: 'operations',  label: 'Service Status Tracking' },
-  { key: 'bulk-import',        section: 'operations',  label: 'Bulk Import' },
-  { key: 'warranty-claims',    section: 'operations',  label: 'Warranty Claims' },
-  { key: 'wallet',             section: 'finance',     label: 'Wallet & Cash Payments' },
-  { key: 'invoices',           section: 'finance',     label: 'Invoices' },
-  { key: 'cash-payment',       section: 'finance',     label: 'Cash Reconciliation' },
-  { key: 'reports',            section: 'analytics',   label: 'Reports' },
-  { key: 'performance',        section: 'analytics',   label: 'Performance & SLA' },
-  { key: 'service-bays',       section: 'config',      label: 'Service Bays' },
-  { key: 'pricing',            section: 'config',      label: 'Pricing Rules' },
-  { key: 'notifications',      section: 'system',      label: 'Notifications' },
-  { key: 'settings',           section: 'system',      label: 'Settings' },
-  { key: 'integrations',       section: 'system',      label: 'Integrations / API Keys' },
-  // Mechanic-only modules
-  { key: 'mechanic-dashboard', section: 'mechanic',    label: 'Mechanic Dashboard' },
-  { key: 'my-jobs',            section: 'mechanic',    label: 'My Jobs' },
-  { key: 'mechanic-scan',      section: 'mechanic',    label: 'Scan Work Order' },
-  { key: 'barcode',            section: 'mechanic',    label: 'Barcode' },
+  { key: 'dashboard',           section: 'main',       label: 'Dashboard' },
+  { key: 'notifications',       section: 'main',       label: 'Notifications' },
+  { key: 'enquiries',           section: 'operations', label: 'Enquiries' },
+  { key: 'work-orders',         section: 'operations', label: 'Work Orders / Job Cards' },
+  { key: 'estimates',           section: 'operations', label: 'Estimates' },
+  { key: 'appointments',        section: 'operations', label: 'Bookings' },
+  { key: 'fleet-intake',        section: 'operations', label: 'Fleet Intake' },
+  { key: 'customers',           section: 'operations', label: 'Customers' },
+  { key: 'vehicles',            section: 'operations', label: 'Vehicles' },
+  { key: 'service-status',      section: 'operations', label: 'Service Status Tracking' },
+  { key: 'warranty-claims',     section: 'operations', label: 'Warranty Claims' },
+  { key: 'complaints',          section: 'operations', label: 'Complaints' },
+  { key: 'mechanics',           section: 'floor',      label: 'Technicians' },
+  { key: 'service-bays',        section: 'floor',      label: 'Service Bays' },
+  { key: 'job-assignment',      section: 'floor',      label: 'Job Assignment' },
+  { key: 'team-leader',         section: 'floor',      label: 'Team Board' },
+  { key: 'store',               section: 'store',      label: 'Store (requisitions, parts to price)' },
+  { key: 'parts',               section: 'store',      label: 'Parts' },
+  { key: 'inventory',           section: 'store',      label: 'Inventory' },
+  { key: 'invoices',            section: 'finance',    label: 'Invoices' },
+  { key: 'cash-payment',        section: 'finance',    label: 'Cash Reconciliation' },
+  { key: 'wallet',              section: 'finance',    label: 'Wallet' },
+  { key: 'crm-customers',       section: 'crm',        label: 'CRM Customers' },
+  { key: 'crm-reminders',       section: 'crm',        label: 'Service Reminders' },
+  { key: 'crm-tasks',           section: 'crm',        label: 'Tasks & Follow-ups' },
+  { key: 'customer-feedback',   section: 'crm',        label: 'Customer Feedback' },
+  { key: 'customer-experience', section: 'crm',        label: 'Customer Experience' },
+  { key: 'reports',             section: 'analytics',  label: 'Reports' },
+  { key: 'performance',         section: 'analytics',  label: 'Performance & SLA' },
+  { key: 'technician-kpi',      section: 'analytics',  label: 'Technician KPI' },
+  { key: 'pricing',             section: 'config',     label: 'Pricing Rules' },
+  { key: 'settings',            section: 'system',     label: 'Settings' },
+  { key: 'integrations',        section: 'system',     label: 'Integrations / API Keys' },
+  // Technician app
+  { key: 'mechanic-dashboard',  section: 'mechanic',   label: 'Technician Home' },
+  { key: 'my-work-orders',      section: 'mechanic',   label: 'My Job Cards' },
+  { key: 'mechanic-scan',       section: 'mechanic',   label: 'Scan Vehicle' },
 ];
 
 // GET /api/settings/modules — returns available module list
 router.get('/modules', async (req, res) => {
   return res.json({ success: true, data: ALL_MODULES });
 });
+
+// GET /api/settings/capabilities — the workflow responsibilities a role can hold
+router.get('/capabilities', async (req, res) => {
+  return res.json({ success: true, data: Object.entries(CAPABILITIES).map(([key, d]) => ({ key, label: d.label, step: d.step, default_roles: d.roles })) });
+});
+
+/** A role row with its workflow responsibilities (explicit list, or the defaults for its slug). */
+function withCapabilities(r) {
+  let caps = r.capabilities;
+  if (typeof caps === 'string') { try { caps = JSON.parse(caps); } catch { caps = null; } }
+  r.capabilities_custom = Array.isArray(caps);
+  r.capabilities = Array.isArray(caps) ? caps : defaultCapabilities(r.slug);
+  r.capabilities_all = ['general_manager', 'workshop_manager', 'super_admin', 'admin'].includes(r.slug);
+  return r;
+}
+const cleanCaps = list => Array.isArray(list) ? [...new Set(list.filter(c => CAPABILITIES[c]))] : undefined;
 
 // GET /api/settings/roles — list all roles for workshop
 router.get('/roles', async (req, res) => {
@@ -466,6 +524,7 @@ router.get('/roles', async (req, res) => {
     for (const r of roles) {
       if (typeof r.modules === 'string') { try { r.modules = JSON.parse(r.modules); } catch { r.modules = []; } }
       if (!Array.isArray(r.modules)) r.modules = [];
+      withCapabilities(r);
     }
     return res.json({ success: true, data: roles });
   } catch (err) {
@@ -484,7 +543,7 @@ router.get('/roles/:id', async (req, res) => {
     if (!role) return res.status(404).json({ success: false, message: 'Role not found' });
     if (typeof role.modules === 'string') { try { role.modules = JSON.parse(role.modules); } catch { role.modules = []; } }
     if (!Array.isArray(role.modules)) role.modules = [];
-    return res.json({ success: true, data: role });
+    return res.json({ success: true, data: withCapabilities(role) });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch role' });
   }
@@ -494,19 +553,21 @@ router.get('/roles/:id', async (req, res) => {
 router.post('/roles', async (req, res) => {
   try {
     const { name, name_ar, slug, description, modules } = req.body;
+    const capabilities = cleanCaps(req.body.capabilities);
     if (!name || !slug) {
       return res.status(400).json({ success: false, message: 'Name and slug are required' });
     }
     // Validate slug format
     const cleanSlug = slug.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     const result = await execute(
-      'INSERT INTO roles (workshop_id, name, name_ar, slug, description, modules, is_system) VALUES (?, ?, ?, ?, ?, ?, 0)',
-      [req.workshopId, name, name_ar || null, cleanSlug, description || null, JSON.stringify(modules || [])]
+      'INSERT INTO roles (workshop_id, name, name_ar, slug, description, modules, capabilities, is_system) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+      [req.workshopId, name, name_ar || null, cleanSlug, description || null, JSON.stringify(modules || []),
+       capabilities ? JSON.stringify(capabilities) : JSON.stringify([])]
     );
     const [role] = await query('SELECT * FROM roles WHERE id = ?', [result.insertId]);
     if (typeof role.modules === 'string') { try { role.modules = JSON.parse(role.modules); } catch { role.modules = []; } }
     if (!Array.isArray(role.modules)) role.modules = [];
-    return res.status(201).json({ success: true, data: role });
+    return res.status(201).json({ success: true, data: withCapabilities(role) });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ success: false, message: 'A role with this slug already exists' });
@@ -526,15 +587,21 @@ router.put('/roles/:id', async (req, res) => {
     if (!existing) return res.status(404).json({ success: false, message: 'Role not found' });
 
     const { name, name_ar, description, modules, is_active } = req.body;
+    // capabilities: an array sets the role's responsibilities; null resets to the defaults.
+    const capabilities = req.body.capabilities === null ? null : cleanCaps(req.body.capabilities);
 
     await execute(
-      `UPDATE roles SET name = ?, name_ar = ?, description = ?, modules = ?, is_active = ?
+      `UPDATE roles SET name = ?, name_ar = ?, description = ?, modules = ?, capabilities = ?, is_active = ?
        WHERE id = ? AND workshop_id = ?`,
       [
         name || existing.name,
         name_ar !== undefined ? name_ar : existing.name_ar,
         description !== undefined ? description : existing.description,
-        JSON.stringify(modules || []),
+        // Leaving modules out used to wipe them all.
+        Array.isArray(modules) ? JSON.stringify(modules) : (typeof existing.modules === 'string' ? existing.modules : JSON.stringify(existing.modules || [])),
+        req.body.capabilities === undefined
+          ? (existing.capabilities == null ? null : (typeof existing.capabilities === 'string' ? existing.capabilities : JSON.stringify(existing.capabilities)))
+          : (capabilities === null ? null : JSON.stringify(capabilities)),
         is_active !== undefined ? Boolean(is_active) : existing.is_active,
         req.params.id, req.workshopId
       ]
@@ -543,7 +610,7 @@ router.put('/roles/:id', async (req, res) => {
     const [role] = await query('SELECT * FROM roles WHERE id = ?', [req.params.id]);
     if (typeof role.modules === 'string') { try { role.modules = JSON.parse(role.modules); } catch { role.modules = []; } }
     if (!Array.isArray(role.modules)) role.modules = [];
-    return res.json({ success: true, data: role });
+    return res.json({ success: true, data: withCapabilities(role) });
   } catch (err) {
     console.error('[Settings] Roles PUT error:', err);
     return res.status(500).json({ success: false, message: 'Failed to update role' });

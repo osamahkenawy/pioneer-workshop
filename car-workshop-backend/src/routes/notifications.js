@@ -7,14 +7,19 @@ import { sendEmail, sendNotificationEmail } from '../lib/email.js';
 import { getVapidPublicKey, saveSubscription, removeSubscription, sendPushToUser, sendPushToWorkshop } from '../lib/push.js';
 import { registerDeviceToken, removeDeviceToken, removeAllDeviceTokens, sendFCMToUser } from '../lib/firebase.js';
 import { sendCustomNotification } from '../lib/notify.js';
+import { requireManager } from '../lib/access.js';
 
 const router = express.Router();
 router.use(authMiddleware);
+// The log, templates, tests, sending and broadcasts are a manager's
+// (requireManager on each route): the logs carry customers' phone numbers,
+// e-mail addresses and message text. The push / device routes stay open to
+// everyone, because each one only acts on the caller's own subscription.
 
 // =================================================================
 //  GET /api/notifications — list all notifications (paginated)
 // =================================================================
-router.get('/', async (req, res) => {
+router.get('/', requireManager, async (req, res) => {
   try {
     const { type, status, channel, page = 1, limit = 50 } = req.query;
     const pg = parseInt(page, 10) || 1;
@@ -43,7 +48,7 @@ router.get('/', async (req, res) => {
 // =================================================================
 //  GET /api/notifications/stats — notification channel stats
 // =================================================================
-router.get('/stats', async (req, res) => {
+router.get('/stats', requireManager, async (req, res) => {
   try {
     const [stats] = await query(`
       SELECT
@@ -66,7 +71,7 @@ router.get('/stats', async (req, res) => {
 // =================================================================
 //  POST /api/notifications/send — send via one or multiple channels
 // =================================================================
-router.post('/send', async (req, res) => {
+router.post('/send', requireManager, async (req, res) => {
   try {
     const { channels = ['sms'], phone, email, message, subject, work_order_id, user_id } = req.body;
     if (!message) {
@@ -100,23 +105,24 @@ router.post('/send', async (req, res) => {
 //  (falls back to built-in defaults when no DB rows exist)
 // =================================================================
 
-// NOTE: Template keys/messages renamed from delivery lifecycle
-// (order_confirmed/driver_assigned/order_picked_up/order_in_transit/
-// order_delivered/order_failed/cod_collected/order_returned) to
-// car-workshop work order lifecycle. `cod_collected` -> `cash_collected`.
+// The customer hears from the workshop at four moments only (lib/notify.js
+// CUSTOMER_MILESTONES): the job is opened, the car is ready for collection,
+// the job is closed, the job is cancelled. These are those messages, as
+// snippets for Notifications → Send: with a work order chosen, the
+// placeholders are filled in from it (lib/notify.js sendCustomNotification —
+// {workshop}, {vehicle}, {plate}, {jc}, {wo}, {link}, {payment}, {inv},
+// {workshop_phone}). The automatic messages are built in lib/notify.js.
+// Rows a workshop already has keep their text; only new workshops and
+// "reset to defaults" get these.
 const DEFAULT_TEMPLATES = [
-  { template_key: 'work_order_confirmed',  label: 'Work Order Confirmed',   channels: JSON.stringify(['sms','email','push']), message: 'Hi {name}, your work order {work_order_number} has been confirmed and scheduled.' },
-  { template_key: 'mechanic_assigned',     label: 'Mechanic Assigned',      channels: JSON.stringify(['sms','email','push']), message: 'Your work order {work_order_number} is assigned to mechanic {mechanic_name} ({mechanic_phone}). Track: {tracking_url}' },
-  { template_key: 'work_order_in_progress',label: 'Work In Progress',       channels: JSON.stringify(['sms','email','push']), message: 'Work on your vehicle for order {work_order_number} has started.' },
-  { template_key: 'work_order_ready',      label: 'Ready for Pickup',       channels: JSON.stringify(['sms','email','push']), message: 'Your vehicle for work order {work_order_number} is ready for pickup!' },
-  { template_key: 'work_order_completed',  label: 'Work Order Completed',   channels: JSON.stringify(['sms','email','push']), message: 'Hi {name}, your work order {work_order_number} has been completed. Thank you!' },
-  { template_key: 'work_order_failed',     label: 'Service Failed',         channels: JSON.stringify(['sms','email']),        message: 'We were unable to complete work order {work_order_number}. Please contact us to reschedule.' },
-  { template_key: 'cash_collected',        label: 'Cash Payment Collected', channels: JSON.stringify(['sms','email']),        message: 'Cash payment of {amount} collected for work order {work_order_number}.' },
-  { template_key: 'work_order_returned',   label: 'Vehicle Returned',       channels: JSON.stringify(['sms','email']),        message: 'Work order {work_order_number} — vehicle is being returned to you.' },
+  { template_key: 'job_opened',           label: 'Vehicle received',        channels: JSON.stringify(['sms','email']), message: '{workshop}: we have received your {vehicle} ({plate}), job card {jc}. Follow your service: {link}' },
+  { template_key: 'ready_for_collection', label: 'Ready for collection',    channels: JSON.stringify(['sms','email']), message: '{workshop}: your {vehicle} ({plate}) is ready for collection. {payment} Details: {link}' },
+  { template_key: 'job_closed',           label: 'Job closed — thank you',  channels: JSON.stringify(['sms','email']), message: 'Thank you for choosing {workshop}. Job {wo} is closed.' },
+  { template_key: 'job_cancelled',        label: 'Job cancelled',           channels: JSON.stringify(['sms','email']), message: '{workshop}: job {wo} for {plate} has been cancelled. Questions? Call {workshop_phone}.' },
 ];
 
 // GET /api/notifications/templates
-router.get('/templates', async (req, res) => {
+router.get('/templates', requireManager, async (req, res) => {
   try {
     let rows = await query(
       'SELECT * FROM notification_templates WHERE workshop_id = ? ORDER BY id',
@@ -147,7 +153,7 @@ router.get('/templates', async (req, res) => {
 });
 
 // PUT /api/notifications/templates/:id — update a template
-router.put('/templates/:id', async (req, res) => {
+router.put('/templates/:id', requireManager, async (req, res) => {
   try {
     const { message, label, channels } = req.body;
     await execute(
@@ -161,7 +167,7 @@ router.put('/templates/:id', async (req, res) => {
 });
 
 // POST /api/notifications/templates/reset — reset to built-in defaults
-router.post('/templates/reset', async (req, res) => {
+router.post('/templates/reset', requireManager, async (req, res) => {
   try {
     await execute('DELETE FROM notification_templates WHERE workshop_id = ?', [req.workshopId]);
     for (const t of DEFAULT_TEMPLATES) {
@@ -181,7 +187,7 @@ router.post('/templates/reset', async (req, res) => {
 // =================================================================
 
 // POST /api/notifications/sms-test
-router.post('/sms-test', async (req, res) => {
+router.post('/sms-test', requireManager, async (req, res) => {
   try {
     const { phone, message, work_order_id } = req.body;
     if (!phone || !message) {
@@ -208,7 +214,7 @@ router.post('/sms-test', async (req, res) => {
 });
 
 // GET /api/notifications/sms-logs
-router.get('/sms-logs', async (req, res) => {
+router.get('/sms-logs', requireManager, async (req, res) => {
   try {
     const { page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -234,7 +240,7 @@ router.get('/sms-logs', async (req, res) => {
 // =================================================================
 
 // POST /api/notifications/email-test — send a test email
-router.post('/email-test', async (req, res) => {
+router.post('/email-test', requireManager, async (req, res) => {
   try {
     const { to, subject, message, work_order_id } = req.body;
     if (!to || !message) {
@@ -267,7 +273,7 @@ router.post('/email-test', async (req, res) => {
 });
 
 // GET /api/notifications/email-logs
-router.get('/email-logs', async (req, res) => {
+router.get('/email-logs', requireManager, async (req, res) => {
   try {
     const { page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -421,7 +427,7 @@ router.post('/push/test-fcm', async (req, res) => {
 });
 
 // POST /api/notifications/push/broadcast — push to all workshop users
-router.post('/push/broadcast', async (req, res) => {
+router.post('/push/broadcast', requireManager, async (req, res) => {
   try {
     const { title, body, url } = req.body;
     if (!title || !body) {

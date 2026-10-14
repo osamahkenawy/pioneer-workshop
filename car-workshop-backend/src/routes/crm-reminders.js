@@ -25,6 +25,7 @@ import { Router } from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { stripMarkup, clampText } from '../lib/sanitize.js';
+import { onEnquiryCreated } from '../lib/crm-cycle.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -161,6 +162,63 @@ export async function generateReminders(workshopId, { horizonDays = 45, createdB
     promoted_to_due: promoted.affectedRows || 0,
     unsnoozed: unsnoozed.affectedRows || 0,
   };
+}
+
+/**
+ * Service due (CRM cycle): when a job closes, put the car's next service on
+ * the list straight away as 'scheduled' (it shows under Upcoming and turns
+ * due by itself), measured from this visit — its date and its odometer
+ * reading. The UNIQUE key keeps the daily engine from adding it twice.
+ */
+export async function scheduleNextReminder({ workshopId, workOrderId }) {
+  const [wo] = await query(
+    `SELECT wo.id, wo.customer_id, wo.vehicle_id, wo.service_category, wo.completed_at,
+            COALESCE((SELECT g.odometer_out FROM gate_passes g WHERE g.work_order_id = wo.id ORDER BY g.id DESC LIMIT 1),
+                     wo.odometer_in, v.mileage) AS km
+       FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+      WHERE wo.id = ? AND wo.workshop_id = ?`, [workOrderId, workshopId]);
+  if (!wo?.vehicle_id || !wo.customer_id) return null;
+  const type = SERVICE_INTERVALS[wo.service_category] ? wo.service_category : 'general_maintenance';
+  const interval = SERVICE_INTERVALS[type];
+  const last = wo.completed_at ? new Date(wo.completed_at) : new Date();
+  const due = new Date(last); due.setMonth(due.getMonth() + interval.months);
+  const [cust] = await query('SELECT preferred_channel, phone, email FROM customers WHERE id = ?', [wo.customer_id]);
+  let channel = cust?.preferred_channel || (cust?.phone ? 'whatsapp' : 'email');
+  if (channel === 'email' && !cust?.email) channel = cust?.phone ? 'sms' : 'none';
+  if ((channel === 'sms' || channel === 'whatsapp') && !cust?.phone) channel = cust?.email ? 'email' : 'none';
+  // This visit was the service: older reminders for the same service are done.
+  await execute(
+    `UPDATE service_reminders SET status = 'converted', converted_work_order_id = ?, converted_at = NOW()
+      WHERE workshop_id = ? AND vehicle_id = ? AND service_type = ? AND status IN ('scheduled','due','sent','snoozed','booked')
+        AND due_at < ?`, [wo.id, workshopId, wo.vehicle_id, type, isoDate(due)]);
+  try {
+    const r = await execute(
+      `INSERT INTO service_reminders
+         (workshop_id, customer_id, vehicle_id, service_type, due_at, due_mileage, last_service_at,
+          last_service_wo_id, current_mileage, status, send_channel)
+       VALUES (?,?,?,?,?,?,?,?,?,'scheduled',?)`,
+      [workshopId, wo.customer_id, wo.vehicle_id, type, isoDate(due),
+       interval.km && wo.km ? Number(wo.km) + interval.km : null, isoDate(last), wo.id, wo.km || null, channel]);
+    return r.insertId;
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') return null;
+    throw e;
+  }
+}
+
+/**
+ * A job card opened for a car: its open reminders brought the customer in
+ * (or are overtaken by the visit) — mark them booked and link the job, so the
+ * "booked from reminder" figure is real and the list doesn't go stale.
+ */
+export async function fulfilOpenReminders({ workshopId, workOrderId }) {
+  const [wo] = await query('SELECT id, vehicle_id FROM work_orders WHERE id = ? AND workshop_id = ?', [workOrderId, workshopId]);
+  if (!wo?.vehicle_id) return 0;
+  const r = await execute(
+    `UPDATE service_reminders SET status = 'booked', converted_work_order_id = ?, converted_at = NOW()
+      WHERE workshop_id = ? AND vehicle_id = ? AND status IN ('due','sent','snoozed')
+        AND converted_work_order_id IS NULL`, [wo.id, workshopId, wo.vehicle_id]);
+  return r.affectedRows || 0;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -399,17 +457,21 @@ router.post('/:id/send', async (req, res) => {
     try {
       if (r.send_channel === 'email' && r.email) {
         const { sendEmail } = await import('../lib/email.js');
-        await sendEmail({
+        const out = await sendEmail({
           to: r.email,
           subject: `${vehicle} — ${label} due`,
           html: `<p>${message}</p>`,
           tenantId: req.workshopId,   // email.js names this tenantId
         });
-        sent = true;
+        // Only "sent" when the mail server took it.
+        if (out?.success) sent = true; else error = out?.error || 'E-mail could not be sent';
       } else if ((r.send_channel === 'sms' || r.send_channel === 'whatsapp') && r.phone) {
+        // WhatsApp has no provider wired in yet, so both go out as SMS.
         const { sendSMS } = await import('../lib/sms.js');
-        await sendSMS(r.phone, message);
-        sent = true;
+        const out = await sendSMS(r.phone, message);
+        if (out?.success && !out.stub) sent = true;
+        else error = out?.stub ? 'SMS is not set up (no Twilio account configured) — nothing was sent. Call the customer or use e-mail.'
+          : (out?.error || 'SMS could not be sent');
       } else if (r.send_channel === 'call') {
         // A call is a person's job. Record the intent and let the task list
         // carry it, rather than pretending a message went out.
@@ -446,6 +508,52 @@ router.post('/:id/send', async (req, res) => {
   } catch (err) {
     console.error('[CRMReminders] send error:', err.message);
     return res.status(500).json({ success: false, message: 'Failed to send the reminder' });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════
+   POST /:id/enquiry — the loop back to the start of the cycle
+
+   The customer replied to the reminder (or called in): open an enquiry for
+   the car with the reminder as its source, so it gets quoted and booked like
+   any other lead and counts in conversion by channel.
+   ═══════════════════════════════════════════════════════════ */
+router.post('/:id/enquiry', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const [r] = await query(
+      `SELECT r.*, c.full_name, c.phone, c.email, v.make, v.model, v.year, v.plate_number
+         FROM service_reminders r
+         LEFT JOIN customers c ON c.id = r.customer_id
+         LEFT JOIN vehicles  v ON v.id = r.vehicle_id
+        WHERE r.id = ? AND r.workshop_id = ?`, [id, req.workshopId]);
+    if (!r) return res.status(404).json({ success: false, message: 'Reminder not found' });
+    if (r.converted_enquiry_id) {
+      return res.json({ success: true, existing: true, data: { enquiry_id: r.converted_enquiry_id } });
+    }
+    const label = SERVICE_INTERVALS[r.service_type]?.label || 'Service';
+    const d = new Date();
+    const enquiryNumber = `ENQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${Math.floor(Math.random() * 9000) + 1000}`;
+    const note = clampText(req.body?.note, 1000);
+    const ins = await execute(
+      `INSERT INTO enquiries
+         (workshop_id, enquiry_number, customer_id, vehicle_id, contact_name, contact_phone, contact_email,
+          vehicle_description, vehicle_plate, enquiry_type, description, source_channel, source_detail,
+          contact_method, payer_type, status, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,'service',?,'owned_repeat','service-reminder','reminder','self_pay','new',?)`,
+      [req.workshopId, enquiryNumber, r.customer_id, r.vehicle_id, r.full_name || 'Customer', r.phone || null, r.email || null,
+       [r.make, r.model, r.year].filter(Boolean).join(' ') || null, r.plate_number || null,
+       `${label} due${r.due_at ? ` (${String(r.due_at instanceof Date ? isoDate(r.due_at) : r.due_at).slice(0, 10)})` : ''} — replied to the service reminder${note ? `: ${note}` : ''}`,
+       req.user?.id || null]);
+    await execute(
+      `UPDATE service_reminders SET converted_enquiry_id = ?, status = 'converted', converted_at = NOW() WHERE id = ?`,
+      [ins.insertId, id]);
+    const [enq] = await query('SELECT * FROM enquiries WHERE id = ?', [ins.insertId]);
+    await onEnquiryCreated(enq, req.user?.id);
+    return res.status(201).json({ success: true, data: { enquiry_id: ins.insertId, enquiry_number: enquiryNumber } });
+  } catch (err) {
+    console.error('[CRMReminders] reply→enquiry error:', err.message);
+    return res.status(500).json({ success: false, message: 'Could not open the enquiry' });
   }
 });
 

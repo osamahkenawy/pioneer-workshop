@@ -1,114 +1,136 @@
 /* ══════════════════════════════════════════════════════════════
- * CustomerInvoices.jsx — Invoice List with PDF Download
+ * CustomerInvoices.jsx — Invoices & payments.
+ *
+ * GET /customer-portal/invoices: every invoice the workshop has issued to
+ * the customer (not drafts, not void), with what was paid and what is left,
+ * the job card and car it was for, and the PDF.
  * ══════════════════════════════════════════════════════════════ */
-import { useState, useEffect, useCallback } from 'react';
-import { Page, Download, Calendar, DollarCircle } from 'iconoir-react';
+import { useState, useEffect, useCallback, useContext } from 'react';
+import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { Download, WarningTriangle, Refresh, Page } from 'iconoir-react';
+import { CustomerAuthContext } from '../../context/CustomerAuthContext';
+import api from '../../lib/customerApi';
+import { fmtMoney, fmtWhen } from '../../components/service-status/ServiceStatusCard';
+import { invoiceStatusBadge, downloadInvoicePdf } from './portalShared';
+import { PORTAL } from './portalPaths';
 import './CustomerPages.css';
-import { CardListSkeleton } from '../../components/Loader';
-const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 export default function CustomerInvoices() {
-  const [invoices, setInvoices]   = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [page, setPage]           = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
+  const { workshop } = useContext(CustomerAuthContext);
+  const [invoices, setInvoices] = useState([]);
+  const [totals, setTotals] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [pdfError, setPdfError] = useState('');
+  const [busyId, setBusyId] = useState(null);
 
-  const token = localStorage.getItem('crm_token');
-  const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-
-  const fetchInvoices = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
     try {
-      const res = await fetch(`${API_URL}/customer-portal/invoices`, { headers, credentials: 'include' });
-      if (res.status === 401) { window.location.href = '/merchant/login'; return; }
-      const data = await res.json();
-      if (data.success) {
-        const all = data.data || [];
-        setTotalPages(Math.ceil(all.length / 20) || 1);
-        setInvoices(all.slice((page - 1) * 20, page * 20));
-      }
-    } catch { /* ignore */ }
+      const res = await api.get('/customer-portal/invoices');
+      if (res.success) { setInvoices(res.data || []); setTotals(res.totals || null); }
+      else setError(res.message || t('portal.load_failed', "We couldn't load your portal. Please try again."));
+    } catch {
+      setError(t('portal.network_error', 'Connection problem. Check your internet and try again.'));
+    }
     setLoading(false);
-  }, [page]);
+  }, [t]);
 
-  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+  useEffect(() => { load(); }, [load]);
 
-  const downloadPdf = async (invoiceId) => {
-    try {
-      const res = await fetch(`${API_URL}/customer-portal/invoices/${invoiceId}/pdf`, {
-        headers, credentials: 'include', redirect: 'follow',
-      });
-      if (res.status === 401) { window.location.href = '/merchant/login'; return; }
-      if (!res.ok) return;
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = `invoice-${invoiceId}.pdf`; a.click();
-      URL.revokeObjectURL(url);
-    } catch { /* ignore */ }
+  const download = async (inv) => {
+    setPdfError(''); setBusyId(inv.id);
+    try { await downloadInvoicePdf(inv); }
+    catch { setPdfError(t('portal.invoices.pdf_failed', "Couldn't download the invoice. Please try again.")); }
+    setBusyId(null);
   };
 
-  const statusBadge = (status) => {
-    const map = { paid: 'success', unpaid: 'warning', overdue: 'error', partially_paid: 'warning' };
-    return <span className={`cp-status-badge status-${map[status] || 'muted'}`}>{status?.replace(/_/g, ' ')}</span>;
-  };
-
-  if (loading) return <div className="cp-page"><CardListSkeleton count={5} /></div>;
+  const cur = invoices[0]?.currency || workshop?.currency || 'AED';
 
   return (
     <div className="cp-page">
       <div className="cp-page-header">
-        <h1 className="cp-page-title">Invoices</h1>
+        <div>
+          <h1 className="cp-page-title">{t('portal.nav.invoices', 'Invoices & payments')}</h1>
+          <p className="cp-page-sub">{t('portal.invoices.sub', 'What you were billed, what you paid and what is left to pay.')}</p>
+        </div>
       </div>
 
-      {invoices.length === 0 ? (
-        <div className="cp-empty">
-          <Page width={48} height={48} />
-          <p>No invoices yet</p>
-        </div>
-      ) : (
-        <>
-          <div className="cp-table-wrap">
-            <table className="cp-table">
-              <thead>
-                <tr>
-                  <th>Invoice #</th>
-                  <th>Date</th>
-                  <th>Period</th>
-                  <th>Amount</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoices.map(inv => (
-                  <tr key={inv.id}>
-                    <td style={{ fontWeight: 600 }}>{inv.invoice_number}</td>
-                    <td>
-                      <Calendar width={14} height={14} style={{ verticalAlign: -2, marginRight: 4 }} />
-                      {new Date(inv.created_at).toLocaleDateString()}
-                    </td>
-                    <td className="cp-detail-sub">{inv.period_start ? `${new Date(inv.period_start).toLocaleDateString()} – ${new Date(inv.period_end).toLocaleDateString()}` : '—'}</td>
-                    <td>
-                      <DollarCircle width={14} height={14} style={{ verticalAlign: -2, marginRight: 4 }} />
-                      <strong>{parseFloat(inv.total_amount || 0).toFixed(2)}</strong>
-                    </td>
-                    <td>{statusBadge(inv.status)}</td>
-                    <td>
-                      <button className="cp-btn cp-btn-sm cp-btn-outline" onClick={() => downloadPdf(inv.id)}>
-                        <Download width={14} height={14} /> PDF
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {loading && <div className="cp-loading" role="status"><span className="cp-spinner" aria-hidden="true" />{t('portal.loading', 'Loading…')}</div>}
 
-          {totalPages > 1 && (
-            <div className="cp-pagination">
-              <button className="cp-btn cp-btn-sm cp-btn-outline" disabled={page === 1} onClick={() => setPage(p => p - 1)}>Previous</button>
-              <span className="cp-pagination-info">Page {page} of {totalPages}</span>
-              <button className="cp-btn cp-btn-sm cp-btn-outline" disabled={page === totalPages} onClick={() => setPage(p => p + 1)}>Next</button>
+      {!loading && error && (
+        <div className="cp-alert cp-alert-error" role="alert">
+          <WarningTriangle width={18} height={18} aria-hidden="true" />
+          <div>
+            <p style={{ margin: 0 }}>{error}</p>
+            <button type="button" className="cp-btn cp-btn-outline" style={{ marginBlockStart: 8 }} onClick={load}>
+              <Refresh width={16} height={16} /> {t('portal.retry', 'Try again')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loading && !error && (
+        <>
+          {totals && invoices.length > 0 && (
+            <div className="cp-totals">
+              <div className="cp-total">
+                <span className="cp-total-label">{t('portal.invoices.billed', 'Billed')}</span>
+                <span className="cp-total-value"><bdi>{fmtMoney(totals.billed, cur, lang)}</bdi></span>
+              </div>
+              <div className="cp-total">
+                <span className="cp-total-label">{t('portal.invoices.paid', 'Paid')}</span>
+                <span className="cp-total-value"><bdi>{fmtMoney(totals.paid, cur, lang)}</bdi></span>
+              </div>
+              <div className={`cp-total${totals.balance > 0 ? ' is-due' : ''}`}>
+                <span className="cp-total-label">{t('portal.invoices.to_pay', 'To pay')}</span>
+                <span className="cp-total-value"><bdi>{fmtMoney(totals.balance, cur, lang)}</bdi></span>
+              </div>
+            </div>
+          )}
+
+          {pdfError && <div className="cp-alert cp-alert-error" role="alert"><WarningTriangle width={16} height={16} aria-hidden="true" /> <span>{pdfError}</span></div>}
+
+          {invoices.length === 0 ? (
+            <div className="cp-empty">
+              <Page width={32} height={32} aria-hidden="true" />
+              <p>{t('portal.invoices.none', 'No invoices yet.')}</p>
+            </div>
+          ) : (
+            <div className="cp-list cp-list-2">
+              {invoices.map(inv => {
+                const badge = invoiceStatusBadge(t, inv);
+                const car = [inv.vehicle?.plate, [inv.vehicle?.make, inv.vehicle?.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+                return (
+                  <article className="cp-card" key={inv.id}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <p className="cp-row-title" style={{ margin: 0 }}>{inv.invoice_number}</p>
+                      <span className={`cp-badge ${badge.cls}`}>{badge.text}</span>
+                    </div>
+                    <p className="cp-row-sub">
+                      {[fmtWhen(inv.created_at, lang, { time: false }), car].filter(Boolean).join(' · ')}
+                    </p>
+                    <p className="cp-amounts">
+                      <span>{t('portal.invoices.total', 'Total')} <strong><bdi>{fmtMoney(inv.total_amount, cur, lang)}</bdi></strong></span>
+                      <span>{t('portal.invoices.paid', 'Paid')} <strong><bdi>{fmtMoney(inv.amount_paid, cur, lang)}</bdi></strong></span>
+                      <span>{t('portal.invoices.balance', 'Balance')} <strong><bdi>{fmtMoney(inv.balance, cur, lang)}</bdi></strong></span>
+                    </p>
+                    <div className="cp-btn-row">
+                      <button type="button" className="cp-btn cp-btn-outline" onClick={() => download(inv)} disabled={busyId === inv.id}>
+                        <Download width={16} height={16} /> {t('portal.invoices.pdf', 'PDF')}
+                      </button>
+                      {inv.work_order_id && (
+                        <Link className="cp-btn cp-btn-outline" to={PORTAL.job(inv.work_order_id)}>
+                          {t('portal.view_job', 'View job card')}
+                        </Link>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           )}
         </>

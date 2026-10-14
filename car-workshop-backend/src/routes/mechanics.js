@@ -2,11 +2,11 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { requireManager } from '../lib/access.js';
 import { getIO } from '../lib/socket.js';
 import { sendNotificationEmail } from '../lib/email.js';
 import { getUsageStats } from '../middleware/plan-gate.js';
 import { config } from '../config.js';
-import { detectZone } from '../lib/zone-detect.js';
 import { validatePhone, validateStatus, VALID_MECHANIC_STATUSES } from '../lib/mechanic-validation.js';
 import { clampText, stripMarkup } from '../lib/sanitize.js';
 
@@ -22,14 +22,15 @@ router.use(authMiddleware);
 // 'in_transit' -> 'in_progress' (job actively being worked), 'delivered' -> 'completed'.
 
 // Allowed sort columns for the mechanic list (F3). Whitelisted to avoid SQL injection.
+// The courier sorts 'deliveries' and 'last_ping' (GPS) are gone; an unknown
+// sort falls back to status, so an old bookmark still loads.
 const MECHANIC_SORTS = {
-  status:        "m.status = 'available' DESC, m.full_name ASC",
-  name:          'm.full_name ASC',
-  rating:        'm.rating DESC, m.full_name ASC',
-  deliveries:    'total_work_orders DESC, m.full_name ASC',
-  joined:        'm.joined_at DESC',
-  last_ping:     'last_ping DESC',
-  created:       'm.created_at DESC',
+  status:         "m.status = 'available' DESC, m.full_name ASC",
+  name:           'm.full_name ASC',
+  rating:         'm.rating DESC, m.full_name ASC',
+  jobs_completed: 'completed_work_orders DESC, m.full_name ASC',
+  joined:         'm.joined_at DESC',
+  created:        'm.created_at DESC',
 };
 
 
@@ -68,8 +69,7 @@ router.get('/', async (req, res) => {
               COALESCE(stats.total_work_orders, 0)     as total_work_orders,
               COALESCE(stats.completed_work_orders, 0) as completed_work_orders,
               COALESCE(stats.work_orders_today, 0)     as work_orders_today,
-              COALESCE(stats.total_earned, 0)     as total_earned,
-              mlp.last_ping
+              COALESCE(stats.total_earned, 0)     as total_earned
        FROM mechanics m
        LEFT JOIN service_bays b ON m.service_bay_id = b.id
        LEFT JOIN users u ON m.user_id = u.id
@@ -84,101 +84,26 @@ router.get('/', async (req, res) => {
          WHERE workshop_id = ? AND mechanic_id IS NOT NULL
          GROUP BY mechanic_id
        ) stats ON stats.mechanic_id = m.id
-       LEFT JOIN (
-         SELECT mechanic_id, MAX(recorded_at) as last_ping
-         FROM mechanic_locations
-         GROUP BY mechanic_id
-       ) mlp ON mlp.mechanic_id = m.id
        ${where} ORDER BY ${orderBy} LIMIT ${lim} OFFSET ${offset}`,
       [req.workshopId, ...params]
     );
-    return res.json({ success: true, data: mechanics, pagination: { total: parseInt(total), page: pg, limit: lim } });
+    // Workshop-wide status counts for the page's tiles — counting the rows of
+    // one page told a 278-mechanic workshop it had 100.
+    const statusRows = await query(
+      'SELECT status, COUNT(*) AS n FROM mechanics WHERE workshop_id = ? AND is_active = 1 GROUP BY status',
+      [req.workshopId]
+    );
+    const status_counts = Object.fromEntries(statusRows.map(r => [r.status, Number(r.n)]));
+    return res.json({ success: true, data: mechanics, pagination: { total: parseInt(total), page: pg, limit: lim }, status_counts });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: 'Failed to fetch mechanics' });
   }
 });
 
-// Helper: parse optional ?bbox=lat1,lng1,lat2,lng2 viewport filter (P2)
-function bboxClause(bbox) {
-  if (!bbox || typeof bbox !== 'string') return { sql: '', params: [] };
-  const parts = bbox.split(',').map(parseFloat);
-  if (parts.length !== 4 || parts.some(Number.isNaN)) return { sql: '', params: [] };
-  const [lat1, lng1, lat2, lng2] = parts;
-  const minLat = Math.min(lat1, lat2), maxLat = Math.max(lat1, lat2);
-  const minLng = Math.min(lng1, lng2), maxLng = Math.max(lng1, lng2);
-  return {
-    sql: ' AND ml.lat BETWEEN ? AND ? AND ml.lng BETWEEN ? AND ?',
-    params: [minLat, maxLat, minLng, maxLng],
-  };
-}
-
-// GET /api/mechanics/live-locations — all active mechanics with latest GPS (for live map)
-// P2 fix: optional ?bbox= viewport filter to avoid shipping all 500+ mechanics each poll.
-router.get('/live-locations', async (req, res) => {
-  try {
-    const bb = bboxClause(req.query.bbox);
-    const mechanics = await query(
-      `SELECT m.id, m.full_name, m.phone, m.status, m.service_bay_id,
-              b.name as service_bay_name,
-              ml.lat as last_lat, ml.lng as last_lng, ml.speed, ml.heading, ml.recorded_at as last_ping,
-              awo.work_order_number as current_work_order,
-              awo.customer_name, awo.customer_phone as customer_phone_num, awo.customer_address,
-              awo.status as work_order_status
-       FROM mechanics m
-       LEFT JOIN service_bays b ON m.service_bay_id = b.id
-       LEFT JOIN (
-         SELECT mechanic_id, lat, lng, speed, heading, recorded_at
-         FROM mechanic_locations
-         WHERE id IN (SELECT MAX(id) FROM mechanic_locations GROUP BY mechanic_id)
-       ) ml ON ml.mechanic_id = m.id
-       LEFT JOIN (
-         SELECT o.mechanic_id, o.id as work_order_id, o.work_order_number,
-                o.customer_name, o.customer_phone, o.customer_address, o.status
-         FROM work_orders o
-         WHERE o.status IN ('assigned','accepted','in_progress')
-           AND o.id = (SELECT MAX(o2.id) FROM work_orders o2 WHERE o2.mechanic_id = o.mechanic_id AND o2.status IN ('assigned','accepted','in_progress'))
-       ) awo ON awo.mechanic_id = m.id
-       WHERE m.workshop_id = ? AND m.is_active = TRUE AND m.status != 'offline'${bb.sql}`,
-      [req.workshopId, ...bb.params]
-    );
-    const [offlineRow] = await query(
-      'SELECT COUNT(*) as cnt FROM mechanics WHERE workshop_id = ? AND is_active = TRUE AND status = ?',
-      [req.workshopId, 'offline']
-    );
-    return res.json({ success: true, data: mechanics, offline_count: offlineRow?.cnt || 0 });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch live locations' });
-  }
-});
-
-// GET /api/mechanics/locations/live — alias for /live-locations
-router.get('/locations/live', async (req, res) => {
-  try {
-    const mechanics = await query(
-      `SELECT m.id, m.full_name, m.phone, m.status, m.service_bay_id,
-              b.name as service_bay_name,
-              ml.lat as last_lat, ml.lng as last_lng, ml.speed, ml.heading, ml.recorded_at as last_ping,
-              (SELECT work_order_number FROM work_orders o WHERE o.mechanic_id = m.id AND o.status IN ('assigned','accepted','in_progress') ORDER BY o.created_at DESC LIMIT 1) as current_work_order
-       FROM mechanics m
-       LEFT JOIN service_bays b ON m.service_bay_id = b.id
-       LEFT JOIN (
-         SELECT mechanic_id, lat, lng, speed, heading, recorded_at
-         FROM mechanic_locations
-         WHERE id IN (SELECT MAX(id) FROM mechanic_locations GROUP BY mechanic_id)
-       ) ml ON ml.mechanic_id = m.id
-       WHERE m.workshop_id = ? AND m.is_active = TRUE AND m.status != 'offline'`,
-      [req.workshopId]
-    );
-    const [offlineRow2] = await query(
-      'SELECT COUNT(*) as cnt FROM mechanics WHERE workshop_id = ? AND is_active = TRUE AND status = ?',
-      [req.workshopId, 'offline']
-    );
-    return res.json({ success: true, data: mechanics, offline_count: offlineRow2?.cnt || 0 });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch live locations' });
-  }
-});
+// GET /live-locations and /locations/live (every technician's phone, GPS
+// position and current customer, for the courier live map) were removed: no
+// screen used them, and a workshop does not track its technicians' location.
 
 // GET /api/mechanics/me — Current mechanic's own profile (for mobile app)
 router.get('/me', async (req, res) => {
@@ -225,10 +150,7 @@ router.get('/:id', async (req, res) => {
               (SELECT COUNT(*) FROM work_orders o WHERE o.mechanic_id = m.id) as total_work_orders,
               (SELECT COUNT(*) FROM work_orders o WHERE o.mechanic_id = m.id AND o.status = 'completed') as completed_work_orders,
               (SELECT COUNT(*) FROM work_orders o WHERE o.mechanic_id = m.id AND DATE(o.created_at) = CURDATE()) as work_orders_today,
-              (SELECT COALESCE(SUM(o.service_fee),0) FROM work_orders o WHERE o.mechanic_id = m.id AND o.status = 'completed') as total_earned,
-              (SELECT recorded_at FROM mechanic_locations ml WHERE ml.mechanic_id = m.id ORDER BY ml.recorded_at DESC LIMIT 1) as last_ping,
-              (SELECT lat FROM mechanic_locations ml WHERE ml.mechanic_id = m.id ORDER BY ml.recorded_at DESC LIMIT 1) as last_lat,
-              (SELECT lng FROM mechanic_locations ml WHERE ml.mechanic_id = m.id ORDER BY ml.recorded_at DESC LIMIT 1) as last_lng
+              (SELECT COALESCE(SUM(o.service_fee),0) FROM work_orders o WHERE o.mechanic_id = m.id AND o.status = 'completed') as total_earned
        FROM mechanics m
        LEFT JOIN service_bays b ON m.service_bay_id = b.id
        LEFT JOIN users u ON m.user_id = u.id
@@ -237,9 +159,16 @@ router.get('/:id', async (req, res) => {
     );
     if (!mechanic) return res.status(404).json({ success: false, message: 'Mechanic not found' });
 
+    // The technician's recent jobs, as the Technicians page lists them: the
+    // job card, the car and its status (customer_approved_at feeds the
+    // "Approved — to assign" label). No GPS: a technician works in a bay.
     const recentWorkOrders = await query(
-      `SELECT id, work_order_number, status, customer_name, service_fee, created_at, completed_at
-       FROM work_orders WHERE mechanic_id = ? AND workshop_id = ? ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 50`,
+      `SELECT o.id, o.work_order_number, o.status, o.customer_approved_at, o.customer_name, o.service_fee,
+              o.created_at, o.completed_at,
+              v.plate_number AS vehicle_plate_number, v.make AS vehicle_make, v.model AS vehicle_model
+       FROM work_orders o
+       LEFT JOIN vehicles v ON v.id = o.vehicle_id
+       WHERE o.mechanic_id = ? AND o.workshop_id = ? ORDER BY COALESCE(o.completed_at, o.created_at) DESC LIMIT 50`,
       [req.params.id, req.workshopId]
     );
     return res.json({ success: true, data: { ...mechanic, recent_work_orders: recentWorkOrders } });
@@ -369,11 +298,11 @@ router.post('/', async (req, res) => {
       sendNotificationEmail({
         to: email,
         workshopId: req.workshopId,
-        subject: 'Your Mechanic Account is Ready',
+        subject: 'Your technician account is ready',
         title: 'Welcome to the Team! 🔧',
         body: `
           <p>Hi <strong>${full_name}</strong>,</p>
-          <p>Your mechanic account has been created. Use the credentials below to access the Mechanic Portal:</p>
+          <p>Your technician account has been created. Use the credentials below to sign in to My Jobs, where you start, pause and finish your job cards:</p>
           <table style="width:100%;border-collapse:collapse;margin:16px 0;">
             <tr>
               <td style="padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px 0 0 0;font-weight:600;color:#374151;width:120px;">Username</td>
@@ -386,7 +315,7 @@ router.post('/', async (req, res) => {
           </table>
           <p style="color:#f97316;font-weight:600;">&#9888; Please change your password after your first login.</p>
         `,
-        ctaText: 'Login to Mechanic Portal',
+        ctaText: 'Sign in to My Jobs',
         ctaUrl: loginUrl,
       }).catch(err => console.error('[Mechanic] Welcome email error:', err.message));
     }
@@ -572,18 +501,13 @@ router.patch('/:id/location', assertOwnMechanic, async (req, res) => {
       [req.params.id, work_order_id || null, lat, lng, speed ?? null, heading ?? null]
     );
 
-    // Auto-detect service bay from GPS if mechanic has none assigned
-    try {
-      const [mech] = await query('SELECT service_bay_id FROM mechanics WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
-      if (mech && !mech.service_bay_id) {
-        const bayId = await detectZone(req.workshopId, parseFloat(lat), parseFloat(lng));
-        if (bayId) {
-          await execute('UPDATE mechanics SET service_bay_id = ? WHERE id = ?', [bayId, req.params.id]);
-        }
-      }
-    } catch (_) { /* service bay detection not critical */ }
+    // S9: a ping no longer rewrites the technician's default bay. The old
+    // detectZone() call returned the nearest *workshop branch* id and wrote it
+    // into service_bay_id; the bay is set by staff on the Technicians page.
 
-    // Emit real-time location update
+    // Emit real-time location update — staff only (the workshop room).
+    // S9: nothing goes to the customer's track:{token} room any more; a
+    // customer never sees where a technician is.
     try {
       const io = getIO();
       const locationData = {
@@ -595,17 +519,7 @@ router.patch('/:id/location', assertOwnMechanic, async (req, res) => {
         work_order_id: work_order_id || null,
         timestamp: new Date().toISOString(),
       };
-      // Emit to workshop-specific room so only relevant admins see it
       io.to(`workshop:${req.workshopId}`).emit('mechanic:location', locationData);
-
-      // Also emit to public service-status rooms for customers watching their work order
-      const activeWorkOrders = await query(
-        "SELECT service_status_token FROM work_orders WHERE mechanic_id = ? AND workshop_id = ? AND status IN ('in_progress')",
-        [req.params.id, req.workshopId]
-      );
-      for (const o of activeWorkOrders) {
-        io.to(`track:${o.service_status_token}`).emit('mechanic:location', locationData);
-      }
     } catch (_) { /* socket not critical */ }
 
     return res.json({ success: true });
@@ -635,17 +549,8 @@ router.post('/:id/location', assertOwnMechanic, async (req, res) => {
         speed: speed ?? null, heading: heading ?? null,
         work_order_id: work_order_id || null, timestamp: new Date().toISOString(),
       };
-      // Emit to admin dashboard
+      // Staff only (S9 — no track:{token} broadcast to customers).
       io.to(`workshop:${req.workshopId}`).emit('mechanic:location', locationData);
-
-      // Also emit to public service-status rooms for customers watching their work order
-      const activeWorkOrders = await query(
-        "SELECT service_status_token FROM work_orders WHERE mechanic_id = ? AND workshop_id = ? AND status IN ('in_progress')",
-        [req.params.id, req.workshopId]
-      );
-      for (const o of activeWorkOrders) {
-        io.to(`track:${o.service_status_token}`).emit('mechanic:location', locationData);
-      }
     } catch (_) { /* socket not critical */ }
 
     return res.json({ success: true });
@@ -762,7 +667,7 @@ router.post('/sync-accounts', async (req, res) => {
 });
 
 // DELETE /api/mechanics/:id
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireManager, async (req, res) => {
   try {
     // Also deactivate the linked user account
     const [mechanic] = await query('SELECT user_id FROM mechanics WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);

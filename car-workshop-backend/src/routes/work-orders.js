@@ -39,17 +39,28 @@
  * ═══════════════════════════════════════════════════════════════════
  */
 import express from 'express';
-import { query, execute } from '../lib/database.js';
+import pool, { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { requireManager, isTechnician } from '../lib/access.js';
 import { notifyWorkOrderStatus, notifyMechanicAssigned } from '../lib/notify.js';
 import { dispatchWebhook, workOrderStatusToEvent } from '../lib/webhook-dispatcher.js';
 import { createInvoiceFromWorkOrder } from './invoices.js';
 import { getFinancialConfig, computeWorkOrderFinancials, recordMechanicEarning } from '../lib/financial.js';
+import { syncJobCardBilling, getInvoiceForWorkOrder, isInvoiceLocked, computeJobCardTotals, resolveVatRate } from '../lib/job-card-billing.js';
+import { ensureMainJobCard, announceMainJobCard, departmentFor, JC_QC_PASSED, onTechnicianAssigned, onWorkApproved } from '../lib/workflow.js';
+import { requireCapability, can, isManagerRole } from '../lib/roles.js';
+import { woLabel, woDisplayKey, WO_DISPLAY_KEYS } from '../lib/status-labels.js';
+import {
+  customerApprovalMissing, recordCustomerApproval, nothingToApprove, jobClassification,
+  CUSTOMER_APPROVAL_CHANNELS, CUSTOMER_APPROVAL_REQUIRED, NOTHING_TO_APPROVE,
+} from '../lib/job-card-approval.js';
+import { logAudit } from '../lib/audit.js';
 import { checkLimit as checkLimitFn, getUsageStats } from '../middleware/plan-gate.js';
-import crypto from 'crypto';
 import { serviceStatusToken } from '../lib/tokens.js';
 import { stripMarkupFields, clampTextFields } from '../lib/sanitize.js';
 import { issueSurveyOnClosure } from '../lib/survey-trigger.js';
+import { createTask } from '../lib/crm-cycle.js';
+import { scheduleNextReminder } from './crm-reminders.js';
 
 // SR-01/SR-16 — sanitise at the write boundary. Identity fields can never
 // legitimately contain markup, so it is stripped; free text is stored verbatim
@@ -63,19 +74,253 @@ function _clean(body) {
 }
 
 
+// ── Intake rules shared by create and edit ───────────────────────────────
+// (New Job Card, document Steps 1–3.) Validation failures are thrown as
+// InputError and answered with their own status and code.
+
+const VALID_WORK_ORDER_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
+const VALID_SERVICE_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service', 'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
+const VALID_PAY_METHODS = ['cash', 'prepaid', 'credit', 'wallet'];
+// How the request reached the Service Advisor (document Step 2: manual /
+// walk-in or phone, WhatsApp, website, social media). 'fleet_link' and 'api'
+// are written only by the fleet-coordinator link and the API.
+const STAFF_INTAKE_CHANNELS = ['advisor', 'whatsapp', 'website', 'social'];
+const PAYER_TYPES = ['self_pay', 'insurance', 'corporate', 'fleet'];
+const ITEM_TYPES = ['labour', 'parts', 'sublet', 'consumable'];
+const CLOSED_STATUSES = ['completed', 'cancelled'];
+const MAX_MONEY = 99999999.99;   // DECIMAL(10,2)
+const MAX_QTY = 9999999.999;     // DECIMAL(10,3)
+const MAX_ODOMETER = 9999999;    // a stray digit on 732,759 km, not a reading
+const TEXT_MAX = 5000;           // the free-text clamp in lib/sanitize.js
+
+class InputError extends Error {
+  constructor(message, code = 'INVALID_INPUT', http = 400, extra = null) {
+    super(message); this.code = code; this.http = http; this.extra = extra;
+  }
+}
+const sendError = (res, e) => res.status(e.http).json({ success: false, code: e.code, message: e.message, ...(e.extra || {}) });
+
+// The complaint and the technician's notes are refused when too long rather
+// than cut short without a word (the free-text clamp in _clean is the limit).
+function refuseOverlongText(raw) {
+  for (const [k, label] of [['description', 'The complaint'], ['special_instructions', 'The notes for the technician']]) {
+    if (typeof raw?.[k] === 'string' && raw[k].trim().length > TEXT_MAX) {
+      throw new InputError(`${label} is too long (${TEXT_MAX.toLocaleString('en-US')} characters at most).`, 'TEXT_TOO_LONG');
+    }
+  }
+}
+
+// A number as typed: 12, '12', '12.50'. '1,200', '1e3', '' and the like are
+// not numbers (NaN) — they are refused rather than read as something else.
+function toNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  const s = String(v ?? '').trim();
+  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : NaN;
+}
+const decimals = n => { const s = String(n); const i = s.indexOf('.'); return i < 0 ? 0 : s.length - i - 1; };
+const isBlank = v => v === undefined || v === null || String(v).trim() === '';
+
+/** A money field: blank is 0; negatives, non-numbers and over-long values are refused. */
+function parseMoney(v, label) {
+  if (isBlank(v)) return 0;
+  const n = toNumber(v);
+  if (Number.isNaN(n)) throw new InputError(`${label} must be a number.`);
+  if (n < 0) throw new InputError(`${label} cannot be negative.`);
+  if (n > MAX_MONEY || decimals(n) > 2) throw new InputError(`${label} looks wrong — check the amount (at most 2 decimals).`);
+  return n;
+}
+
+/**
+ * The odometer as typed. Thousands separators ('45,320') and Arabic-Indic
+ * digits are a reading; '12.5', '1e5' and '-500' are not, and are refused
+ * instead of being stored as 12, 1 or 500. Returns null when blank.
+ */
+export function parseOdometer(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'number') {
+    if (!Number.isInteger(v)) throw new InputError('Mileage must be a whole number of kilometres.', 'INVALID_ODOMETER');
+    if (v < 0) throw new InputError('Mileage cannot be negative.', 'INVALID_ODOMETER');
+    if (v > MAX_ODOMETER) throw new InputError('Mileage looks wrong — check the reading.', 'INVALID_ODOMETER');
+    return v;
+  }
+  let s = String(v).trim()
+    .replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x660))
+    .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x6F0));
+  if (!s) return null;
+  if (/^\d{1,3}([,٬ ]\d{3})+$/.test(s)) s = s.replace(/[,٬ ]/g, '');
+  if (/^-\s*\d/.test(s)) throw new InputError('Mileage cannot be negative.', 'INVALID_ODOMETER');
+  if (!/^\d+$/.test(s)) throw new InputError('Mileage must be a whole number of kilometres.', 'INVALID_ODOMETER');
+  const n = Number(s);
+  if (n > MAX_ODOMETER) throw new InputError('Mileage looks wrong — check the reading.', 'INVALID_ODOMETER');
+  return n;
+}
+
+/** A record id from the body: blank is null; anything but a positive integer is refused. */
+function parseId(v, what) {
+  if (isBlank(v)) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) throw new InputError(`${what} not found.`, `${what.toUpperCase().replace(/ /g, '_')}_NOT_FOUND`);
+  return n;
+}
+
+/**
+ * Job card lines as sent. A completely empty row is dropped; a priced row
+ * needs a description; quantity must be above 0 (absent = 1) and the price 0
+ * or more. Nothing is quietly turned into another value — what is saved is
+ * what the screen showed.
+ */
+function parseLines(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new InputError('items must be a list of lines.');
+  const out = [];
+  raw.forEach((it, i) => {
+    if (!it || typeof it !== 'object') throw new InputError(`Line ${i + 1} is not valid.`, 'INVALID_LINE');
+    const name = String(it.name ?? '').trim();
+    const label = name ? `Line ${i + 1} (${name.slice(0, 40)})` : `Line ${i + 1}`;
+    const price = isBlank(it.unit_price) ? 0 : toNumber(it.unit_price);
+    if (!name) {
+      if (Number.isNaN(price) || price !== 0) throw new InputError(`${label}: give the line a description, or remove it.`, 'INVALID_LINE');
+      return;
+    }
+    if (name.length > 255) throw new InputError(`${label}: the description is too long (255 characters at most).`, 'INVALID_LINE');
+    const qty = it.quantity === undefined || it.quantity === null ? 1 : toNumber(it.quantity);
+    if (!(qty > 0)) throw new InputError(`${label}: the quantity must be more than 0.`, 'INVALID_LINE');
+    if (qty > MAX_QTY || decimals(qty) > 3) throw new InputError(`${label}: the quantity looks wrong.`, 'INVALID_LINE');
+    if (Number.isNaN(price)) throw new InputError(`${label}: the price must be a number.`, 'INVALID_LINE');
+    if (price < 0) throw new InputError(`${label}: the price cannot be negative.`, 'INVALID_LINE');
+    if (price > MAX_MONEY || decimals(price) > 2) throw new InputError(`${label}: the price looks wrong (at most 2 decimals).`, 'INVALID_LINE');
+    if (qty * price > MAX_MONEY) throw new InputError(`${label}: the line total is too large.`, 'INVALID_LINE');
+    const id = isBlank(it.id) ? null : Number(it.id);
+    if (id !== null && !(Number.isInteger(id) && id > 0)) throw new InputError(`${label} is not valid.`, 'INVALID_LINE');
+    out.push({
+      id, name, quantity: qty, unit_price: price,
+      notes: isBlank(it.notes) ? null : String(it.notes).slice(0, 5000),
+      item_type: ITEM_TYPES.includes(it.item_type) ? it.item_type : null,
+    });
+  });
+  return out;
+}
+
+const linesTotal = lines => lines.reduce((s, l) => s + Number(l.quantity) * Number(l.unit_price), 0);
+
+/** Who pays, from the Step 1 classification: fleets and insurers on account, walk-ins themselves. */
+function payerFor(cls, sub) {
+  if (cls === 'internal') return sub === 'insurance' ? 'insurance' : 'fleet';
+  if (sub === 'fleet') return 'fleet';
+  if (sub === 'insurance') return 'insurance';
+  return 'self_pay';
+}
+
+/** A customer of this workshop that may have a job card raised against it. */
+async function loadCustomer(id, workshopId, { requireActive = true } = {}) {
+  const [c] = await query(
+    'SELECT id, full_name, phone, email, is_active, customer_class, customer_subcategory FROM customers WHERE id = ? AND workshop_id = ?',
+    [id, workshopId]
+  );
+  if (!c) throw new InputError('Customer not found.', 'CUSTOMER_NOT_FOUND');
+  if (requireActive && c.is_active === 0) {
+    throw new InputError('This customer account is deactivated. Reactivate it under Customers before raising a job card.', 'CUSTOMER_INACTIVE');
+  }
+  return c;
+}
+
+/** Real accounts on file can carry '-' as their phone; the snapshot then keeps what was given. */
+const phoneOf = (customer, given) => (/\d/.test(String(customer.phone || '')) ? customer.phone : (String(given || '').trim() || customer.phone || ''));
+
+/** A vehicle of this workshop, owned by the customer when one is given. */
+async function loadVehicle(id, workshopId, customerId) {
+  const [v] = await query(
+    'SELECT id, customer_id, vin, plate_number, mileage FROM vehicles WHERE id = ? AND workshop_id = ?',
+    [id, workshopId]
+  );
+  if (!v) throw new InputError('Vehicle not found.', 'VEHICLE_NOT_FOUND');
+  if (customerId && Number(v.customer_id) !== Number(customerId)) {
+    throw new InputError('This vehicle is not on file for this customer. Choose one of their vehicles, or add it to them first.', 'VEHICLE_NOT_CUSTOMERS');
+  }
+  return v;
+}
+
+const VIN_REQUIRED = {
+  code: 'VIN_REQUIRED',
+  message: 'This vehicle has no VIN / chassis number on file. Add it before raising the job card.',
+};
+
+/** TIMESTAMPs come back as 'YYYY-MM-DD HH:MM:SS'; compare them as such. */
+const stamp = v => (v == null ? '' : String(v).replace('T', ' ').slice(0, 19));
+
+/**
+ * Why the job's customer and vehicle can no longer change, or null while it
+ * is still at intake: no estimate raised, nothing agreed or paid, no work
+ * started (D9). After that the estimate, approval and job cards are about a
+ * particular customer and car.
+ */
+async function intakeLockReason(wo, workshopId) {
+  if (!['pending', 'confirmed', 'estimate_approved'].includes(wo.status)) return `the job is already at "${woLabel(wo)}"`;
+  if (wo.customer_approved_at) return 'the customer has already approved it';
+  const [est] = await query(
+    `SELECT estimate_number FROM service_estimates
+      WHERE workshop_id = ? AND (intake_work_order_id = ? OR work_order_id = ?) AND status NOT IN ('rejected','expired') LIMIT 1`,
+    [workshopId, wo.id, wo.id]
+  );
+  if (est) return `estimate ${est.estimate_number} has been raised for it`;
+  const [paid] = await query(
+    `SELECT invoice_number FROM invoices WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('void','cancelled')
+        AND (amount_paid > 0 OR status IN ('paid','partially_paid')) LIMIT 1`,
+    [wo.id, workshopId]
+  );
+  if (paid) return `invoice ${paid.invoice_number} has taken payment`;
+  const [booked] = await query(
+    'SELECT t.id FROM technician_time_logs t JOIN job_cards jc ON jc.id = t.job_card_id WHERE jc.work_order_id = ? AND jc.workshop_id = ? LIMIT 1',
+    [wo.id, workshopId]
+  );
+  if (booked) return 'time has been booked on it';
+  return null;
+}
+
 const router = express.Router();
 router.use(authMiddleware);
 
-function genWorkOrderNumber() {
+// A technician (mechanic login) reads only the job cards assigned to them —
+// on the work order or on any of its job cards — not the whole book with
+// every customer's phone and e-mail. Workshop totals and the token tools are
+// not theirs at all.
+//
+// ASSIGNED_TO_MECHANIC is that test as SQL on a work order aliased `wo`; it
+// takes the technician's mechanics.id twice. routes/uploads.js uses it too.
+export const ASSIGNED_TO_MECHANIC = `(wo.mechanic_id = ? OR EXISTS (SELECT 1 FROM job_cards jcm WHERE jcm.work_order_id = wo.id AND jcm.mechanic_id = ?))`;
+router.use(async (req, res, next) => {
+  if (!isTechnician(req.user)) return next();
+  try {
+    const [m] = await query('SELECT id FROM mechanics WHERE user_id = ? AND workshop_id = ?', [req.user.id, req.workshopId]);
+    req.ownMechanicId = m?.id || 0;
+    if (req.method === 'GET' && req.path === '/') return next();
+    const hit = req.method === 'GET' && req.path.match(/^\/(\d+)(?:\/(?:items|photos|label))?\/?$/);
+    if (!hit) return res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: 'Your account does not have access to this.' });
+    const [own] = await query(
+      `SELECT wo.id FROM work_orders wo WHERE wo.id = ? AND wo.workshop_id = ? AND ${ASSIGNED_TO_MECHANIC}`,
+      [hit[1], req.workshopId, req.ownMechanicId, req.ownMechanicId]
+    );
+    if (!own) return res.status(404).json({ success: false, message: 'Work order not found' });
+    return next();
+  } catch (err) {
+    console.error('[WorkOrders] technician scope:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to load work orders' });
+  }
+});
+
+export function genWorkOrderNumber() {
   const d = new Date();
   const stamp = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
   const rand = Math.floor(Math.random() * 9000) + 1000;
   return `WO-${stamp}-${rand}`;
 }
 
-// Helper — generate unique service status token (customer-facing tracking token)
+// Helper — generate unique service status token (customer-facing tracking token).
+// The customer's status page opens with it and no login, so it is 128 bits from
+// the CSPRNG like every other token (lib/tokens.js) — pre-printed ones were
+// 'WO-' + 32 bits, few enough to guess.
 function genServiceStatusToken() {
-  return 'WO-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+  return serviceStatusToken();
 }
 
 // GET /api/work-orders/stats — aggregate KPIs for the workshop
@@ -86,6 +331,9 @@ router.get('/stats', async (req, res) => {
          COUNT(*) as total,
          SUM(status = 'pending')          as pending,
          SUM(status = 'confirmed')        as confirmed,
+         SUM(status = 'estimate_approved') as estimate_approved,
+         SUM(status = 'auto_assign')      as auto_assign,
+         SUM(status IN ('pending','confirmed') AND customer_approved_at IS NOT NULL) as approved_waiting,
          SUM(status = 'assigned')         as assigned,
          SUM(status = 'accepted')         as accepted,
          SUM(status = 'in_progress')      as in_progress,
@@ -144,7 +392,14 @@ router.get('/', async (req, res) => {
     let where = 'WHERE wo.workshop_id = ?';
     const params = [req.workshopId];
 
-    if (status) { where += ' AND wo.status = ?'; params.push(status); }
+    // A technician sees only their own jobs (see the scope guard above).
+    if (req.ownMechanicId !== undefined) { where += ` AND ${ASSIGNED_TO_MECHANIC}`; params.push(req.ownMechanicId, req.ownMechanicId); }
+    // One status or a comma-separated list ('pending,confirmed,estimate_approved,auto_assign'
+    // is the Waiting chip, 'assigned,accepted' Technician assigned).
+    if (status) {
+      const list = [...new Set(String(status).split(',').map(s => s.trim()).filter(Boolean))];
+      if (list.length) { where += ` AND wo.status IN (${list.map(() => '?').join(',')})`; params.push(...list); }
+    }
     if (mechanic_id) { where += ' AND wo.mechanic_id = ?'; params.push(mechanic_id); }
     if (customer_id) { where += ' AND wo.customer_id = ?'; params.push(customer_id); }
     if (service_bay_id) { where += ' AND wo.service_bay_id = ?'; params.push(service_bay_id); }
@@ -153,19 +408,27 @@ router.get('/', async (req, res) => {
     if (date_from) { where += ' AND DATE(wo.created_at) >= ?'; params.push(date_from); }
     if (date_to) { where += ' AND DATE(wo.created_at) <= ?'; params.push(date_to); }
     if (search) {
-      where += ' AND (wo.work_order_number LIKE ? OR wo.customer_name LIKE ? OR wo.customer_phone LIKE ? OR wo.service_status_token LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      // Plate and VIN live on vehicles; a subquery keeps the COUNT(*) below
+      // (which has no join) and the row query agreeing.
+      where += ` AND (wo.work_order_number LIKE ? OR wo.customer_name LIKE ? OR wo.customer_phone LIKE ? OR wo.service_status_token LIKE ?
+                 OR wo.vehicle_id IN (SELECT vs.id FROM vehicles vs WHERE vs.workshop_id = wo.workshop_id AND (vs.plate_number LIKE ? OR vs.vin LIKE ?)))`;
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const [{ total }] = await query(`SELECT COUNT(*) as total FROM work_orders wo ${where}`, params);
+    // Timestamps go out as stored, like every other route: the database keeps
+    // workshop wall-clock time. created_at and assigned_at used to get +4 h on
+    // top (a delivery-app leftover), so 'Created' read later than 'Started'.
     const workOrders = await query(
       `SELECT wo.*, m.full_name as mechanic_name, m.phone as mechanic_phone,
               m.specialty as mechanic_specialty, m.status as mechanic_status,
               c.full_name as customer_name_ref, b.name as service_bay_name,
               v.make as vehicle_make, v.model as vehicle_model, v.plate_number as vehicle_plate_number,
-              DATE_ADD(wo.created_at, INTERVAL 4 HOUR) AS created_at,
+              (SELECT jc.job_card_number FROM job_cards jc
+                WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL AND jc.status <> 'cancelled'
+                ORDER BY jc.id LIMIT 1) AS main_job_card_number,
               wo.scheduled_at,
-              DATE_ADD(COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at), INTERVAL 4 HOUR) AS assigned_at
+              COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at) AS assigned_at
        FROM work_orders wo
        LEFT JOIN mechanics m ON wo.mechanic_id = m.id
        LEFT JOIN customers c ON wo.customer_id = c.id
@@ -382,7 +645,7 @@ router.post('/pre-generated/:id/unlink', async (req, res) => {
     }
 
     // Generate a new random service status token for the work order so it's not left empty
-    const newToken = 'WO-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+    const newToken = genServiceStatusToken();
     await execute(
       'UPDATE work_orders SET service_status_token = ?, pregenerated_token_id = NULL WHERE id = ? AND workshop_id = ?',
       [newToken, token.work_order_id, req.workshopId]
@@ -469,14 +732,15 @@ router.get('/:id', async (req, res) => {
               b.name as service_bay_name,
               v.make as vehicle_make, v.model as vehicle_model, v.year as vehicle_year,
               v.plate_number as vehicle_plate_number, v.vin as vehicle_vin, v.color as vehicle_color,
-              DATE_ADD(wo.created_at, INTERVAL 4 HOUR) AS created_at,
+              ua.full_name AS customer_approved_by_name,
               wo.scheduled_at,
-              DATE_ADD(COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at), INTERVAL 4 HOUR) AS assigned_at
+              COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at) AS assigned_at
        FROM work_orders wo
        LEFT JOIN mechanics m ON wo.mechanic_id = m.id
        LEFT JOIN customers c ON wo.customer_id = c.id
        LEFT JOIN service_bays b ON wo.service_bay_id = b.id
        LEFT JOIN vehicles v ON wo.vehicle_id = v.id
+       LEFT JOIN users ua ON ua.id = wo.customer_approved_by
        LEFT JOIN work_order_assignments wa ON wa.work_order_id = wo.id AND wa.mechanic_id = wo.mechanic_id AND wa.is_current = TRUE
        LEFT JOIN (SELECT work_order_id, MIN(created_at) AS created_at FROM work_order_status_logs WHERE status = 'assigned' GROUP BY work_order_id) wsl_assign ON wsl_assign.work_order_id = wo.id
        WHERE wo.id = ? AND wo.workshop_id = ?`,
@@ -489,7 +753,7 @@ router.get('/:id', async (req, res) => {
       `SELECT sl.*, u.full_name as changed_by_name
        FROM work_order_status_logs sl
        LEFT JOIN users u ON sl.changed_by = u.id
-       WHERE sl.work_order_id = ? ORDER BY sl.created_at ASC`,
+       WHERE sl.work_order_id = ? ORDER BY sl.created_at ASC, sl.id ASC`,
       [req.params.id]
     );
 
@@ -666,8 +930,14 @@ router.delete('/:id/photos/:photoId', async (req, res) => {
   }
 });
 
-// POST /api/work-orders
-router.post('/', async (req, res) => {
+// POST /api/work-orders — the New Job Card (document Steps 1–3).
+//
+// The work order, its lines, the customer's approval (when given), the
+// status log and the main job card are written in one transaction: either
+// the job card exists with everything on it, or nothing was saved. The floor
+// and the customer are told only once it has committed.
+router.post('/', requireCapability('job.open'), async (req, res) => {
+  let conn;
   try {
     // D.2 — Check monthly work order limit before creating
     if (req.subscription && !req.subscription.bypass) {
@@ -687,33 +957,37 @@ router.post('/', async (req, res) => {
       }
     }
 
+    refuseOverlongText(req.body);
+    const body = _clean(req.body);
     const {
-      customer_id, vehicle_id, service_bay_id, work_order_type = 'standard', service_category = 'general_maintenance',
+      work_order_type = 'standard', service_category = 'general_maintenance',
       customer_name, customer_phone, customer_email,
       dropoff_address, dropoff_lat, dropoff_lng,
       description, special_instructions, scheduled_at,
-      payment_method = 'cash', cash_amount = 0, service_fee = 0,
-      discount = 0, items = [], notes,
+      payment_method = 'cash', notes,
       pregenerated_token, // optional pre-printed service status token
-      odometer_in, intake_channel = 'advisor', fleet_intake_id,
-    } = _clean(req.body);
+    } = body;
+    // Not taken from this route: mechanic_id (the Team Leader assigns in
+    // Step 6), fleet_intake_id (only the fleet-coordinator link converts a
+    // fleet request) and bypass_intake_required (below).
+    const manager = isManagerRole(req.user);
+    const customerId = parseId(body.customer_id, 'Customer');
+    const vehicleId = parseId(body.vehicle_id, 'Vehicle');
+    const serviceBayId = parseId(body.service_bay_id, 'Service bay');
 
-    // If no customer_email provided but customer has one on file, use that
-    let resolvedEmail = customer_email || '';
-    let resolvedName = customer_name || '';
-    let resolvedPhone = customer_phone || '';
-    if (customer_id) {
-      const [customer] = await query('SELECT full_name, phone, email FROM customers WHERE id = ?', [customer_id]);
-      if (customer) {
-        if (!resolvedEmail) resolvedEmail = customer.email || '';
-        if (!resolvedName) resolvedName = customer.full_name || '';
-        if (!resolvedPhone) resolvedPhone = customer.phone || '';
-      }
-    }
-
+    // ── Step 1: the customer, and the classification the job keeps ──
+    // The name / phone snapshot is the customer record's, not whatever the
+    // client sent alongside the id, so the list, the invoice and the
+    // messages show the customer the job is actually for.
+    const customer = customerId ? await loadCustomer(customerId, req.workshopId) : null;
+    const resolvedName = customer ? customer.full_name : String(customer_name || '').trim();
+    const resolvedPhone = customer ? phoneOf(customer, customer_phone) : String(customer_phone || '').trim();
+    const resolvedEmail = (customer?.email || String(customer_email || '').trim()) || null;
     if (!resolvedName || !resolvedPhone) {
       return res.status(400).json({ success: false, message: 'Customer name and phone required' });
     }
+    const intakeClass = customer?.customer_class || null;
+    const intakeSub = customer?.customer_subcategory || null;
 
     // ── Mandatory intake data (process change, 15 Sep 2026) ──
     // VIN, mileage and the vehicle complaint are required on every new job
@@ -722,112 +996,90 @@ router.post('/', async (req, res) => {
     // constraint belongs on new intake, not retroactively on twenty
     // thousand rows of history.
     //
-    // `bypass_intake_required` exists for the importer and the API
-    // integration, which replay historical jobs that never had this data
-    // and cannot invent it. It is not exposed in the UI.
-    const skipIntakeChecks = req.body.bypass_intake_required === true;
-
-    if (!skipIntakeChecks) {
-      if (!description || !String(description).trim()) {
-        return res.status(400).json({ success: false, message: 'The vehicle complaint is required.' });
-      }
-
-      const odo = odometer_in === '' || odometer_in == null ? null : parseInt(odometer_in, 10);
-      if (odo == null || Number.isNaN(odo)) {
-        return res.status(400).json({ success: false, message: 'Mileage (odometer reading) is required.' });
-      }
-      if (odo < 0) {
-        return res.status(400).json({ success: false, message: 'Mileage cannot be negative.' });
-      }
-      // vehicles.mileage and work_orders.odometer_in are both INT — anything
-      // past this is a typo (a stray digit on 732,759 km), and letting it
-      // through corrupts every service-interval calculation off that vehicle.
-      if (odo > 9999999) {
-        return res.status(400).json({ success: false, message: 'Mileage looks wrong — check the reading.' });
-      }
-
-      // The VIN lives on the vehicle, not the work order, so it is checked
-      // against the vehicle being booked in. No vehicle at all is still
-      // allowed: a job card can legitimately be raised before the car
-      // arrives, and blocking that would break the appointment flow.
-      if (vehicle_id) {
-        const [veh] = await query(
-          'SELECT id, vin FROM vehicles WHERE id = ? AND workshop_id = ?',
-          [vehicle_id, req.workshopId]
-        );
-        if (!veh) {
-          return res.status(400).json({ success: false, message: 'Vehicle not found.' });
-        }
-        if (!veh.vin || !String(veh.vin).trim()) {
-          return res.status(400).json({
-            success: false,
-            code: 'VIN_REQUIRED',
-            message: 'This vehicle has no VIN / chassis number on file. Add it before raising the job card.',
-          });
-        }
-      }
+    // This is the staff route: bypass_intake_required is ignored here. The
+    // importer writes SQL and the API integration has /api/v1/work_orders;
+    // honouring the flag let any advisor skip the complaint and mileage.
+    const complaint = String(description || '').trim();
+    if (!complaint) {
+      return res.status(400).json({ success: false, code: 'COMPLAINT_REQUIRED', message: 'The vehicle complaint is required.' });
+    }
+    // The odometer reading is optional (the process asks for the vehicle
+    // information and the issue, not a mandatory reading); when typed it must
+    // be a sensible whole number.
+    const odometer = parseOdometer(body.odometer_in);
+    // The VIN lives on the vehicle, not the work order, so it is checked
+    // against the vehicle being booked in — which must be this customer's.
+    // No vehicle at all is still allowed: a job card can legitimately be
+    // raised before the car arrives.
+    const vehicle = vehicleId ? await loadVehicle(vehicleId, req.workshopId, customerId) : null;
+    if (vehicle && !String(vehicle.vin || '').trim()) {
+      return res.status(400).json({ success: false, ...VIN_REQUIRED });
+    }
+    if (serviceBayId) {
+      const [bay] = await query('SELECT id FROM service_bays WHERE id = ? AND workshop_id = ?', [serviceBayId, req.workshopId]);
+      if (!bay) throw new InputError('Service bay not found.', 'SERVICE_BAY_NOT_FOUND');
     }
 
-    const _odometer_in = odometer_in === '' || odometer_in == null
-      ? null
-      : (Number.isNaN(parseInt(odometer_in, 10)) ? null : parseInt(odometer_in, 10));
-
-    const VALID_INTAKE_CHANNELS = ['advisor', 'fleet_link', 'website', 'whatsapp', 'social', 'api'];
-    const _intake_channel = VALID_INTAKE_CHANNELS.includes(intake_channel) ? intake_channel : 'advisor';
+    const intakeChannel = isBlank(body.intake_channel) ? 'advisor' : String(body.intake_channel);
+    if (!STAFF_INTAKE_CHANNELS.includes(intakeChannel)) {
+      throw new InputError('Received via must be Walk-in / phone (advisor), WhatsApp, Website or Social media.', 'INVALID_INTAKE_CHANNEL');
+    }
 
     // Coerce empty-string ENUM fields to their defaults (CSV/bulk-import often sends "")
-    const VALID_WORK_ORDER_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
-    const VALID_SERVICE_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service', 'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
-    const VALID_PAY_METHODS = ['cash', 'prepaid', 'credit', 'wallet'];
-
     const _work_order_type = (!work_order_type || !VALID_WORK_ORDER_TYPES.includes(work_order_type)) ? 'standard' : work_order_type;
     const _service_category = (!service_category || !VALID_SERVICE_CATEGORIES.includes(service_category)) ? 'general_maintenance' : service_category;
     const _payment_method = (!payment_method || !VALID_PAY_METHODS.includes(payment_method)) ? 'cash' : payment_method;
 
-    // Coerce numeric fields — empty strings from forms must become numbers/null
-    const _cash_amount = cash_amount === '' || cash_amount == null ? 0 : parseFloat(cash_amount) || 0;
-    const _service_fee = service_fee === '' || service_fee == null ? 0 : parseFloat(service_fee) || 0;
-    const _discount     = discount     === '' || discount     == null ? 0 : parseFloat(discount)     || 0;
-
-    // Validate numeric ranges — no negatives and no DB overflow
-    if (_cash_amount < 0) {
-      return res.status(400).json({ success: false, message: 'Cash amount cannot be negative' });
-    }
-    if (_service_fee < 0) {
-      return res.status(400).json({ success: false, message: 'Service fee cannot be negative' });
-    }
-    if (_discount < 0) {
-      return res.status(400).json({ success: false, message: 'Discount cannot be negative' });
-    }
-    if (_cash_amount > 99999999) {
-      return res.status(400).json({ success: false, message: 'Cash amount is too large' });
-    }
-    if (_service_fee > 99999999) {
-      return res.status(400).json({ success: false, message: 'Service fee is too large' });
-    }
-    if (_discount > 99999999) {
-      return res.status(400).json({ success: false, message: 'Discount is too large' });
+    // ── Counter pricing (wizard page 4) ──
+    // An EXTERNAL customer's job is priced on the estimate after the
+    // inspection: the Storekeeper prices parts, the Service Advisor labour,
+    // and the Supervisor / Workshop Manager approves it (Steps 4–5). Lines,
+    // a fee or a discount at intake skip all of that, so on a new external
+    // job they are a manager's call. Internal (routine fleet) jobs may be
+    // priced at the counter.
+    const lines = parseLines(body.items);
+    const serviceFee = parseMoney(body.service_fee, 'Service fee');
+    const discount = parseMoney(body.discount, 'Discount');
+    const subtotal = serviceFee + linesTotal(lines);
+    if (discount > subtotal + 0.001) throw new InputError('The discount is more than the job card\'s subtotal.', 'DISCOUNT_TOO_LARGE');
+    if (subtotal > MAX_MONEY) throw new InputError('The job card total is too large.', 'AMOUNT_TOO_LARGE');
+    const priced = lines.length > 0 || serviceFee > 0;
+    if ((priced || discount > 0) && intakeClass !== 'internal' && !manager) {
+      return res.status(400).json({
+        success: false, code: 'PRICE_ON_ESTIMATE',
+        message: 'An external customer\'s job is priced on the estimate after the inspection, not at the counter. Open the job card without lines, fee or discount.',
+      });
     }
 
-    const total_amount = _cash_amount + _service_fee - _discount;
+    // ── The customer's agreement at the counter (Step 6) ──
+    // Only for a job priced right here, and only by someone who records
+    // customer decisions (customer.approval).
+    const approvalChannel = isBlank(req.body.customer_approval_channel) ? null : String(req.body.customer_approval_channel);
+    if (approvalChannel) {
+      if (!CUSTOMER_APPROVAL_CHANNELS.includes(approvalChannel)) {
+        throw new InputError('customer_approval_channel must be in_person, phone or written', 'INVALID_APPROVAL_CHANNEL');
+      }
+      if (!can(req.user, 'customer.approval')) {
+        return res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: 'Your role can\'t record the customer\'s approval. Open the job card without it; the Service Advisor records it.' });
+      }
+      if (!priced) return res.status(400).json({ success: false, ...NOTHING_TO_APPROVE });
+    }
 
-    // ── Financial Engine: commission, VAT, net payout ──
+    // Fleets and insurers are billed on account, walk-ins pay themselves.
+    const payerType = manager && PAYER_TYPES.includes(body.payer_type) ? body.payer_type : payerFor(intakeClass, intakeSub);
+
+    // Priced exactly as syncJobCardBilling prices an itemised job card, so
+    // the total the customer may approve here is the job card's total.
+    const vatRate = await resolveVatRate(req.workshopId, customerId);
+    const totals = computeJobCardTotals({ serviceFee, discount, items: lines, vatRate });
     let finConfig;
     try { finConfig = await getFinancialConfig(req.workshopId); } catch { finConfig = { commissionPercent: 0, vatEnabled: false, vatRate: 0, vatNumber: '', applyVatOnServiceFee: true, applyVatOnCash: false }; }
-    const fin = computeWorkOrderFinancials({
-      serviceFee: _service_fee,
-      discount: _discount,
-      cashAmount: _cash_amount,
-      config: finConfig,
-    });
-
-    const work_order_number = genWorkOrderNumber();
+    const fin = computeWorkOrderFinancials({ serviceFee, discount, cashAmount: totals.itemsTotal, config: finConfig });
 
     // ── Use pre-generated token if provided, else generate new one ──
-    let service_status_token;
-    let pregeneratedTokenId = null;
+    let pregenerated = null;
     if (pregenerated_token) {
-      const tokenVal = pregenerated_token.trim().toUpperCase();
+      const tokenVal = String(pregenerated_token).trim().toUpperCase();
       const [pt] = await query(
         'SELECT id, service_status_token, is_used, expires_at FROM pregenerated_tokens WHERE service_status_token = ? AND workshop_id = ?',
         [tokenVal, req.workshopId]
@@ -841,65 +1093,133 @@ router.post('/', async (req, res) => {
       if (pt.expires_at && new Date(pt.expires_at) <= new Date()) {
         return res.status(400).json({ success: false, message: 'This service status token has expired' });
       }
-      service_status_token = pt.service_status_token;
-      pregeneratedTokenId = pt.id;
-    } else {
-      service_status_token = serviceStatusToken(); // SR-08 — was 48-bit
+      pregenerated = pt;
     }
 
-    const result = await execute(
-      `INSERT INTO work_orders (workshop_id, work_order_number, customer_id, vehicle_id, service_bay_id, work_order_type, service_category,
-        customer_name, customer_phone, customer_email,
-        dropoff_address, dropoff_lat, dropoff_lng, description, special_instructions,
-        scheduled_at, payment_method, cash_amount, service_fee, discount, total_amount,
-        commission_rate, commission_amount, vat_rate, vat_amount, platform_fee, net_payable,
-        odometer_in, intake_channel, fleet_intake_id,
-        status, service_status_token, pregenerated_token_id, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-      [req.workshopId, work_order_number, customer_id || null, vehicle_id || null, service_bay_id || null, _work_order_type, _service_category,
-       resolvedName, resolvedPhone, resolvedEmail || null,
-       dropoff_address || null, dropoff_lat || null, dropoff_lng || null,
-       description || null, special_instructions || null, scheduled_at || null,
-       _payment_method, _cash_amount, _service_fee, _discount, fin.totalAmount,
-       fin.commissionRate, fin.commissionAmount, fin.vatRate, fin.vatAmount, fin.platformFee, fin.netPayable,
-       _odometer_in, _intake_channel, fleet_intake_id || null,
-       service_status_token, pregeneratedTokenId, notes || null]
-    );
-    const workOrderId = result.insertId;
+    // Told, not refused: the car already has a job card open (a second
+    // visit can be legitimate), or the reading is below the last one on file.
+    const warnings = [];
+    if (vehicle) {
+      const open = await query(
+        `SELECT id, work_order_number, status FROM work_orders
+          WHERE vehicle_id = ? AND workshop_id = ? AND status NOT IN ('completed','cancelled') ORDER BY id DESC LIMIT 3`,
+        [vehicle.id, req.workshopId]
+      );
+      for (const o of open) {
+        warnings.push({ code: 'OPEN_JOB_CARD', work_order_id: o.id, work_order_number: o.work_order_number, status: o.status,
+          message: `${vehicle.plate_number || 'This vehicle'} already has job card ${o.work_order_number} open (${woLabel(o.status)}).` });
+      }
+      if (odometer != null && vehicle.mileage != null && odometer < Number(vehicle.mileage)) {
+        warnings.push({ code: 'ODOMETER_BELOW_LAST', last_mileage: Number(vehicle.mileage),
+          message: `The reading (${odometer.toLocaleString('en-US')} km) is below the last one on file (${Number(vehicle.mileage).toLocaleString('en-US')} km); the vehicle keeps the higher figure.` });
+      }
+    }
+
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    // Lock the vehicle first. The work order and job card inserts below take
+    // a shared lock on it (their foreign key), and the mileage update then
+    // needs an exclusive one: two job cards opened at once for the same car
+    // each held the shared lock and waited on the other (ER_LOCK_DEADLOCK,
+    // a 500 for the advisor). Taking the row lock up front queues them.
+    if (vehicle) await conn.query('SELECT id FROM vehicles WHERE id = ? AND workshop_id = ? FOR UPDATE', [vehicle.id, req.workshopId]);
+
+    // The number is a random 4-digit draw per day; a collision is drawn
+    // again rather than failing the advisor's "Create job card".
+    let workOrderId, serviceToken;
+    for (let attempt = 0; ; attempt++) {
+      const work_order_number = genWorkOrderNumber();
+      serviceToken = pregenerated ? pregenerated.service_status_token : serviceStatusToken(); // SR-08 — was 48-bit
+      try {
+        const [result] = await conn.query(
+          `INSERT INTO work_orders (workshop_id, work_order_number, customer_id, vehicle_id, service_bay_id, work_order_type, service_category,
+            customer_name, customer_phone, customer_email,
+            dropoff_address, dropoff_lat, dropoff_lng, description, special_instructions,
+            scheduled_at, payment_method, payer_type, cash_amount, service_fee, discount, total_amount,
+            commission_rate, commission_amount, vat_rate, vat_amount, platform_fee, net_payable,
+            odometer_in, intake_channel, intake_customer_class, intake_customer_subcategory,
+            status, service_status_token, pregenerated_token_id, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          [req.workshopId, work_order_number, customerId, vehicleId, serviceBayId, _work_order_type, _service_category,
+           resolvedName, resolvedPhone, resolvedEmail,
+           dropoff_address || null, dropoff_lat || null, dropoff_lng || null,
+           complaint, special_instructions || null, scheduled_at || null,
+           _payment_method, payerType, totals.itemsTotal, serviceFee, totals.discount, totals.total,
+           fin.commissionRate, fin.commissionAmount, totals.vatRate, totals.vatAmount, fin.platformFee, fin.netPayable,
+           odometer, intakeChannel, intakeClass, intakeSub,
+           serviceToken, pregenerated?.id || null, notes || null]
+        );
+        workOrderId = result.insertId;
+        break;
+      } catch (err) {
+        if (err.code !== 'ER_DUP_ENTRY') throw err;
+        if (pregenerated && /service_status_token/.test(err.message)) {
+          throw new InputError('This service status token is already linked to a work order', 'TOKEN_USED');
+        }
+        if (attempt >= 9) throw err;
+      }
+    }
 
     // Keep the vehicle's own odometer current. Guarded with a comparison so
     // a job card keyed in late — or a typo that reads lower than the last
     // known reading — cannot wind the vehicle's mileage backwards, which
     // would make its next service interval fire early and its history
     // non-monotonic.
-    if (vehicle_id && _odometer_in != null) {
-      await execute(
+    if (vehicle && odometer != null) {
+      await conn.query(
         'UPDATE vehicles SET mileage = ? WHERE id = ? AND workshop_id = ? AND (mileage IS NULL OR mileage < ?)',
-        [_odometer_in, vehicle_id, req.workshopId, _odometer_in]
+        [odometer, vehicle.id, req.workshopId, odometer]
       );
     }
 
     // Mark pre-generated token as used
-    if (pregeneratedTokenId) {
-      await execute(
+    if (pregenerated) {
+      await conn.query(
         'UPDATE pregenerated_tokens SET is_used = 1, work_order_id = ?, used_at = NOW() WHERE id = ?',
-        [workOrderId, pregeneratedTokenId]
+        [workOrderId, pregenerated.id]
       );
     }
 
-    // Insert line items
-    for (const item of items) {
-      await execute(
-        'INSERT INTO work_order_items (work_order_id, name, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?)',
-        [workOrderId, item.name, item.quantity || 1, item.unit_price || 0, item.notes || null]
+    for (const line of lines) {
+      await conn.query(
+        'INSERT INTO work_order_items (work_order_id, name, item_type, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?, ?)',
+        [workOrderId, line.name, line.item_type, line.quantity, line.unit_price, line.notes]
       );
     }
 
-    // Insert initial status log
-    await execute(
+    await conn.query(
       'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
       [workOrderId, 'pending', req.user.id, 'Work order created']
     );
+
+    // The customer's agreement recorded at the counter — after the "created"
+    // log, so the history reads in order, and against the priced total.
+    if (approvalChannel) {
+      await recordCustomerApproval({
+        workOrderId, workshopId: req.workshopId, channel: approvalChannel,
+        note: req.body.customer_approval_note, userId: req.user.id, db: conn,
+      });
+    }
+
+    // Step 3: open the main job card, in the same transaction.
+    await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id, db: conn });
+
+    await conn.commit();
+    conn.release(); conn = null;
+
+    // Opening the job card tells the Supervisor, Foreman and Team Leader a
+    // request has been raised (Step 4) — or, when the customer already
+    // agreed at the counter, that the work is approved and ready to assign.
+    await announceMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id, notify: !approvalChannel });
+    if (approvalChannel) {
+      await onWorkApproved({ workOrderId, workshopId: req.workshopId, userId: req.user.id, how: `${approvalChannel.replace('_', ' ')}, at the counter` });
+      await logAudit({
+        workshopId: req.workshopId, userId: req.user.id, action: 'CUSTOMER_APPROVAL', entityType: 'work_orders',
+        entityId: workOrderId, oldValue: null,
+        newValue: { channel: approvalChannel, total: totals.total, note: req.body.customer_approval_note || null, at: 'intake' },
+      }).catch(e => console.error('[WorkOrders] approval audit:', e.message));
+    }
 
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
 
@@ -908,23 +1228,31 @@ router.post('/', async (req, res) => {
       order: workOrder, status: 'pending', workshopId: req.workshopId, changedBy: req.user.id,
     }).catch(e => console.error('[Notify] New work order error:', e.message));
 
-    return res.status(201).json({ success: true, data: workOrder });
+    return res.status(201).json({ success: true, data: workOrder, warnings });
   } catch (err) {
+    if (conn) await conn.rollback().catch(() => {});
+    if (err instanceof InputError) return sendError(res, err);
     console.error('[WorkOrders] Create error:', err);
-    // Return a more descriptive message for common DB errors
-    let msg = 'Failed to create work order';
-    if (err.code === 'ER_WARN_DATA_OUT_OF_RANGE') {
-      msg = 'One or more numeric values are out of range. Please check amounts.';
-    } else if (err.code === 'WARN_DATA_TRUNCATED') {
-      msg = 'Invalid value for one or more fields. Please check work order type, category, and payment method.';
-    } else if (err.code === 'ER_DUP_ENTRY') {
-      msg = 'Duplicate work order number generated. Please try again.';
-    } else if (err.code === 'ER_NO_REFERENCED_ROW' || err.code === 'ER_NO_REFERENCED_ROW_2') {
-      msg = 'Invalid reference: customer, vehicle, service bay, or mechanic does not exist.';
-    }
-    return res.status(500).json({ success: false, message: msg });
+    const [http, payload] = dbErrorStatus(err, 'Failed to create work order');
+    return res.status(http).json(payload);
+  } finally {
+    if (conn) conn.release();
   }
 });
+
+/** A database error as an HTTP status and body: bad input is a 400, not a 500. */
+function dbErrorStatus(err, fallback) {
+  const bad = (code, message) => [400, { success: false, code, message }];
+  if (err.code === 'ER_WARN_DATA_OUT_OF_RANGE') return bad('OUT_OF_RANGE', 'One or more numeric values are out of range. Please check amounts.');
+  if (err.code === 'WARN_DATA_TRUNCATED' || err.code === 'ER_TRUNCATED_WRONG_VALUE' || err.code === 'ER_TRUNCATED_WRONG_VALUE_FOR_FIELD') {
+    return bad('INVALID_VALUE', 'Invalid value for one or more fields. Please check work order type, category, and payment method.');
+  }
+  if (err.code === 'ER_DATA_TOO_LONG') return bad('TOO_LONG', 'One of the fields is too long.');
+  if (err.code === 'ER_NO_REFERENCED_ROW' || err.code === 'ER_NO_REFERENCED_ROW_2') {
+    return bad('INVALID_REFERENCE', 'Invalid reference: customer, vehicle, service bay, or mechanic does not exist.');
+  }
+  return [500, { success: false, message: fallback }];
+}
 
 /* ── Status transition map (per car_workshop.sql status enum) ─────────
    pending -> confirmed -> assigned -> accepted -> in_progress ->
@@ -951,6 +1279,23 @@ const VALID_TRANSITIONS = {
   completed:        [],
   cancelled:        ['pending'],
 };
+
+/**
+ * Why a work order cannot move to `status`, in the workshop's words, e.g.
+ * 'This job is at "Quality check", so it can't go to "Closed". It can move to
+ * "Ready for collection", back to "Work in progress" or to "Cancelled".'
+ */
+function transitionRefusal(workOrder, status, allowed) {
+  const here = woLabel(workOrder);
+  const step = rowOrStatus => WO_DISPLAY_KEYS.indexOf(woDisplayKey(rowOrStatus));
+  // 'accepted' and 'assigned' both read "Technician assigned": a move between
+  // them changes nothing the user sees, and each label is listed once.
+  const moves = [...new Set(allowed.filter(s => woLabel(s) !== here)
+    .map(s => `${s !== 'cancelled' && step(s) < step(workOrder) ? 'back ' : ''}to "${woLabel(s)}"`))];
+  const next = !moves.length ? 'It cannot move on from here.'
+    : `It can move ${moves.length > 1 ? `${moves.slice(0, -1).join(', ')} or ${moves[moves.length - 1]}` : moves[0]}.`;
+  return `This job is at "${here}", so it can't go to "${woLabel(status)}". ${next}`;
+}
 
 /* ── Customer-journey checkpoint columns (layered on top of `status`,
    see the comment above the status enum in car_workshop.sql) ────────── */
@@ -986,58 +1331,134 @@ router.patch('/:id/journey', async (req, res) => {
   }
 });
 
+// Who may move a job card to each status by hand: the role responsible for
+// that step (lib/roles.js; managers hold every capability). Opening,
+// confirming, cancelling and reopening is intake (job.open); assigning is the
+// Team Leader's; starting work is time booking; the quality-check statuses
+// keep their own gates below; closing is the handover.
+// Shared with PATCH /api/service-status/:token/status through canSetStatus().
+export const STATUS_CAPABILITIES = Object.freeze({
+  pending: ['job.open'], confirmed: ['job.open'], cancelled: ['job.open'],
+  assigned: ['job.assign'], accepted: ['job.assign'],
+  in_progress: ['time.book', 'job.assign'],
+  inspection: ['qc.perform', 'job.assign'], ready_for_pickup: ['qc.perform', 'job.assign'],
+  completed: ['delivery.handover'],
+});
+
+/**
+ * Whether this user's role may move a work order to `status` by hand. A
+ * status with no entry is not refused here — applyStatusChange() answers it
+ * (an unknown status is a 400). Technicians are refused by each route before
+ * this: they hold time.book, but they start work from My Jobs.
+ */
+export function canSetStatus(user, status) {
+  const caps = STATUS_CAPABILITIES[status];
+  return !caps || caps.some(c => can(user, c));
+}
+
+/** The 403 body when canSetStatus() says no. */
+export function statusNotAllowed(status) {
+  return { success: false, code: 'ROLE_NOT_ALLOWED', message: `Your role can't set a job card to "${woLabel(status)}".` };
+}
+
 // PATCH /api/work-orders/:id/status — update work order status
 router.patch('/:id/status', async (req, res) => {
   try {
     const { status, note, lat, lng } = req.body;
+    if (!canSetStatus(req.user, status)) return res.status(403).json(statusNotAllowed(status));
+    const r = await applyStatusChange({
+      workOrderId: req.params.id, workshopId: req.workshopId, userId: req.user.id, status, note, lat, lng,
+    });
+    if (!r.ok) return res.status(r.http).json({ success: false, ...(r.code ? { code: r.code } : {}), message: r.message, ...(r.extra || {}) });
+    return res.json({ success: true, message: `Status updated: ${woLabel(status)}` });
+  } catch (err) {
+    console.error('[WorkOrders] status error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to update status' });
+  }
+});
+
+/**
+ * Change a work order's status with every side effect of doing it by hand
+ * (status log, auto-invoice, technician release, customer SMS/email/push,
+ * webhooks). Shared by PATCH /:id/status and the workflow (lib/workflow.js
+ * routes), so a status reached through a job card event behaves the same.
+ * Returns { ok: true } or { ok: false, http, code?, message }.
+ *
+ * Workflow gates (Pioneer_Complete_Workshop_Workflow_Steps_1_to_7.pdf):
+ * for a work order that has job cards, "ready for pickup" needs every job
+ * card through the quality check (Step 7.1), and "completed" — closing the
+ * job — needs the final gate pass (Step 7.2). Imported legacy work orders
+ * have no job cards and are not held to either.
+ */
+export async function applyStatusChange({ workOrderId, workshopId, userId, status, note = null, lat = null, lng = null, skipGates = false }) {
     const validStatuses = ['pending','confirmed','assigned','accepted','in_progress','inspection','ready_for_pickup','completed','cancelled'];
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({ success: false, message: 'Invalid status' });
+      return { ok: false, http: 400, message: 'Invalid status' };
     }
     const [workOrder] = await query(
       `SELECT wo.*, c.email AS customer_email_ref
        FROM work_orders wo
        LEFT JOIN customers c ON wo.customer_id = c.id
        WHERE wo.id = ? AND wo.workshop_id = ?`,
-      [req.params.id, req.workshopId]
+      [workOrderId, workshopId]
     );
-    if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (!workOrder) return { ok: false, http: 404, message: 'Work order not found' };
 
     // Validate status transition
     const allowed = VALID_TRANSITIONS[workOrder.status] || [];
     if (workOrder.status !== status && !allowed.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot change from "${workOrder.status}" to "${status}". Allowed: ${allowed.join(', ') || 'none'}`,
-      });
+      return { ok: false, http: 400, code: 'INVALID_TRANSITION', message: transitionRefusal(workOrder, status, allowed) };
     }
 
     // Validate: cannot transition to "assigned" without a mechanic
     if (status === 'assigned' && !workOrder.mechanic_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot assign work order without a mechanic. Please assign a mechanic first.',
-      });
+      return { ok: false, http: 400, message: 'Cannot assign work order without a mechanic. Please assign a mechanic first.' };
+    }
+
+    // No work begins without the customer's agreement (lib/job-card-approval.js)
+    if (status === 'in_progress' && workOrder.status !== 'in_progress'
+        && await customerApprovalMissing(workOrder.id, workshopId)) {
+      return { ok: false, http: 409, ...CUSTOMER_APPROVAL_REQUIRED };
+    }
+
+    if (!skipGates && workOrder.status !== status && ['ready_for_pickup', 'completed'].includes(status)) {
+      const cards = await query(
+        "SELECT status FROM job_cards WHERE work_order_id = ? AND workshop_id = ? AND status <> 'cancelled'",
+        [workOrder.id, workshopId]
+      );
+      if (cards.length && !cards.every(c => JC_QC_PASSED.includes(c.status))) {
+        return { ok: false, http: 409, code: 'QC_REQUIRED',
+          message: 'The quality check (with test drive) has not passed on every job card yet. Record it on the job card first.' };
+      }
+      if (cards.length && status === 'completed') {
+        const [gp] = await query(
+          "SELECT id FROM gate_passes WHERE work_order_id = ? AND workshop_id = ? AND status = 'released' LIMIT 1",
+          [workOrder.id, workshopId]
+        );
+        if (!gp) {
+          return { ok: false, http: 409, code: 'GATE_PASS_REQUIRED',
+            message: 'Issue the final gate pass before closing the job.' };
+        }
+      }
     }
 
     const timestamps = {};
-    if (status === 'in_progress') timestamps.started_at   = new Date();
+    if (status === 'in_progress' && !workOrder.started_at) timestamps.started_at = new Date();
     if (status === 'completed')   timestamps.completed_at = new Date();
     if (status === 'cancelled')   timestamps.cancelled_at = new Date();
 
     const setClause = ['status = ?', ...Object.keys(timestamps).map(k => `${k} = ?`)].join(', ');
-    const setValues = [status, ...Object.values(timestamps), req.params.id, req.workshopId];
+    const setValues = [status, ...Object.values(timestamps), workOrderId, workshopId];
 
     await execute(`UPDATE work_orders SET ${setClause} WHERE id = ? AND workshop_id = ?`, setValues);
     await execute(
       'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note, lat, lng) VALUES (?, ?, ?, ?, ?, ?)',
-      [req.params.id, status, req.user.id, note || null, lat || null, lng || null]
+      [workOrderId, status, userId || null, note || null, lat || null, lng || null]
     );
-
     // ── AUTO-GENERATE INVOICE WHEN WORK ORDER IS CONFIRMED ──
     if (status === 'confirmed') {
       try {
-        const invoice = await createInvoiceFromWorkOrder(req.params.id, req.workshopId, req.user.id);
+        const invoice = await createInvoiceFromWorkOrder(workOrderId, workshopId, userId);
         if (invoice) {
           console.log(`Invoice ${invoice.invoice_number} auto-created for work order ${workOrder.work_order_number}`);
         }
@@ -1050,10 +1471,13 @@ router.patch('/:id/status', async (req, res) => {
     // ── SAFETY NET: Also generate invoice when completed if none exists yet ──
     if (status === 'completed') {
       try {
-        const invoice = await createInvoiceFromWorkOrder(req.params.id, req.workshopId, req.user.id);
+        const invoice = await createInvoiceFromWorkOrder(workOrderId, workshopId, userId);
         if (invoice) {
           console.log(`Invoice ${invoice.invoice_number} auto-created on completion for work order ${workOrder.work_order_number}`);
         }
+        // The invoice may have been raised at 'confirmed', before the job
+        // grew; close-out is the last point it can still be brought level.
+        await syncJobCardBilling(workOrderId, workshopId);
       } catch (invoiceErr) {
         console.error('Failed to auto-create invoice on completion:', invoiceErr.message);
       }
@@ -1065,13 +1489,13 @@ router.patch('/:id/status', async (req, res) => {
 
       // Auto-record mechanic earning
       recordMechanicEarning({
-        workshopId: req.workshopId, mechanicId: workOrder.mechanic_id, workOrderId: workOrder.id,
+        workshopId: workshopId, mechanicId: workOrder.mechanic_id, workOrderId: workOrder.id,
         serviceFee: parseFloat(workOrder.service_fee) || 0,
         cashAmount: parseFloat(workOrder.cash_amount) || 0,
       }).catch(e => console.error('[WorkOrders] earning record error:', e.message));
     }
     if (status === 'completed' && workOrder.payment_method === 'cash') {
-      await execute('UPDATE work_orders SET cash_collected = cash_amount WHERE id = ? AND workshop_id = ?', [workOrder.id, req.workshopId]);
+      await execute('UPDATE work_orders SET cash_collected = cash_amount WHERE id = ? AND workshop_id = ?', [workOrder.id, workshopId]);
     }
 
     // Schedule the journey's step-12 follow-up call (48h out) if one isn't already scheduled
@@ -1079,13 +1503,13 @@ router.patch('/:id/status', async (req, res) => {
       try {
         const [existing] = await query(
           'SELECT id FROM customer_feedback WHERE work_order_id = ? AND workshop_id = ?',
-          [workOrder.id, req.workshopId]
+          [workOrder.id, workshopId]
         );
         if (!existing) {
           await execute(
             `INSERT INTO customer_feedback (workshop_id, work_order_id, customer_id, scheduled_at, status)
              VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 48 HOUR), 'scheduled')`,
-            [req.workshopId, workOrder.id, workOrder.customer_id || null]
+            [workshopId, workOrder.id, workOrder.customer_id || null]
           );
         }
       } catch (feedbackErr) {
@@ -1096,8 +1520,34 @@ router.patch('/:id/status', async (req, res) => {
     // Auto-issue the satisfaction survey. No-op unless the branch has the
     // trigger switched on in Settings > Surveys; never throws.
     if (status === 'completed') {
-      issueSurveyOnClosure({ workOrderId: workOrder.id, workshopId: req.workshopId })
+      issueSurveyOnClosure({ workOrderId: workOrder.id, workshopId: workshopId })
         .catch(e => console.error('[SurveyTrigger] Error:', e.message));
+      // After the visit (CRM cycle): the 48-hour satisfaction call lands in
+      // Tasks & Follow-ups, and the car's next service is put on the
+      // reminder list.
+      await createTask({
+        workshopId, title: `48-hour follow-up call — ${workOrder.work_order_number}${workOrder.customer_name ? ` · ${workOrder.customer_name}` : ''}`,
+        details: 'Check the customer is happy with the work, note any issue, and ask for a review or a referral.',
+        taskType: 'follow_up', customerId: workOrder.customer_id || null, vehicleId: workOrder.vehicle_id || null,
+        relatedType: 'work_order', relatedId: workOrder.id, assignedTo: userId || null,
+        dueAt: new Date(Date.now() + 48 * 3600 * 1000), createdBy: userId || null,
+      });
+      scheduleNextReminder({ workshopId, workOrderId: workOrder.id })
+        .catch(e => console.error('[Reminders] next service:', e.message));
+    }
+
+    // A cancelled job takes its open job cards with it (and any time still
+    // running), so they don't linger on the technician's phone or the floor.
+    if (status === 'cancelled') {
+      await execute(
+        `UPDATE technician_time_logs t JOIN job_cards jc ON jc.id = t.job_card_id
+            SET t.clock_out = NOW(), t.end_reason = 'stop'
+          WHERE jc.work_order_id = ? AND jc.workshop_id = ? AND t.clock_out IS NULL`, [workOrder.id, workshopId]
+      ).catch(e => console.error('[cancel] time logs:', e.message));
+      await execute(
+        `UPDATE job_cards SET status = 'cancelled'
+          WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('billed','cancelled')`, [workOrder.id, workshopId]
+      ).catch(e => console.error('[cancel] job cards:', e.message));
     }
 
     // Release mechanic back to available when work order reaches a terminal status
@@ -1123,29 +1573,29 @@ router.patch('/:id/status', async (req, res) => {
     }
     // Fire all notification channels (non-blocking)
     notifyWorkOrderStatus({
-      order: enrichedOrder, status, workshopId: req.workshopId, changedBy: req.user.id,
+      order: enrichedOrder, status, workshopId: workshopId, changedBy: userId,
     }).catch(e => console.error('[Notify] Error:', e.message));
 
     // Fire outbound webhooks (non-blocking)
     const webhookEvent = workOrderStatusToEvent(status);
     if (webhookEvent) {
-      dispatchWebhook({ tenantId: req.workshopId, event: webhookEvent, data: enrichedOrder });
+      dispatchWebhook({ tenantId: workshopId, event: webhookEvent, data: enrichedOrder });
     }
 
-    return res.json({ success: true, message: `Work order ${status}` });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to update status' });
-  }
-});
+    return { ok: true };
+}
 
 // PATCH /api/work-orders/:id/assign-mechanic — assign a mechanic to a work order
-router.patch('/:id/assign-mechanic', async (req, res) => {
+router.patch('/:id/assign-mechanic', requireCapability('job.assign'), async (req, res) => {
   try {
     const { mechanic_id } = req.body;
     if (!mechanic_id) return res.status(400).json({ success: false, message: 'mechanic_id required' });
 
+    // work_order_number and the rest feed the "assigned" notifications; the
+    // customer's phone / e-mail are left out on purpose (no customer SMS here).
     const [workOrder] = await query(
-      'SELECT id, status FROM work_orders WHERE id = ? AND workshop_id = ?',
+      `SELECT id, status, work_order_number, customer_name, dropoff_address, cash_amount, service_status_token
+         FROM work_orders WHERE id = ? AND workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
@@ -1189,6 +1639,8 @@ router.patch('/:id/assign-mechanic', async (req, res) => {
       }
     }
 
+    await onTechnicianAssigned({ workOrderId: Number(req.params.id), workshopId: req.workshopId, mechanicId: Number(mechanic_id) });
+
     // Notify mechanic via push notification (FCM + Web Push) + email + SMS to customer
     notifyMechanicAssigned({ order: workOrder, driver: mechanic, tenantId: req.workshopId })
       .catch(e => console.error('[assign-mechanic] notify error:', e.message));
@@ -1200,81 +1652,320 @@ router.patch('/:id/assign-mechanic', async (req, res) => {
   }
 });
 
-// PUT /api/work-orders/:id
-router.put('/:id', async (req, res) => {
-  try {
-    const {
-      vehicle_id, service_bay_id, work_order_type, service_category,
-      customer_name, customer_phone, customer_email,
-      dropoff_address, dropoff_lat, dropoff_lng,
-      description, special_instructions, payment_method,
-      cash_amount, service_fee, discount, scheduled_at, notes,
-    } = _clean(req.body);
+// ── Job card lines: one diff, used by both edit routes ───────────────────
 
-    if (!customer_name || !customer_phone) {
-      return res.status(400).json({ success: false, message: 'Customer name and phone required' });
+const sameLine = (s, l) => s.name === l.name && Number(s.quantity) === l.quantity && Number(s.unit_price) === l.unit_price
+  && (s.notes || null) === (l.notes || null) && (!l.item_type || l.item_type === s.item_type);
+
+/**
+ * How the stored lines become `lines`. A line sent back with its id is that
+ * line (updated in place, so it keeps its sub-job card and estimate-line
+ * link); an unchanged line sent without an id is recognised as the same
+ * line; anything else is added, and stored lines not sent are removed.
+ */
+function diffLines(stored, lines) {
+  const byId = new Map(stored.map(s => [s.id, s]));
+  const keep = new Map();
+  for (const l of lines.filter(x => x.id)) {
+    if (!byId.has(l.id) || keep.has(l.id)) {
+      throw new InputError('A line in this save is no longer on the job card. Reload the job card and try again.', 'LINE_NOT_FOUND', 409);
+    }
+    keep.set(l.id, l);
+  }
+  const add = [];
+  for (const l of lines.filter(x => !x.id)) {
+    const same = stored.find(s => !keep.has(s.id) && sameLine(s, l));
+    if (same) keep.set(same.id, { ...l, id: same.id }); else add.push(l);
+  }
+  const update = [...keep].filter(([id, l]) => !sameLine(byId.get(id), l)).map(([, l]) => l);
+  const remove = stored.filter(s => !keep.has(s.id));
+  return { add, update, remove, changed: add.length + update.length + remove.length > 0 };
+}
+
+async function writeLines(conn, workOrderId, diff) {
+  for (const l of diff.update) {
+    await conn.query(
+      'UPDATE work_order_items SET name = ?, quantity = ?, unit_price = ?, notes = ?, item_type = COALESCE(?, item_type) WHERE id = ? AND work_order_id = ?',
+      [l.name, l.quantity, l.unit_price, l.notes, l.item_type, l.id, workOrderId]
+    );
+  }
+  if (diff.remove.length) {
+    await conn.query('DELETE FROM work_order_items WHERE work_order_id = ? AND id IN (?)', [workOrderId, diff.remove.map(r => r.id)]);
+  }
+  for (const l of diff.add) {
+    await conn.query(
+      'INSERT INTO work_order_items (work_order_id, name, item_type, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?, ?)',
+      [workOrderId, l.name, l.item_type, l.quantity, l.unit_price, l.notes]
+    );
+  }
+}
+
+/** The job's Step 1 class (intake snapshot, else the customer's). */
+async function jobClassOf(wo, workshopId) {
+  if (wo.intake_customer_class && wo.intake_customer_subcategory) return wo.intake_customer_class;
+  const [c] = wo.customer_id
+    ? await query('SELECT customer_class, customer_subcategory FROM customers WHERE id = ? AND workshop_id = ?', [wo.customer_id, workshopId])
+    : [null];
+  return jobClassification({ ...wo, customer_class: c?.customer_class, customer_subcategory: c?.customer_subcategory }).cls;
+}
+
+/**
+ * Counter pricing on an external job that had none (page 4 of a job opened
+ * without lines) is the same skip of Steps 4–5 the New Job Card refuses —
+ * a manager's call. A job that was already priced at the counter (legacy)
+ * keeps its page 4.
+ */
+async function refuseNewCounterPricing({ user, wo, workshopId, storedLines, becomesPriced }) {
+  if (!becomesPriced || isManagerRole(user)) return;
+  const wasPriced = storedLines > 0 || Number(wo.service_fee) > 0 || Number(wo.discount) > 0;
+  if (wasPriced) return;
+  if (await jobClassOf(wo, workshopId) === 'internal') return;
+  throw new InputError('An external customer\'s job is priced on the estimate after the inspection, not at the counter.', 'PRICE_ON_ESTIMATE');
+}
+
+const staleEdit = current => new InputError(
+  'This job card was changed by someone else since you opened it. Reload it and make your changes again.',
+  'STALE_EDIT', 409, { updated_at: current.updated_at });
+
+// PUT /api/work-orders/:id — edit a job card (the Edit wizard).
+//
+// Only the fields sent change; everything else stays as it is (notes,
+// drop-off, the fleet-link details, the vehicle…). The New Job Card's rules
+// hold: the complaint and the odometer stay on record, and a vehicle is the
+// customer's own with a VIN. The customer and the vehicle can change only
+// while the job is still at intake (D9); the job cards follow. A closed job
+// is not edited, and a save made from an out-of-date copy
+// (expected_updated_at) is refused instead of overwriting someone else's
+// changes. `items`, when sent, are saved in the same transaction.
+router.put('/:id', requireCapability('job.open'), async (req, res) => {
+  let conn;
+  try {
+    const raw = req.body || {};
+    const has = k => Object.prototype.hasOwnProperty.call(raw, k);
+    refuseOverlongText(raw);
+    const body = _clean(raw);
+    const lines = has('items') ? parseLines(raw.items) : null;
+
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [[current]] = await conn.query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ? FOR UPDATE', [req.params.id, req.workshopId]);
+    if (!current) throw new InputError('Work order not found', 'NOT_FOUND', 404);
+    if (CLOSED_STATUSES.includes(current.status)) {
+      throw new InputError(`This job card is ${current.status} and can no longer be edited.`, 'JOB_CLOSED', 409);
+    }
+    if (!isBlank(raw.expected_updated_at) && stamp(raw.expected_updated_at) !== stamp(current.updated_at)) throw staleEdit(current);
+
+    // ── Customer and vehicle (D9) ──
+    const customerId = has('customer_id') ? parseId(raw.customer_id, 'Customer') : current.customer_id;
+    const vehicleId = has('vehicle_id') ? parseId(raw.vehicle_id, 'Vehicle') : current.vehicle_id;
+    const customerChanged = Number(customerId || 0) !== Number(current.customer_id || 0);
+    const vehicleChanged = Number(vehicleId || 0) !== Number(current.vehicle_id || 0);
+    if (customerChanged && !customerId) throw new InputError('A job card needs its customer.', 'CUSTOMER_REQUIRED');
+    if (vehicleChanged && !vehicleId) throw new InputError('A job card needs its vehicle (Step 2).', 'VEHICLE_REQUIRED');
+    if (customerChanged || vehicleChanged) {
+      const why = await intakeLockReason(current, req.workshopId);
+      if (why) {
+        throw new InputError(`The ${customerChanged ? 'customer' : 'vehicle'} can't be changed any more: ${why}. Raise a new job card for the other ${customerChanged ? 'customer' : 'vehicle'} instead.`,
+          'LOCKED_AFTER_ESTIMATE', 409);
+      }
+    }
+    const customer = customerChanged ? await loadCustomer(customerId, req.workshopId) : null;
+    // Ownership is checked when the pairing changes — not on every save, as
+    // thousands of imported jobs have their car on file under another account.
+    const vehicle = vehicleId && (customerChanged || vehicleChanged) ? await loadVehicle(vehicleId, req.workshopId, customerId) : null;
+    if (vehicle && !String(vehicle.vin || '').trim()) return res.status(400).json({ success: false, ...VIN_REQUIRED });
+
+    // ── Step 2: the complaint and the odometer stay on record ──
+    let complaint = current.description;
+    if (has('description')) {
+      complaint = String(body.description || '').trim();
+      if (!complaint) throw new InputError('The vehicle complaint is required.', 'COMPLAINT_REQUIRED');
+    }
+    // Optional: blank clears it, a typed reading must be valid.
+    let odometer = current.odometer_in;
+    if (has('odometer_in')) odometer = parseOdometer(raw.odometer_in);
+    else if (vehicleChanged) odometer = null; // the old car's reading does not belong to the new one
+
+    // ── The rest: what was sent, else what is stored ──
+    const pick = (k, valid) => (has(k) && valid.includes(raw[k]) ? raw[k] : current[k]);
+    const keep = (k, v = body[k]) => (has(k) ? (isBlank(v) ? null : v) : current[k]);
+    let bayId = current.service_bay_id;
+    if (has('service_bay_id')) {
+      bayId = parseId(raw.service_bay_id, 'Service bay');
+      if (bayId) {
+        const [bay] = await query('SELECT id FROM service_bays WHERE id = ? AND workshop_id = ?', [bayId, req.workshopId]);
+        if (!bay) throw new InputError('Service bay not found.', 'SERVICE_BAY_NOT_FOUND');
+      }
+    }
+    let intakeChannel = current.intake_channel;
+    if (has('intake_channel') && !isBlank(raw.intake_channel) && !['fleet_link', 'api'].includes(current.intake_channel)) {
+      if (!STAFF_INTAKE_CHANNELS.includes(raw.intake_channel)) {
+        throw new InputError('Received via must be Walk-in / phone (advisor), WhatsApp, Website or Social media.', 'INVALID_INTAKE_CHANNEL');
+      }
+      intakeChannel = raw.intake_channel;
+    }
+    // The snapshot follows the customer: a customer change takes the new
+    // record's name, phone and classification; a job with no customer
+    // record keeps what is typed.
+    let name = current.customer_name, phone = current.customer_phone, email = current.customer_email;
+    let intakeClass = current.intake_customer_class, intakeSub = current.intake_customer_subcategory, payerType = current.payer_type;
+    if (customer) {
+      name = customer.full_name; phone = phoneOf(customer, body.customer_phone); email = customer.email || null;
+      intakeClass = customer.customer_class || null; intakeSub = customer.customer_subcategory || null;
+      payerType = payerFor(intakeClass, intakeSub);
+    } else if (!current.customer_id) {
+      if (has('customer_name') && String(body.customer_name || '').trim()) name = String(body.customer_name).trim();
+      if (has('customer_phone') && String(body.customer_phone || '').trim()) phone = String(body.customer_phone).trim();
+      if (has('customer_email')) email = String(body.customer_email || '').trim() || null;
     }
 
-    // Validate ENUM fields (same whitelist as POST)
-    const VALID_WORK_ORDER_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
-    const VALID_SERVICE_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service', 'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
-    const VALID_PAY_METHODS = ['cash', 'prepaid', 'credit', 'wallet'];
-
-    const _work_order_type = (!work_order_type || !VALID_WORK_ORDER_TYPES.includes(work_order_type)) ? 'standard' : work_order_type;
-    const _service_category = (!service_category || !VALID_SERVICE_CATEGORIES.includes(service_category)) ? 'general_maintenance' : service_category;
-    const _payment_method = (!payment_method || !VALID_PAY_METHODS.includes(payment_method)) ? 'cash' : payment_method;
-
-    // Coerce numeric fields (same as POST)
-    const _cash_amount = cash_amount === '' || cash_amount == null ? 0 : parseFloat(cash_amount) || 0;
-    const _service_fee = service_fee === '' || service_fee == null ? 0 : parseFloat(service_fee) || 0;
-    const _discount     = discount     === '' || discount     == null ? 0 : parseFloat(discount)     || 0;
-
-    if (_cash_amount > 99999999) return res.status(400).json({ success: false, message: 'Cash amount is too large' });
-    if (_service_fee > 99999999) return res.status(400).json({ success: false, message: 'Service fee is too large' });
-    if (_discount > 99999999)    return res.status(400).json({ success: false, message: 'Discount is too large' });
-
-    const total_amount = _cash_amount + _service_fee - _discount;
+    // ── Money ──
+    const fee = has('service_fee') ? parseMoney(raw.service_fee, 'Service fee') : Number(current.service_fee) || 0;
+    const disc = has('discount') ? parseMoney(raw.discount, 'Discount') : Number(current.discount) || 0;
+    const cash = has('cash_amount') ? parseMoney(raw.cash_amount, 'Cash amount') : Number(current.cash_amount) || 0;
+    const [stored] = await conn.query('SELECT id, name, quantity, unit_price, notes, item_type FROM work_order_items WHERE work_order_id = ? ORDER BY id', [current.id]);
+    const diff = lines ? diffLines(stored, lines) : null;
+    const subtotal = current.billing_basis === 'itemised' ? fee + linesTotal(lines || stored) : fee;
+    if (disc > subtotal + 0.001) throw new InputError('The discount is more than the job card\'s subtotal.', 'DISCOUNT_TOO_LARGE');
+    await refuseNewCounterPricing({ user: req.user, wo: current, workshopId: req.workshopId, storedLines: stored.length,
+      becomesPriced: (diff?.add.length || 0) > 0 || fee > 0 || disc > 0 });
+    const moneyChanged = Number(current.service_fee) !== fee || Number(current.discount) !== disc || !!diff?.changed;
+    if (moneyChanged && await lockedInvoiceFor(current, req.workshopId)) {
+      throw new InputError(INVOICE_LOCKED_MESSAGE, 'INVOICE_LOCKED', 409);
+    }
 
     // ── Financial Engine: commission, VAT, net payout ──
     let finConfig;
     try { finConfig = await getFinancialConfig(req.workshopId); } catch { finConfig = { commissionPercent: 0, vatEnabled: false, vatRate: 0, vatNumber: '', applyVatOnServiceFee: true, applyVatOnCash: false }; }
-    const fin = computeWorkOrderFinancials({
-      serviceFee: _service_fee,
-      discount: _discount,
-      cashAmount: _cash_amount,
-      config: finConfig,
-    });
+    const fin = computeWorkOrderFinancials({ serviceFee: fee, discount: disc, cashAmount: cash, config: finConfig });
+    const serviceCategory = pick('service_category', VALID_SERVICE_CATEGORIES);
 
-    await execute(
+    await conn.query(
       `UPDATE work_orders SET
-        vehicle_id=?, service_bay_id=?, work_order_type=?, service_category=?,
+        customer_id=?, vehicle_id=?, service_bay_id=?, work_order_type=?, service_category=?,
         customer_name=?, customer_phone=?, customer_email=?,
+        intake_customer_class=?, intake_customer_subcategory=?, payer_type=?,
         dropoff_address=?, dropoff_lat=?, dropoff_lng=?,
-        description=?, special_instructions=?, payment_method=?,
+        description=?, special_instructions=?, payment_method=?, odometer_in=?, intake_channel=?,
         cash_amount=?, service_fee=?, discount=?, total_amount=?,
         commission_rate=?, commission_amount=?, vat_rate=?, vat_amount=?, platform_fee=?, net_payable=?,
         scheduled_at=?, notes=?
        WHERE id = ? AND workshop_id = ?`,
-      [vehicle_id || null, service_bay_id || null, _work_order_type, _service_category,
-       customer_name, customer_phone, customer_email || null,
-       dropoff_address || null, dropoff_lat || null, dropoff_lng || null,
-       description || null, special_instructions || null, _payment_method,
-       _cash_amount, _service_fee, _discount, fin.totalAmount,
+      [customerId, vehicleId, bayId, pick('work_order_type', VALID_WORK_ORDER_TYPES), serviceCategory,
+       name, phone, email,
+       intakeClass, intakeSub, payerType,
+       keep('dropoff_address'), keep('dropoff_lat', raw.dropoff_lat), keep('dropoff_lng', raw.dropoff_lng),
+       complaint, keep('special_instructions'), pick('payment_method', VALID_PAY_METHODS), odometer, intakeChannel,
+       cash, fee, disc, fin.totalAmount,
        fin.commissionRate, fin.commissionAmount, fin.vatRate, fin.vatAmount, fin.platformFee, fin.netPayable,
-       scheduled_at || null, notes || null, req.params.id, req.workshopId]
+       keep('scheduled_at', raw.scheduled_at), keep('notes'), current.id, req.workshopId]
     );
+    if (diff?.changed) await writeLines(conn, current.id, diff);
 
-    const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: workOrder });
-  } catch (err) {
-    console.error('[WorkOrders] Update error:', err);
-    let msg = 'Failed to update work order';
-    if (err.code === 'ER_WARN_DATA_OUT_OF_RANGE') {
-      msg = 'One or more numeric values are out of range.';
-    } else if (err.code === 'WARN_DATA_TRUNCATED') {
-      msg = 'Invalid value for one or more fields. Please check work order type, category, and payment method.';
+    // The job cards follow the work order: customer, car and plate, bay —
+    // main and sub cards alike, unless already billed or cancelled.
+    const jcSet = [], jcVals = [];
+    if (customerChanged) { jcSet.push('customer_id = ?'); jcVals.push(customerId); }
+    if (vehicleChanged) { jcSet.push('vehicle_id = ?', 'vehicle_plate = ?'); jcVals.push(vehicleId, vehicle?.plate_number || null); }
+    if (Number(bayId || 0) !== Number(current.service_bay_id || 0)) { jcSet.push('service_bay_id = ?'); jcVals.push(bayId); }
+    if (jcSet.length) {
+      await conn.query(`UPDATE job_cards SET ${jcSet.join(', ')} WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('billed','cancelled')`,
+        [...jcVals, current.id, req.workshopId]);
     }
-    return res.status(500).json({ success: false, message: msg });
+    if (serviceCategory !== current.service_category) {
+      await conn.query(
+        "UPDATE job_cards SET department = ? WHERE work_order_id = ? AND workshop_id = ? AND parent_job_card_id IS NULL AND status = 'open'",
+        [departmentFor(serviceCategory), current.id, req.workshopId]);
+    }
+    if (customerChanged) {
+      // An invoice raised at 'confirmed' (unpaid — a paid one locks the change above).
+      await conn.query(
+        "UPDATE invoices SET customer_id = ? WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('void','cancelled','paid','partially_paid') AND COALESCE(amount_paid, 0) = 0",
+        [customerId, current.id, req.workshopId]);
+    }
+
+    // The vehicle's odometer: raised to the reading, never wound back — except
+    // to undo this job's own typo (the vehicle still holds the old reading).
+    if (vehicleId && odometer != null && (vehicleChanged || odometer !== current.odometer_in)) {
+      await conn.query('UPDATE vehicles SET mileage = ? WHERE id = ? AND workshop_id = ? AND (mileage IS NULL OR mileage < ?)',
+        [odometer, vehicleId, req.workshopId, odometer]);
+      if (!vehicleChanged && current.odometer_in != null && odometer < current.odometer_in) {
+        await conn.query('UPDATE vehicles SET mileage = ? WHERE id = ? AND workshop_id = ? AND mileage = ?',
+          [odometer, vehicleId, req.workshopId, current.odometer_in]);
+      }
+    }
+
+    // History: intake corrections are part of the job's story.
+    const changes = [];
+    if (customerChanged) changes.push(`customer changed from ${current.customer_name || '—'} to ${name}`);
+    if (vehicleChanged) changes.push(`vehicle changed to ${vehicle?.plate_number || `#${vehicleId}`}`);
+    if (odometer !== current.odometer_in && !vehicleChanged) changes.push(`odometer corrected from ${current.odometer_in ?? '—'} to ${odometer} km`);
+    if (changes.length) {
+      await conn.query('INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
+        [current.id, current.status, req.user.id, `Job card edited: ${changes.join('; ')}`]);
+    }
+
+    await conn.commit();
+    conn.release(); conn = null;
+
+    if (changes.length) {
+      logAudit({
+        workshopId: req.workshopId, userId: req.user.id, action: 'WORK_ORDER_INTAKE_EDIT', entityType: 'work_orders', entityId: current.id,
+        oldValue: { customer_id: current.customer_id, vehicle_id: current.vehicle_id, odometer_in: current.odometer_in },
+        newValue: { customer_id: customerId, vehicle_id: vehicleId, odometer_in: odometer },
+      }).catch(e => console.error('[WorkOrders] edit audit:', e.message));
+    }
+    const billing = await syncJobCardBilling(current.id, req.workshopId);
+    const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [current.id]);
+    return res.json({ success: true, data: workOrder, billing, ...(diff ? { lines_changed: diff.changed } : {}) });
+  } catch (err) {
+    if (conn) await conn.rollback().catch(() => {});
+    if (err instanceof InputError) return sendError(res, err);
+    console.error('[WorkOrders] Update error:', err);
+    const [http, payload] = dbErrorStatus(err, 'Failed to update work order');
+    return res.status(http).json(payload);
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// PATCH /api/work-orders/:id/customer-approval — record how the customer agreed
+// Body: { channel: 'in_person' | 'phone' | 'written', note }
+// Allowed again only when the job card has grown past the total the customer
+// last agreed to — that is re-approval of the extra work, not a duplicate.
+router.patch('/:id/customer-approval', requireCapability('customer.approval'), async (req, res) => {
+  try {
+    const { channel, note } = req.body || {};
+    if (!CUSTOMER_APPROVAL_CHANNELS.includes(channel)) {
+      return res.status(400).json({ success: false, message: 'channel must be in_person, phone or written' });
+    }
+    const [wo] = await query(
+      'SELECT id, status, customer_approved_at, customer_approved_total FROM work_orders WHERE id = ? AND workshop_id = ?',
+      [req.params.id, req.workshopId]
+    );
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (['completed', 'cancelled'].includes(wo.status)) {
+      return res.status(400).json({ success: false, message: `This job card is ${wo.status}.` });
+    }
+    // An approval of nothing (no lines, no fee) would open the "no work
+    // without approval" gate before any inspection or estimate.
+    if (await nothingToApprove(wo.id, req.workshopId)) return res.status(409).json({ success: false, ...NOTHING_TO_APPROVE });
+    await syncJobCardBilling(wo.id, req.workshopId);
+    const [fresh] = await query('SELECT total_amount FROM work_orders WHERE id = ?', [wo.id]);
+    if (wo.customer_approved_at && Number(fresh.total_amount) <= Number(wo.customer_approved_total)) {
+      return res.status(409).json({ success: false, message: 'The customer has already approved this job card at its current total.' });
+    }
+    await recordCustomerApproval({ workOrderId: wo.id, workshopId: req.workshopId, channel, note, userId: req.user.id });
+    await onWorkApproved({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id, how: channel.replace('_', ' ') });
+    await logAudit({
+      workshopId: req.workshopId, userId: req.user.id, action: 'CUSTOMER_APPROVAL', entityType: 'work_orders',
+      entityId: wo.id, oldValue: wo.customer_approved_total, newValue: { channel, total: fresh.total_amount, note: note || null },
+    });
+    const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [wo.id]);
+    return res.json({ success: true, message: 'Customer approval recorded', data: workOrder });
+  } catch (err) {
+    console.error('[WorkOrders] Customer approval error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to record customer approval' });
   }
 });
 
@@ -1292,55 +1983,132 @@ router.get('/:id/items', async (req, res) => {
   }
 });
 
-// POST /api/work-orders/:id/items — add item to a work order
-router.post('/:id/items', async (req, res) => {
+// Item and price changes on an itemised job card flow straight to its
+// invoice — unless that invoice has already taken money. Then the change is
+// refused: accepting it would leave the job card and the bill disagreeing,
+// which is exactly how extra work used to go unbilled.
+const INVOICE_LOCKED_MESSAGE =
+  'This job card\'s invoice is already paid, so its lines and prices are locked. Raise the extra work as a new job card.';
+
+async function lockedInvoiceFor(workOrder, workshopId) {
+  if (workOrder.billing_basis !== 'itemised') return null;
+  const inv = await getInvoiceForWorkOrder(workOrder.id, workshopId);
+  return isInvoiceLocked(inv) ? inv : null;
+}
+
+// PUT /api/work-orders/:id/items — save the job card's lines in one go.
+// Body: { items: [{ id?, name, quantity, unit_price, notes, item_type? }], expected_updated_at? }
+// Lines sent back with their id are updated in place (they keep their
+// sub-job card and estimate-line link), new lines are added and lines not
+// sent are removed — all in one transaction. A save that changes nothing
+// changes nothing. The form used to delete each line and re-add them one
+// request at a time, swallowing failures; on an itemised job card the lines
+// ARE the bill, so a half-finished save silently dropped charges.
+router.put('/:id/items', requireCapability('job.open'), async (req, res) => {
+  if (!Array.isArray(req.body?.items)) return res.status(400).json({ success: false, message: 'items array required' });
+  let conn;
   try {
-    const [workOrder] = await query('SELECT id FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
-    if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
-    const { name, quantity = 1, unit_price = 0, notes } = req.body;
-    if (!name) return res.status(400).json({ success: false, message: 'Item name required' });
-    const result = await execute(
-      'INSERT INTO work_order_items (work_order_id, name, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?)',
-      [req.params.id, name, parseInt(quantity) || 1, parseFloat(unit_price) || 0, notes || null]
-    );
-    const [item] = await query('SELECT * FROM work_order_items WHERE id = ?', [result.insertId]);
-    return res.status(201).json({ success: true, data: item });
+    const lines = parseLines(req.body.items);
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [[workOrder]] = await conn.query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ? FOR UPDATE', [req.params.id, req.workshopId]);
+    if (!workOrder) throw new InputError('Work order not found', 'NOT_FOUND', 404);
+    if (CLOSED_STATUSES.includes(workOrder.status)) {
+      throw new InputError(`This job card is ${workOrder.status} and can no longer be edited.`, 'JOB_CLOSED', 409);
+    }
+    const [stored] = await conn.query('SELECT id, name, quantity, unit_price, notes, item_type FROM work_order_items WHERE work_order_id = ? ORDER BY id', [workOrder.id]);
+    const diff = diffLines(stored, lines);
+    if (diff.changed) {
+      if (!isBlank(req.body.expected_updated_at) && stamp(req.body.expected_updated_at) !== stamp(workOrder.updated_at)) throw staleEdit(workOrder);
+      if (await lockedInvoiceFor(workOrder, req.workshopId)) throw new InputError(INVOICE_LOCKED_MESSAGE, 'INVOICE_LOCKED', 409);
+      await refuseNewCounterPricing({ user: req.user, wo: workOrder, workshopId: req.workshopId, storedLines: stored.length, becomesPriced: diff.add.length > 0 });
+      await writeLines(conn, workOrder.id, diff);
+    }
+    await conn.commit();
+    conn.release(); conn = null;
+    const billing = diff.changed ? await syncJobCardBilling(workOrder.id, req.workshopId) : null;
+    const saved = await query('SELECT * FROM work_order_items WHERE work_order_id = ? ORDER BY id', [workOrder.id]);
+    const [fresh] = await query('SELECT updated_at FROM work_orders WHERE id = ?', [workOrder.id]);
+    return res.json({ success: true, data: saved, billing, unchanged: !diff.changed, updated_at: fresh?.updated_at });
   } catch (err) {
+    if (conn) await conn.rollback().catch(() => {});
+    if (err instanceof InputError) return sendError(res, err);
+    console.error('[WorkOrders] Replace items error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save the job card lines' });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /api/work-orders/:id/items — add item to a work order
+router.post('/:id/items', requireCapability('job.open'), async (req, res) => {
+  try {
+    const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (!String(req.body?.name || '').trim()) return res.status(400).json({ success: false, message: 'Item name required' });
+    const [line] = parseLines([req.body]);
+    if (await lockedInvoiceFor(workOrder, req.workshopId)) {
+      return res.status(409).json({ success: false, code: 'INVOICE_LOCKED', message: INVOICE_LOCKED_MESSAGE });
+    }
+    const [{ n }] = await query('SELECT COUNT(*) AS n FROM work_order_items WHERE work_order_id = ?', [workOrder.id]);
+    await refuseNewCounterPricing({ user: req.user, wo: workOrder, workshopId: req.workshopId, storedLines: Number(n), becomesPriced: true });
+    const result = await execute(
+      'INSERT INTO work_order_items (work_order_id, name, item_type, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?, ?)',
+      [workOrder.id, line.name, line.item_type, line.quantity, line.unit_price, line.notes]
+    );
+    const billing = await syncJobCardBilling(req.params.id, req.workshopId);
+    const [item] = await query('SELECT * FROM work_order_items WHERE id = ?', [result.insertId]);
+    return res.status(201).json({ success: true, data: item, billing });
+  } catch (err) {
+    if (err instanceof InputError) return sendError(res, err);
+    console.error('[WorkOrders] Add item error:', err);
     return res.status(500).json({ success: false, message: 'Failed to add item' });
   }
 });
 
 // PUT /api/work-orders/:id/items/:itemId — update a work order item
-router.put('/:id/items/:itemId', async (req, res) => {
+router.put('/:id/items/:itemId', requireCapability('job.open'), async (req, res) => {
   try {
-    const [workOrder] = await query('SELECT id FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    const [workOrder] = await query('SELECT id, billing_basis FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
-    const { name, quantity, unit_price, notes } = req.body;
+    if (await lockedInvoiceFor(workOrder, req.workshopId)) {
+      return res.status(409).json({ success: false, code: 'INVOICE_LOCKED', message: INVOICE_LOCKED_MESSAGE });
+    }
+    if (!String(req.body?.name || '').trim()) return res.status(400).json({ success: false, message: 'Item name required' });
+    const [line] = parseLines([req.body]);
     await execute(
-      'UPDATE work_order_items SET name=?, quantity=?, unit_price=?, notes=? WHERE id = ? AND work_order_id = ?',
-      [name, parseInt(quantity) || 1, parseFloat(unit_price) || 0, notes || null, req.params.itemId, req.params.id]
+      'UPDATE work_order_items SET name=?, quantity=?, unit_price=?, notes=?, item_type = COALESCE(?, item_type) WHERE id = ? AND work_order_id = ?',
+      [line.name, line.quantity, line.unit_price, line.notes, line.item_type, req.params.itemId, req.params.id]
     );
+    const billing = await syncJobCardBilling(req.params.id, req.workshopId);
     const [item] = await query('SELECT * FROM work_order_items WHERE id = ?', [req.params.itemId]);
-    return res.json({ success: true, data: item });
+    return res.json({ success: true, data: item, billing });
   } catch (err) {
+    if (err instanceof InputError) return sendError(res, err);
+    console.error('[WorkOrders] Update item error:', err);
     return res.status(500).json({ success: false, message: 'Failed to update item' });
   }
 });
 
 // DELETE /api/work-orders/:id/items/:itemId — remove a work order item
-router.delete('/:id/items/:itemId', async (req, res) => {
+router.delete('/:id/items/:itemId', requireCapability('job.open'), async (req, res) => {
   try {
-    const [workOrder] = await query('SELECT id FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    const [workOrder] = await query('SELECT id, billing_basis FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (await lockedInvoiceFor(workOrder, req.workshopId)) {
+      return res.status(409).json({ success: false, code: 'INVOICE_LOCKED', message: INVOICE_LOCKED_MESSAGE });
+    }
     await execute('DELETE FROM work_order_items WHERE id = ? AND work_order_id = ?', [req.params.itemId, req.params.id]);
-    return res.json({ success: true, message: 'Item removed' });
+    const billing = await syncJobCardBilling(req.params.id, req.workshopId);
+    return res.json({ success: true, message: 'Item removed', billing });
   } catch (err) {
+    console.error('[WorkOrders] Remove item error:', err);
     return res.status(500).json({ success: false, message: 'Failed to remove item' });
   }
 });
 
 // DELETE /api/work-orders/:id — soft-delete (archive) a work order
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireManager, async (req, res) => {
   try {
     const [workOrder] = await query(
       "SELECT id, status FROM work_orders WHERE id = ? AND workshop_id = ?",

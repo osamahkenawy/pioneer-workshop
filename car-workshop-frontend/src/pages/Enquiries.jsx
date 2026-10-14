@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useContext } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Search, Plus, Xmark, WarningTriangle, CheckCircle, Phone, Clock,
-  StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar,
+  StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar, Page,
 } from 'iconoir-react';
 import api from '../lib/api';
+import { AuthContext } from '../context/AuthContext';
+import { canDo } from '../lib/permissions';
 
 /**
  * Enquiries — journey stages 01-02.
@@ -46,7 +49,7 @@ const TIERS = {
 };
 
 const PAYERS = { self_pay: 'Self-pay', insurance: 'Insurance', corporate: 'Corporate', fleet: 'Fleet' };
-const CONTACT_METHODS = { phone: 'Phone', whatsapp: 'WhatsApp', website_form: 'Website form', walk_in: 'Walk-in', partner_handoff: 'Partner hand-off', email: 'Email' };
+const CONTACT_METHODS = { phone: 'Phone', whatsapp: 'WhatsApp', website_form: 'Website form', walk_in: 'Walk-in', partner_handoff: 'Partner hand-off', email: 'Email', reminder: 'Reply to a service reminder', referral: 'Referral' };
 const ENQUIRY_TYPES = { service: 'Service', repair: 'Repair', diagnostic: 'Diagnostic', bodywork: 'Bodywork', accident: 'Accident', other: 'Other' };
 const LOST_REASONS = { price: 'Price', timing: 'Timing / lead time', location: 'Location', went_elsewhere: 'Went elsewhere', no_response: 'No response', not_needed: 'No longer needed', other: 'Other' };
 
@@ -93,6 +96,23 @@ export default function Enquiries() {
   const [editing, setEditing] = useState(null);
   const [lostFor, setLostFor] = useState(null);
   const [convertFor, setConvertFor] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const navigate = useNavigate();
+  const { user } = useContext(AuthContext) || {};
+  const mayQuote = canDo(user, 'estimate.raise');
+  const mayBook = canDo(user, 'job.open');
+
+  // Quote (CRM stage 04): link or create the customer and vehicle from the
+  // enquiry, then open the estimate form already filled in.
+  const quote = async (r) => {
+    setBusyId(r.id);
+    try {
+      const res = await api.post(`/enquiries/${r.id}/prepare-quote`);
+      if (!res.success) { setError(res.message || 'Could not prepare the quote'); return; }
+      navigate(`/estimates?new=1&enquiry=${r.id}`);
+    } catch { setError('Network error — please try again'); }
+    finally { setBusyId(null); }
+  };
 
   const fetchRows = useCallback(async () => {
     try {
@@ -122,6 +142,20 @@ export default function Enquiries() {
   }, [fetchRows, fetchStats]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // ?id=<enquiry> (links from Bookings, Tasks) opens that enquiry.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    const id = params.get('id');
+    if (!id) return;
+    const next = new URLSearchParams(params); next.delete('id'); setParams(next, { replace: true });
+    (async () => {
+      try {
+        const res = await api.get(`/enquiries/${encodeURIComponent(id)}`);
+        if (res.success && res.data) { setEditing(res.data); setShowForm(true); }
+      } catch { /* the list is still there */ }
+    })();
+  }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const t = stats?.totals || {};
   const pending = (Number(t.new_count) || 0) + (Number(t.quoted) || 0);
@@ -169,6 +203,29 @@ export default function Enquiries() {
         <KPICard icon={CheckCircle} label="Converted" value={t.converted ?? 0} sub={`${conversionRate}% conversion`} color="#16a34a" />
         <KPICard icon={Clock} label="In nurture" value={t.nurture ?? 0} sub="Re-offer scheduled" color="#7c3aed" />
       </div>
+
+      {/* The cycle as a funnel: enquiry → quoted → booked → job → completed */}
+      {stats?.funnel?.total?.enquiries > 0 && (() => {
+        const f = stats.funnel.total;
+        const steps = [['Enquiries', f.enquiries], ['Quoted', f.quoted], ['Booked', f.booked], ['Job opened', f.jobs], ['Completed', f.completed]];
+        return (
+          <div style={{ background: '#fff', borderRadius: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', padding: '16px 18px', marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <ArrowRight width={18} height={18} color={ORANGE} />
+              <h3 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: '#1e293b' }}>From enquiry to completed job</h3>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: 10 }}>
+              {steps.map(([label, n], i) => (
+                <div key={label} style={{ background: i === 0 ? '#eef2f9' : '#f8fafc', borderRadius: 12, padding: '10px 12px', border: '1px solid #e2e8f0' }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748b' }}>{label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 900, color: NAVY }}>{Number(n) || 0}</div>
+                  {i > 0 && <div style={{ fontSize: 11, color: '#94a3b8' }}>{f.enquiries ? Math.round(100 * (Number(n) || 0) / f.enquiries) : 0}% of enquiries</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Conversion by channel — the reason source is captured at all */}
       {stats?.by_channel?.length > 0 && (
@@ -302,6 +359,16 @@ export default function Enquiries() {
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                         {r.status !== 'converted' && (
                           <>
+                            {mayQuote && (
+                              <button onClick={() => quote(r)} disabled={busyId === r.id} style={{ ...st.smallBtn, background: '#fff7ed', color: '#c2410c', borderColor: '#fed7aa' }} title="Raise an estimate for this enquiry">
+                                <Page width={13} height={13} /> {busyId === r.id ? '…' : 'Quote'}
+                              </button>
+                            )}
+                            {mayBook && (
+                              <button onClick={() => navigate(`/appointments?new=1&enquiry=${r.id}`)} style={{ ...st.smallBtn, background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }} title="Book a visit">
+                                <Calendar width={13} height={13} /> Book
+                              </button>
+                            )}
                             <button onClick={() => setConvertFor(r)} style={{ ...st.smallBtn, background: '#f0fdf4', color: '#16a34a', borderColor: '#bbf7d0' }} title="Convert to work order">
                               <ArrowRight width={13} height={13} /> Convert
                             </button>
@@ -353,6 +420,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
     contact_phone: enquiry?.contact_phone || '',
     contact_email: enquiry?.contact_email || '',
     vehicle_description: enquiry?.vehicle_description || '',
+    vehicle_plate: enquiry?.vehicle_plate || '',
     enquiry_type: enquiry?.enquiry_type || 'service',
     service_tier: enquiry?.service_tier || '',
     description: enquiry?.description || '',
@@ -371,7 +439,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
 
   const submit = async () => {
     if (!f.contact_name.trim()) { setErr('Contact name is required.'); return; }
-    if (!f.contact_phone.trim()) { setErr('Contact phone is required.'); return; }
+    if (!String(f.contact_phone || '').trim() && !String(f.contact_email || '').trim()) { setErr('A phone number or an e-mail is required.'); return; }
     if (!f.source_channel) { setErr('Select how this enquiry reached you — it is what makes conversion measurable.'); return; }
     setSaving(true); setErr('');
     try {
@@ -402,11 +470,15 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Field label="Contact name *"><input style={st.input} value={f.contact_name} onChange={e => set('contact_name', e.target.value)} placeholder="Full name" /></Field>
-            <Field label="Phone *"><input style={st.input} value={f.contact_phone} onChange={e => set('contact_phone', e.target.value)} placeholder="+971 50 000 0000" /></Field>
+            <Field label="Phone"><input style={st.input} value={f.contact_phone || ''} onChange={e => set('contact_phone', e.target.value)} placeholder="+971 50 000 0000" /></Field>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Field label="Email"><input style={st.input} value={f.contact_email} onChange={e => set('contact_email', e.target.value)} placeholder="Optional" /></Field>
-            <Field label="Vehicle"><input style={st.input} value={f.vehicle_description} onChange={e => set('vehicle_description', e.target.value)} placeholder="e.g. Toyota Camry 2021, A 12345" /></Field>
+            <Field label="Vehicle"><input style={st.input} value={f.vehicle_description} onChange={e => set('vehicle_description', e.target.value)} placeholder="e.g. Toyota Camry 2021" /></Field>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Field label="Plate number" hint="Links the enquiry to the car on file, or adds it when you quote"><input style={st.input} value={f.vehicle_plate} onChange={e => set('vehicle_plate', e.target.value.toUpperCase())} placeholder="e.g. A 12345" /></Field>
+            <div />
           </div>
 
           <div style={{ height: 1, background: '#f1f5f9', margin: '4px 0' }} />

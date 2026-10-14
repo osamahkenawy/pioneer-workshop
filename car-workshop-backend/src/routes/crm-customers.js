@@ -290,6 +290,38 @@ async function buildTimeline(workshopId, customerId, limit = 40, offset = 0) {
     });
   }
 
+  // Quotes and bookings — the Quote and Book stages of the cycle.
+  const estimates = await query(
+    `SELECT id, estimate_number, status, total_amount, vehicle_plate, created_at
+       FROM service_estimates WHERE workshop_id = ? AND customer_id = ?
+      ORDER BY created_at DESC LIMIT ?`,
+    [workshopId, customerId, window]
+  ).catch(() => []);
+  for (const e of estimates) {
+    events.push({
+      kind: 'estimate', id: e.id, at: e.created_at,
+      title: `Estimate ${e.estimate_number}`,
+      detail: e.vehicle_plate || null,
+      meta: { status: e.status, amount: e.total_amount },
+    });
+  }
+  const bookings = await query(
+    `SELECT a.id, a.appointment_date, a.appointment_time, a.status, a.service_category, a.created_at, v.plate_number
+       FROM appointments a LEFT JOIN vehicles v ON v.id = a.vehicle_id
+      WHERE a.workshop_id = ? AND a.customer_id = ?
+      ORDER BY a.created_at DESC LIMIT ?`,
+    [workshopId, customerId, window]
+  ).catch(() => []);
+  for (const b of bookings) {
+    const day = b.appointment_date instanceof Date ? b.appointment_date.toISOString().slice(0, 10) : String(b.appointment_date).slice(0, 10);
+    events.push({
+      kind: 'booking', id: b.id, at: b.created_at,
+      title: `Booked for ${day} ${String(b.appointment_time || '').slice(0, 5)}`.trim(),
+      detail: [b.service_category && String(b.service_category).replace(/_/g, ' '), b.plate_number].filter(Boolean).join(' · ') || null,
+      meta: { status: b.status },
+    });
+  }
+
   events.sort((a, b) => new Date(b.at) - new Date(a.at));
   return { total: events.length, events: events.slice(offset, offset + limit) };
 }

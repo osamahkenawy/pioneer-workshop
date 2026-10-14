@@ -12,13 +12,14 @@ export function connectSocket(workshopId) {
     socket = io('/', {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
-      auth: { token: getToken() },
+      // A function, so every reconnect sends the token current at that moment
+      auth: (cb) => cb({ token: getToken() }),
       autoConnect: true,
     });
-  }
-  if (workshopId) {
-    if (socket.connected) socket.emit('join-workshop', workshopId);
-    else socket.once('connect', () => socket.emit('join-workshop', workshopId));
+    // The server joins the user and workshop rooms from the token itself
+    // (lib/socket.js). It never handled the 'join-workshop'/'join-user'
+    // events this used to send, so rooms are not chosen by the client.
+    socket.on('connect', () => socket.emit('authenticate', { token: getToken() }));
   }
   return socket;
 }

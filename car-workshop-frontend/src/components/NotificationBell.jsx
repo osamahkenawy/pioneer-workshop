@@ -1,14 +1,16 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
   Bell, BellNotification, Check, CheckCircle, WarningTriangle,
-  Xmark, Package, DeliveryTruck, MapPin, Mail,
-  Clock, User, Settings,
+  Xmark, Package, MapPin, Mail,
+  Clock, User, Settings, Wrench, Car, Search, ClipboardCheck, PageEdit, EditPencil, Truck,
 } from 'iconoir-react';
 import { useTranslation } from 'react-i18next';
 import api from '../lib/api';
 import { getSocket } from '../lib/socketClient';
+import { AuthContext } from '../context/AuthContext';
+import { isTechnician, isManager } from '../lib/modules';
 
 /* ── helpers ──────────────────────────────────────────────── */
 // MySQL DATETIME/TIMESTAMP comes back as 'YYYY-MM-DD HH:MM:SS' with no
@@ -53,24 +55,86 @@ const TYPE_CONFIG = {
   error:      { Icon: Xmark,           color: '#dc2626', bg: '#fef2f2' },
   order:      { Icon: Package,         color: '#3b82f6', bg: '#eff6ff' },
   order_update: { Icon: Package,       color: '#f97316', bg: '#fff7ed' },
-  mechanic:     { Icon: DeliveryTruck,   color: '#8b5cf6', bg: '#f5f3ff' },
+  mechanic:     { Icon: Wrench,          color: '#8b5cf6', bg: '#f5f3ff' },
   assignment: { Icon: MapPin,          color: '#0d9488', bg: '#f0fdfa' },
   delivery:   { Icon: Mail,            color: '#3bb4e8', bg: '#fdf2f8' },
+  // Steps 1–7 (lib/workflow.js, lib/notify.js, lib/workflow-sync.js, lib/job-delay-checker.js)
+  workflow:                      { Icon: Bell,            color: '#6366f1', bg: '#eef2ff' },
+  workflow_assigned:             { Icon: Wrench,          color: '#7c3aed', bg: '#f5f3ff' },
+  workflow_request_raised:       { Icon: ClipboardCheck,  color: '#2563eb', bg: '#eff6ff' },
+  workflow_work_approved:        { Icon: CheckCircle,     color: '#16a34a', bg: '#ecfdf5' },
+  workflow_job_done:             { Icon: Search,          color: '#7c3aed', bg: '#f5f3ff' },
+  workflow_qc_failed:            { Icon: WarningTriangle, color: '#dc2626', bg: '#fef2f2' },
+  workflow_ready_for_collection: { Icon: Car,             color: '#c2410c', bg: '#fff7ed' },
+  workflow_ready_for_delivery:   { Icon: Car,             color: '#c2410c', bg: '#fff7ed' }, // older rows
+  workflow_closed:               { Icon: CheckCircle,     color: '#15803d', bg: '#f0fdf4' },
+  workflow_cancelled:            { Icon: Xmark,           color: '#64748b', bg: '#f1f5f9' },
+  workflow_sub_jc:               { Icon: Wrench,          color: '#0d9488', bg: '#f0fdfa' },
+  workflow_requisition:          { Icon: Package,         color: '#2563eb', bg: '#eff6ff' },
+  workflow_parts_issued:         { Icon: Package,         color: '#0d9488', bg: '#f0fdfa' },
+  workflow_part_eta:             { Icon: Clock,           color: '#b45309', bg: '#fffbeb' },
+  workflow_price_parts:          { Icon: PageEdit,        color: '#2563eb', bg: '#eff6ff' },
+  workflow_parts_priced:         { Icon: PageEdit,        color: '#16a34a', bg: '#ecfdf5' },
+  inspection_signed:             { Icon: EditPencil,      color: '#16a34a', bg: '#ecfdf5' },
+  fleet_intake_submitted:        { Icon: Truck,           color: '#2563eb', bg: '#eff6ff' },
+  job_delay:                     { Icon: Clock,           color: '#b45309', bg: '#fffbeb' },
+  job_delay_qc:                  { Icon: Search,          color: '#b45309', bg: '#fffbeb' },
+  job_delay_collection:          { Icon: Car,             color: '#b45309', bg: '#fffbeb' },
 };
 
 /* ── icon-name–to-Component fallback map (for backend icon field) */
 const ICON_NAME_MAP = {
   clock: Clock, check: CheckCircle, user: User, package: Package,
-  truck: DeliveryTruck, delivery: CheckCircle, error: Xmark,
-  returned: DeliveryTruck, cancelled: Xmark, assignment: MapPin,
+  truck: Car, delivery: CheckCircle, error: Xmark,
+  returned: Car, cancelled: Xmark, assignment: MapPin,
 };
 
+/**
+ * Many workflow types carry the record id so each event is its own dedup key
+ * (workflow_job_done_748, workflow_sub_jc_335_assigned, workflow_part_eta_alert_12):
+ * look them up without the ids, then by the longest known prefix.
+ */
+function typeConfig(type) {
+  const t = String(type || '');
+  if (TYPE_CONFIG[t]) return TYPE_CONFIG[t];
+  const bare = t.replace(/_\d+(?=_|$)/g, '');
+  if (TYPE_CONFIG[bare]) return TYPE_CONFIG[bare];
+  const prefix = Object.keys(TYPE_CONFIG)
+    .filter(k => k.includes('_') && bare.startsWith(`${k}_`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (prefix) return TYPE_CONFIG[prefix];
+  return t.startsWith('workflow') ? TYPE_CONFIG.workflow : TYPE_CONFIG.info;
+}
+
 function getNotifConfig(n) {
-  const cfg = TYPE_CONFIG[n.type] || TYPE_CONFIG.info;
+  const cfg = typeConfig(n.type);
   if (n.icon && ICON_NAME_MAP[n.icon]) {
     return { ...cfg, Icon: ICON_NAME_MAP[n.icon] };
   }
   return cfg;
+}
+
+/**
+ * Where a notification opens for a technician. They use the technician app
+ * (/mechanic…), never the staff work order pages, which show prices and call
+ * staff-only APIs. The server already links into the app; this covers older
+ * notifications and any caller that still sends a staff link.
+ *   /work-orders/:id            → /mechanic?wo=:id (My Jobs opens my card on it)
+ *   /work-orders/:id/inspection → /mechanic (the Service Advisor's inspection)
+ *   /mechanic/orders, /mechanic/work-orders, /mechanic/dashboard → /mechanic
+ *   /mechanic, /mechanic/jobs/:id, … → kept
+ *   any other staff page        → /mechanic
+ */
+function technicianLink(link, workOrderId) {
+  if (!link) return workOrderId ? `/mechanic?wo=${workOrderId}` : '/mechanic';
+  const [path, query = ''] = String(link).split('?');
+  const keepQuery = query ? `?${query}` : '';
+  if (/^\/work-orders\/[^/]+\/inspection\/?$/.test(path)) return '/mechanic';
+  const wo = path.match(/^\/work-orders\/(\d+)\/?$/);
+  if (wo) return `/mechanic?wo=${wo[1]}`;
+  if (/^\/mechanic\/(orders|work-orders|dashboard)\/?$/.test(path)) return `/mechanic${keepQuery}`;
+  if (path === '/mechanic' || path.startsWith('/mechanic/')) return link;
+  return workOrderId ? `/mechanic?wo=${workOrderId}` : '/mechanic';
 }
 
 export default function NotificationBell() {
@@ -83,6 +147,11 @@ export default function NotificationBell() {
   const ref = useRef(null);
   const dropdownRef = useRef(null);
   const navigate = useNavigate();
+  const { user } = useContext(AuthContext);
+  const technician = isTechnician(user);
+  // The notifications page (templates, SMS/e-mail logs, broadcasts) is a
+  // manager's page; everyone else has only this list.
+  const manager = isManager(user);
   const { t, i18n } = useTranslation();
   const isRTL = i18n.language === 'ar';
 
@@ -104,27 +173,24 @@ export default function NotificationBell() {
     setLoading(false);
   }, []);
 
-  /* ── initial load + smart polling fallback ────────── */
+  /* ── initial load + polling ───────────────────────────────── */
+  // Polls whether or not the socket is up: a connected socket is not proof
+  // that notifications are arriving (it used to connect and join no room, and
+  // this only polled while disconnected — so the badge never moved).
   useEffect(() => {
     fetchCount();
-    const interval = setInterval(() => {
-      const socket = getSocket();
-      if (!socket?.connected) fetchCount();
-    }, 120000);
-    return () => clearInterval(interval);
+    const interval = setInterval(() => { if (!document.hidden) fetchCount(); }, 60000);
+    const onFocus = () => fetchCount();
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(interval); window.removeEventListener('focus', onFocus); };
   }, [fetchCount]);
 
   /* ── socket.io real-time ─────────────────────────────────── */
+  // The server puts this socket in the user's room from the login token
+  // (it used to read the customer portal's crm_user here, which a staff
+  // session does not have, and emit an event the server ignored).
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem('crm_user') || '{}');
-    if (!user?.id) return;
-
     const socket = getSocket();
-    if (socket.connected) {
-      socket.emit('join-user', user.id);
-    } else {
-      socket.once('connect', () => socket.emit('join-user', user.id));
-    }
 
     const handler = (notification) => {
       setUnreadCount(c => c + 1);
@@ -187,7 +253,8 @@ export default function NotificationBell() {
   const handleClick = (n) => {
     if (!n.is_read) markRead(n.id);
     setOpen(false);
-    if (n.link) navigate(n.link);
+    if (technician) navigate(technicianLink(n.link, n.work_order_id));
+    else if (n.link) navigate(n.link);
     else if (n.work_order_id) navigate(`/work-orders?highlight=${n.work_order_id}`);
   };
 
@@ -253,7 +320,8 @@ export default function NotificationBell() {
       {open && createPortal(
         <div ref={dropdownRef} className="notif-bell-dd" style={{
           position: 'fixed', top: 70, [isRTL?'left':'right']: 20,
-          width: 420, maxHeight: 'calc(100vh - 100px)',
+          // 420px, but never wider than a phone screen less the 20px margins
+          width: 'min(420px, calc(100vw - 40px))', maxHeight: 'calc(100vh - 100px)',
           background: 'var(--bg-card, #fff)',
           border: '1px solid var(--border)', borderRadius: 18,
           boxShadow: '0 24px 70px rgba(0,0,0,.22), 0 4px 16px rgba(0,0,0,.06)',
@@ -314,7 +382,8 @@ export default function NotificationBell() {
                     <Check width={12} height={12} /> {t('notifBell.mark_all_read')}
                   </button>
                 )}
-                <button
+                {/* The notifications page is a manager's page */}
+                {manager && <button
                   onClick={() => { setOpen(false); navigate('/notifications'); }}
                   title={t('notifBell.settings') || 'Settings'}
                   style={{
@@ -328,7 +397,7 @@ export default function NotificationBell() {
                   onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; }}
                 >
                   <Settings width={15} height={15} />
-                </button>
+                </button>}
               </div>
             </div>
 
@@ -518,8 +587,8 @@ export default function NotificationBell() {
             )}
           </div>
 
-          {/* Footer */}
-          <div style={{
+          {/* Footer (managers only: the notifications page is a manager's page) */}
+          {manager && <div style={{
             padding: '11px 18px',
             borderTop: '1px solid var(--border)',
             textAlign: 'center',
@@ -539,7 +608,7 @@ export default function NotificationBell() {
               {t('notifBell.view_all')}
               <span style={{ fontSize: '.9rem' }}>{isRTL ? '\u2190' : '\u2192'}</span>
             </button>
-          </div>
+          </div>}
         </div>,
         document.body
       )}

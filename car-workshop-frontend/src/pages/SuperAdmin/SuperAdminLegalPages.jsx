@@ -32,7 +32,7 @@ const SuperAdminLegalPages = () => {
   const fetchPages = async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API}/super-admin/legal-pages`, { headers: hdrs() });
+      const r = await fetch(`${API}/admin/legal-pages/legal-pages`, { headers: hdrs() });
       if (r.ok) {
         const d = await r.json();
         setPages(d.pages || []);
@@ -57,7 +57,7 @@ const SuperAdminLegalPages = () => {
   const savePage = async () => {
     setSaving(true);
     try {
-      const r = await fetch(`${API}/super-admin/legal-pages/${editingSlug}`, {
+      const r = await fetch(`${API}/admin/legal-pages/legal-pages/${editingSlug}`, {
         method: 'PUT',
         headers: hdrs(),
         body: JSON.stringify(form),
@@ -80,7 +80,7 @@ const SuperAdminLegalPages = () => {
     try {
       const page = pages.find(p => p.slug === slug);
       if (!page) return;
-      const r = await fetch(`${API}/super-admin/legal-pages/${slug}`, {
+      const r = await fetch(`${API}/admin/legal-pages/legal-pages/${slug}`, {
         method: 'PUT',
         headers: hdrs(),
         body: JSON.stringify({

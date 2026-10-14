@@ -96,7 +96,7 @@ export default function Wallet() {
     e.preventDefault();
     setSaving(true);
     try {
-      const res = await api.post('/wallet/settle-cod', settleForm);
+      const res = await api.post('/wallet/settle-cash', settleForm);
       if (res.success) {
         setShowSettle(false);
         setSettleForm({ amount: '', reference: '', note: '' });
@@ -113,7 +113,7 @@ export default function Wallet() {
     if (!collectOrder || !collectAmt) return;
     setSaving(true);
     try {
-      const res = await api.post('/wallet/collect-cod', {
+      const res = await api.post('/wallet/collect-cash', {
         work_order_id: collectOrder.id,
         amount: collectAmt,
         note: t('wallet.cash_collected_note', { work_order_number: collectOrder.work_order_number }),

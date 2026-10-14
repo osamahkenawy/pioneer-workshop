@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { query } from '../lib/database.js';
+import { roleMayUseRoute } from '../lib/access.js';
 
 /**
  * Generate JWT token with workshop context
@@ -34,9 +35,24 @@ export function verifyToken(token) {
  * Authentication middleware
  * Validates JWT and loads full user data
  */
+/**
+ * The token a request authenticates with. The Authorization header comes
+ * first: it is the credential the client chose (the staff app sends
+ * `auth_token`, the customer portal its own `crm_token`). The `auth_token`
+ * cookie is the fallback for requests that cannot set a header (<img> and
+ * file links). Reading the cookie first let a staff member's cookie override
+ * a customer's Bearer token in the same browser, so the portal ran as staff.
+ * A header carrying a stringified empty value ('Bearer null') counts as none.
+ */
+export function requestToken(req) {
+  const bearer = String(req.headers.authorization || '').trim().split(/\s+/)[1];
+  if (bearer && bearer !== 'null' && bearer !== 'undefined') return bearer;
+  return req.cookies?.auth_token || null;
+}
+
 export async function authMiddleware(req, res, next) {
   try {
-    const token = req.cookies?.auth_token || req.headers.authorization?.split(' ')[1];
+    const token = requestToken(req);
 
     if (!token) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
@@ -68,7 +84,7 @@ export async function authMiddleware(req, res, next) {
 
     // Load role modules for dynamic permission checking
     if (user.role_id) {
-      const [roleRow] = await query('SELECT slug, modules FROM roles WHERE id = ?', [user.role_id]);
+      const [roleRow] = await query('SELECT slug, modules, capabilities FROM roles WHERE id = ?', [user.role_id]);
       if (roleRow) {
         // The slug was already being read here and then dropped. Routes need
         // it: users.role is a fixed enum that predates the roles table, so a
@@ -78,11 +94,21 @@ export async function authMiddleware(req, res, next) {
         user.role_modules = Array.isArray(roleRow.modules) ? roleRow.modules
           : typeof roleRow.modules === 'string' ? (() => { try { return JSON.parse(roleRow.modules); } catch { return []; } })()
           : [];
+        // Workflow responsibilities set in Settings → Roles (NULL = defaults, lib/roles.js)
+        const caps = typeof roleRow.capabilities === 'string' ? (() => { try { return JSON.parse(roleRow.capabilities); } catch { return null; } })() : roleRow.capabilities;
+        if (Array.isArray(caps)) user.role_capabilities = caps;
       }
     }
 
     req.user = user;
     req.workshopId = user.workshop_id; // Set workshop ID from user
+
+    // Customer and mechanic logins share this token format; hold them to the
+    // routes their own screens use (lib/access.js).
+    const path = (req.originalUrl || '').split('?')[0];
+    if (!roleMayUseRoute(user, req.method, path)) {
+      return res.status(403).json({ success: false, message: 'Your account does not have access to this.' });
+    }
 
     next();
   } catch (error) {

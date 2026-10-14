@@ -21,18 +21,33 @@ import { execute } from './database.js';
  * @param {*} [params.newValue] - JSON-serializable snapshot after the change
  * @param {string} [params.ip]
  * @param {string} [params.userAgent]
+ *
+ * Also accepts the positional form the SOW route files (job-cards, sublet,
+ * inventory, appointments, vehicle-receiving, vat-evhc-integration) were
+ * written against:
+ *   logAudit(workshopId, userId, action, entityType, entityId, oldValue, newValue)
+ * Passed to the object signature, every field was undefined and the insert
+ * failed on audit_logs.workshop_id NOT NULL, so those modules had no audit
+ * trail at all.
  */
-export async function logAudit({
-  workshopId,
-  userId,
-  action,
-  entityType,
-  entityId,
-  oldValue = null,
-  newValue = null,
-  ip = null,
-  userAgent = null,
-} = {}) {
+export async function logAudit(...args) {
+  const first = args[0];
+  const {
+    workshopId,
+    userId,
+    action,
+    entityType,
+    entityId,
+    oldValue = null,
+    newValue = null,
+    ip = null,
+    userAgent = null,
+  } = (first !== null && typeof first === 'object')
+    ? first
+    : {
+        workshopId: args[0], userId: args[1], action: args[2], entityType: args[3],
+        entityId: args[4], oldValue: args[5] ?? null, newValue: args[6] ?? null,
+      };
   try {
     await execute(
       `INSERT INTO audit_logs

@@ -5,7 +5,9 @@ import { query, execute } from '../lib/database.js';
 import { generateToken, authMiddleware } from '../middleware/auth.js';
 import { sendNotificationEmail } from '../lib/email.js';
 import { config } from '../config.js';
-import { loginLimiter, passwordResetLimiter, registrationLimiter } from '../lib/rate-limits.js';
+import { loginLimiter, passwordResetLimiter, registrationLimiter, tokenRedeemLimiter } from '../lib/rate-limits.js';
+import { capabilitiesOf } from '../lib/roles.js';
+const parseCaps = c => { const v = typeof c === 'string' ? (() => { try { return JSON.parse(c); } catch { return null; } })() : c; return Array.isArray(v) ? v : undefined; };
 
 const router = express.Router();
 
@@ -19,7 +21,7 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     let sql = `
       SELECT u.id, u.workshop_id, u.username, u.email, u.password, u.full_name,
-             u.role, u.is_active, u.is_owner, u.avatar_url, u.email_verified,
+             u.role, u.role_id, u.is_active, u.is_owner, u.avatar_url, u.email_verified,
              w.name as workshop_name, w.slug as workshop_slug, w.status as workshop_status,
              w.logo_url as workshop_logo, w.logo_url_white as workshop_logo_white,
              w.industry as workshop_type, w.currency as workshop_currency,
@@ -62,6 +64,12 @@ router.post('/login', loginLimiter, async (req, res) => {
     if (!valid) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
+    // A customer portal login (customer-auth.js) never opens a staff session:
+    // refused before a token or the staff cookie is issued, so a staff session
+    // already open in this browser is not replaced.
+    if (user.role === 'customer') {
+      return res.status(403).json({ success: false, code: 'USE_CUSTOMER_PORTAL', message: 'This is a customer portal account — sign in on the customer portal.' });
+    }
 
     const token = generateToken(user);
     await execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
@@ -69,13 +77,19 @@ router.post('/login', loginLimiter, async (req, res) => {
     // Load permitted modules from role
     let permitted_modules = null;
     let role_name = null;
-    if (user.role) {
-      const [roleRow] = await query(
-        'SELECT id, name, name_ar, slug, modules FROM roles WHERE workshop_id = ? AND slug = ?',
-        [user.workshop_id, user.role]
-      );
+    let role_slug = user.role || null;
+    let role_caps;
+    if (user.role_id || user.role) {
+      // The assigned role (role_id) wins, as in GET /me — matching on the
+      // users.role enum gave a Team Leader or Storekeeper (users.role =
+      // 'dispatcher' / 'part_advisor') the wrong menu at login.
+      const [roleRow] = user.role_id
+        ? await query('SELECT id, name, name_ar, slug, modules, capabilities FROM roles WHERE id = ? AND workshop_id = ?', [user.role_id, user.workshop_id])
+        : await query('SELECT id, name, name_ar, slug, modules, capabilities FROM roles WHERE workshop_id = ? AND slug = ?', [user.workshop_id, user.role]);
       if (roleRow) {
         role_name = roleRow.name;
+        role_slug = roleRow.slug;
+        if (user.role_id) role_caps = parseCaps(roleRow.capabilities);
         permitted_modules = Array.isArray(roleRow.modules) ? roleRow.modules
           : typeof roleRow.modules === 'string' ? (()=>{ try { return JSON.parse(roleRow.modules); } catch { return []; } })()
           : [];
@@ -126,7 +140,8 @@ router.post('/login', loginLimiter, async (req, res) => {
       company_lat: userData.company_lat || null,
       company_lng: userData.company_lng || null,
     };
-    const response = { success: true, data: { ...userData, workshop, token, role_name, permitted_modules } };
+    const capabilities = capabilitiesOf({ role: user.role, role_slug, is_owner: user.is_owner, role_capabilities: role_caps });
+    const response = { success: true, data: { ...userData, workshop, token, role_name, role_slug, capabilities, permitted_modules } };
     if (subscription_warning) response.subscription_warning = subscription_warning;
     return res.json(response);
   } catch (err) {
@@ -260,10 +275,14 @@ router.get('/session', authMiddleware, async (req, res) => {
     // Load permitted modules from role
     let permitted_modules = null;
     let role_name = null;
+    let role_slug = user.role || null;
+    let me_caps;
     if (user.role_id) {
-      const [roleRow] = await query('SELECT name, name_ar, slug, modules FROM roles WHERE id = ?', [user.role_id]);
+      const [roleRow] = await query('SELECT name, name_ar, slug, modules, capabilities FROM roles WHERE id = ?', [user.role_id]);
       if (roleRow) {
         role_name = roleRow.name;
+        role_slug = roleRow.slug;
+        me_caps = parseCaps(roleRow.capabilities);
         permitted_modules = Array.isArray(roleRow.modules) ? roleRow.modules
           : typeof roleRow.modules === 'string' ? (()=>{ try { return JSON.parse(roleRow.modules); } catch { return []; } })()
           : [];
@@ -318,7 +337,8 @@ router.get('/session', authMiddleware, async (req, res) => {
       company_lat: user.company_lat || null,
       company_lng: user.company_lng || null,
     };
-    return res.json({ success: true, data: { ...user, workshop, role_name, permitted_modules } });
+    const capabilities = capabilitiesOf({ role: user.role, role_slug, is_owner: user.is_owner, role_capabilities: me_caps });
+    return res.json({ success: true, data: { ...user, workshop, role_name, role_slug, capabilities, permitted_modules } });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Session check failed' });
   }
@@ -467,7 +487,7 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
 });
 
 // POST /api/auth/reset-password  (PUBLIC — no auth required)
-router.post('/reset-password', passwordResetLimiter, async (req, res) => {
+router.post('/reset-password', tokenRedeemLimiter, async (req, res) => {
   try {
     const { token, new_password } = req.body;
     if (!token || !new_password) {
@@ -479,7 +499,7 @@ router.post('/reset-password', passwordResetLimiter, async (req, res) => {
 
     const users = await query(
       'SELECT id FROM users WHERE password_reset_token = ? AND password_reset_expires > NOW() AND is_active = 1',
-      [token]
+      [String(token)]  // never an object: it would format into a match-anything condition
     );
     if (!users.length) {
       return res.status(400).json({ success: false, message: 'This link is invalid or has expired.' });

@@ -1,0 +1,38 @@
+/* ═══════════════════════════════════════════════════════════
+   Invoices — page styles
+   Prefix: inv-
+   The page used ServiceTracking's .trk-spinner, which only existed when the
+   ServiceTracking chunk had been loaded first. It has its own spinner now.
+   ═══════════════════════════════════════════════════════════ */
+
+.inv-spinner {
+  display: block;
+  inline-size: 36px;
+  block-size: 36px;
+  margin: 40px auto;
+  border: 3px solid #f1f5f9;
+  border-block-start-color: #f97316;
+  border-radius: 50%;
+  animation: inv-spin 0.8s linear infinite;
+}
+
+/* Inside a button, next to its label ("Generating…"). */
+.inv-spinner--inline {
+  display: inline-block;
+  vertical-align: middle;
+  inline-size: 14px;
+  block-size: 14px;
+  margin: 0;
+  border-width: 2px;
+}
+
+/* Inside the detail modal while it loads. */
+.inv-spinner--modal {
+  margin: 0 auto 16px;
+}
+
+@keyframes inv-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .inv-spinner { animation-duration: 2.4s; }
+}

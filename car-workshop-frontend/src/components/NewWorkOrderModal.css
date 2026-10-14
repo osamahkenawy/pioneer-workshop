@@ -1,0 +1,189 @@
+/* NewWorkOrderModal.css — the New Job Card wizard.
+ *
+ * Most of the wizard is still styled inline (the `st` object in the
+ * component). What lives here is what inline styles cannot do: media queries
+ * for phones and small laptops, :focus rings, a validation banner that stays
+ * in view while the page scrolls, and RTL mirroring. Everything is prefixed
+ * nwo- so nothing leaks into the page behind.
+ */
+
+/* ── Frame ─────────────────────────────────────────────────────────────── */
+
+/* z-index must clear the sidebar (1065) and topbar (1060) in Layout.css. */
+.nwo-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(15, 23, 42, .55); backdrop-filter: blur(2px);
+  overscroll-behavior: contain;
+}
+
+/* A fixed height, not "as tall as this step". The modal used to resize to
+ * each step and stay centred, so the footer moved on every Next — and the
+ * second click of a double-click landed on the backdrop and threw the whole
+ * job card away. With a fixed frame the footer never moves. */
+.nwo-modal {
+  width: 100%; max-width: 1140px;
+  height: min(92vh, 900px); height: min(92dvh, 900px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #fff; border-radius: 20px; box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+}
+
+.nwo-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 26px 14px; }
+.nwo-title { margin: 0; font-size: 21px; font-weight: 800; color: #1e3a6b; letter-spacing: -.3px; }
+.nwo-subtitle { margin: 4px 0 0; font-size: 13px; color: #64748b; }
+.nwo-subtitle .nwo-process { color: #94a3b8; }
+.nwo-close {
+  flex-shrink: 0; width: 34px; height: 34px; border: none; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  background: #f1f5f9; color: #475569;
+}
+
+/* ── Stepper ───────────────────────────────────────────────────────────
+ * Steps take the width their label needs and the connecting lines take
+ * what is left — the old equal fifths cut "Complaint & Service" to
+ * "Complaint & Serv…" at every desktop width. When space runs short a label
+ * wraps between words onto a second line rather than truncating; on a
+ * phone only the current step keeps its label (the subtitle names it too). */
+.nwo-stepper { display: flex; align-items: center; gap: 8px; padding: 0 26px 16px; }
+.nwo-step { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+.nwo-step-bubble {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #f1f5f9; color: #94a3b8; border: 2px solid transparent; transition: all .2s;
+}
+.nwo-step.is-active .nwo-step-bubble { background: #fff7ed; color: #f97316; border-color: #f97316; }
+.nwo-step.is-done .nwo-step-bubble { background: #f97316; color: #fff; }
+.nwo-step-label { font-size: 12.5px; line-height: 1.25; font-weight: 500; color: #94a3b8; }
+.nwo-step.is-active .nwo-step-label { color: #1e3a6b; font-weight: 700; }
+.nwo-step.is-done .nwo-step-label { color: #64748b; }
+.nwo-step-line { flex: 1 1 16px; min-width: 10px; height: 2px; border-radius: 2px; background: #e2e8f0; }
+.nwo-step-line.is-done { background: #f97316; }
+
+/* ── Body / footer ─────────────────────────────────────────────────────── */
+
+.nwo-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 4px 26px 14px; overscroll-behavior: contain; }
+.nwo-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 26px; border-top: 1px solid #f1f5f9;
+}
+.nwo-footer-end { display: flex; align-items: center; gap: 10px; }
+
+/* Sticky: a message about a field near the bottom of a long step is
+ * visible however far the page has been scrolled. */
+.nwo-alert {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; align-items: flex-start; gap: 10px;
+  margin: 0 0 14px; padding: 10px 14px; border-radius: 10px;
+  background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+  font-size: 13px; font-weight: 500; line-height: 1.45;
+  box-shadow: 0 6px 14px -10px rgba(185, 28, 28, .45);
+}
+.nwo-alert-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.nwo-alert-btn {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 6px 12px; border-radius: 8px; border: 1px solid #fca5a5; background: #fff;
+  color: #b91c1c; font-size: 12.5px; font-weight: 700;
+}
+
+/* ── Page layouts ──────────────────────────────────────────────────────── */
+
+/* Steps 1 and 2: the work on the left, a live summary on the right. The
+ * summary is a fixed 300px so a wider screen gives the space to the fields. */
+.nwo-page { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 30px; align-items: start; }
+.nwo-summary { min-width: 0; position: sticky; top: 0; }
+
+.nwo-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.nwo-stack { display: flex; flex-direction: column; gap: 12px; }
+
+/* Choice cards: two across where they fit, one under the other where they
+ * do not. "1fr 1fr" kept each card at its min-content width and pushed the
+ * right-hand card (and its selected tick) off a 390px phone. */
+.nwo-cardrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin-bottom: 18px; }
+
+.nwo-pillrow { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+
+.nwo-vehgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 215px), 1fr)); gap: 10px; }
+
+/* Counter lines: a header row on desktop; on a phone each line wraps and
+ * every box carries its own caption, so "2" and "450.75" are never two
+ * unlabelled numbers. */
+.nwo-items-head, .nwo-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) 132px 76px 120px 112px 34px; gap: 8px; align-items: center;
+}
+.nwo-items-head {
+  padding: 0 2px 6px; font-size: 11px; font-weight: 700; color: #94a3b8;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.nwo-item { margin-bottom: 8px; }
+.nwo-item-cap { display: none; margin-bottom: 3px; font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+.nwo-num { text-align: end; }
+.nwo-charges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+
+/* ── Focus, validation ─────────────────────────────────────────────────── */
+
+/* The inputs are styled inline, which cannot express :focus — so they had
+ * no focus indicator at all. !important because the border colour is inline. */
+.nwo-modal input:focus, .nwo-modal select:focus, .nwo-modal textarea:focus {
+  outline: none; border-color: #f97316 !important; box-shadow: 0 0 0 3px rgba(249, 115, 22, .18);
+}
+.nwo-modal button:focus-visible { outline: 3px solid rgba(249, 115, 22, .6); outline-offset: 2px; }
+.nwo-modal [tabindex="-1"]:focus { outline: none; }
+/* Rows inside a scrolling list: an outer ring would be clipped by the list. */
+.nwo-modal [role="listbox"] button:focus-visible { outline-offset: -3px; }
+.nwo-search:focus-within { border-color: #f97316 !important; box-shadow: 0 0 0 3px rgba(249, 115, 22, .18); }
+.nwo-modal .nwo-search input:focus { box-shadow: none; }
+
+.nwo-modal .nwo-invalid { border-color: #ef4444 !important; background-color: #fffafa !important; }
+.nwo-modal .nwo-invalid-group { border-radius: 12px; box-shadow: 0 0 0 2px #fecaca; }
+
+.nwo-sr {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ── RTL ───────────────────────────────────────────────────────────────── */
+
+/* Back / Next chevrons point the reading direction. */
+[dir="rtl"] .nwo-flip { transform: scaleX(-1); }
+/* styles/rtl.css pads every RTL input 40px on the left for a search icon
+ * these fields do not have. */
+[dir="rtl"] .nwo-modal input, [dir="rtl"] .nwo-modal select, [dir="rtl"] .nwo-modal textarea { padding-left: 12px; }
+[dir="rtl"] .nwo-modal input[dir="ltr"] { text-align: right; }
+
+/* ── Narrow screens ────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .nwo-page { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .nwo-summary { position: static; }
+}
+
+@media (max-width: 700px) {
+  .nwo-items-head { display: none; }
+  .nwo-item {
+    grid-template-columns: 76px minmax(0, 1fr) minmax(0, 1fr) 34px; align-items: end;
+    padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid #f1f5f9;
+  }
+  .nwo-item-name { grid-column: 1 / 3; }
+  .nwo-item-type { grid-column: 3 / -1; }
+  .nwo-item-cap { display: block; }
+  .nwo-charges { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 680px) {
+  .nwo-step:not(.is-active) .nwo-step-label { display: none; }
+}
+
+@media (max-width: 600px) {
+  .nwo-overlay { padding: 0; }
+  .nwo-modal { max-width: none; height: 100vh; height: 100dvh; border-radius: 0; }
+  .nwo-header { padding: 14px 16px 10px; }
+  .nwo-title { font-size: 18px; }
+  .nwo-stepper { padding: 0 16px 12px; gap: 6px; }
+  .nwo-step-bubble { width: 30px; height: 30px; }
+  .nwo-body { padding: 4px 16px 12px; }
+  .nwo-footer { padding: 12px 16px; }
+}
+
+@media (max-width: 520px) {
+  .nwo-grid2 { grid-template-columns: minmax(0, 1fr); }
+}

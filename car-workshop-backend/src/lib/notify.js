@@ -9,19 +9,32 @@
  *    import { notifyWorkOrderStatus, notifyMechanicAssigned } from '../lib/notify.js';
  *    await notifyWorkOrderStatus({ order, status, workshopId, changedBy });
  *
+ *  Who hears what (Steps 1–7):
+ *    Customer   — SMS and email at four moments only (CUSTOMER_MILESTONES):
+ *                 job opened, ready for collection, job closed, job cancelled.
+ *                 Internal steps send nothing, and the technician is never named.
+ *    Technician — when a job card is assigned to them (in-app + phone push),
+ *                 always opening the technician app, never a staff page
+ *                 (lib/workflow.js notifyTechnicianAssigned).
+ *    Managers   — push + in-app when a job is closed or cancelled. Every
+ *                 other step is announced to the right group by
+ *                 lib/workflow.js and lib/workflow-sync.js.
+ *
  *  All channel failures are non-blocking — the work order lifecycle
  *  continues even if one channel fails.  Every attempt is logged to
  *  the `notifications` table.
  * ═══════════════════════════════════════════════════════════════════
  */
 
-import { config } from '../config.js';
 import { query, execute } from './database.js';
 import { sendSMS, interpolate } from './sms.js';
-import { sendEmail, buildWorkOrderStatusEmail, getWorkshopBranding } from './email.js';
-import { sendPushToUser, sendPushToWorkshop } from './push.js';
+import { sendEmail, sendNotificationEmail, buildWorkOrderStatusEmail, customerEmailSubject, getWorkshopBranding } from './email.js';
+import { sendPushToUser } from './push.js';
 import { sendFCMToUser } from './firebase.js';
 import { getIO } from './socket.js';
+import { customerStatusUrl, customerAppBase } from './customer-link.js';
+import { woLabel } from './status-labels.js';
+import { jobClassification } from './job-card-approval.js';
 
 // ─── In-App notification helper ───────────────────────────────
 /**
@@ -78,89 +91,55 @@ export async function createInAppNotification({ workshopId, userId, title, body,
 }
 
 // ─── Status metadata ──────────────────────────────────────────
-// Keyed on the REAL current work_orders.status enum (car_workshop.sql):
-// pending, confirmed, assigned, accepted, in_progress, inspection,
-// ready_for_pickup, completed, cancelled. This used to be keyed on the old
-// delivery-app enum (picked_up/in_transit/delivered/failed/returned), none
-// of which exist as status values any more — so notifyWorkOrderStatus()
-// silently sent nothing for any real status change (`if (!meta) return;`
-// below always hit). Fixed here alongside the matching field-name fix in
-// buildVars()/the direct order.* reads further down, since templates alone
-// don't help if the variables they interpolate are also reading from
-// fields (recipient_phone, client_id, ...) this table doesn't have.
-const STATUS_META = {
-  pending:          { icon: 'clock',      label: 'Pending',           color: '#f59e0b' },
-  confirmed:        { icon: 'check',      label: 'Confirmed',         color: '#10b981' },
-  assigned:         { icon: 'user',       label: 'Mechanic Assigned', color: '#6366f1' },
-  accepted:         { icon: 'check',      label: 'Accepted',          color: '#0ea5e9' },
-  in_progress:      { icon: 'truck',      label: 'In Progress',       color: '#f97316' },
-  inspection:       { icon: 'inspection', label: 'Inspection',        color: '#7c3aed' },
-  ready_for_pickup: { icon: 'package',    label: 'Ready for Pickup',  color: '#c2410c' },
-  completed:        { icon: 'delivery',   label: 'Completed',         color: '#16a34a' },
-  cancelled:        { icon: 'cancelled',  label: 'Cancelled',         color: '#94a3b8' },
+// Keyed on the real work_orders.status enum. The labels are the workshop's
+// words (lib/status-labels.js — "Ready for collection", never "Ready for
+// Pickup"); the icon names are ones the notification bell knows.
+const STATUS_ICONS = {
+  pending: 'clock', confirmed: 'check', estimate_approved: 'check', auto_assign: 'check',
+  assigned: 'user', accepted: 'user', in_progress: 'clock', inspection: 'check',
+  ready_for_pickup: 'check', completed: 'check', cancelled: 'cancelled',
+};
+const STATUS_META = Object.fromEntries(
+  Object.entries(STATUS_ICONS).map(([status, icon]) => [status, { icon, label: woLabel(status) }])
+);
+
+/**
+ * The only moments a customer hears from the workshop by SMS and email
+ * (S12): the job is opened (Step 3), the car is ready for collection
+ * (Step 7, QC passed), the job is closed, the job is cancelled. confirmed,
+ * assigned, accepted, in_progress and inspection are internal steps.
+ * The template_key logged for each is `order_${status}` —
+ * 'order_ready_for_pickup' is read by lib/workflow.js (Step 7 checks).
+ */
+export const CUSTOMER_MILESTONES = Object.freeze(['pending', 'ready_for_pickup', 'completed', 'cancelled']);
+
+// ─── Customer SMS per milestone ───────────────────────────────
+// Built from customerVars(); every optional part (plate, link, amount,
+// invoice, phone) drops out cleanly instead of printing "undefined".
+const CUSTOMER_SMS = {
+  pending: v => [
+    `${v.workshop}: we have received your ${v.vehicle_plate}, ${v.jc ? `job card ${v.jc}` : `job ${v.wo}`}.`,
+    v.link && `Follow your service: ${v.link}`,
+  ],
+  ready_for_pickup: v => [
+    `${v.workshop}: your ${v.vehicle_plate} is ready for collection.`,
+    v.payment,
+    v.link && `Details: ${v.link}`,
+  ],
+  completed: v => [
+    `Thank you for choosing ${v.workshop}. Job ${v.wo} is closed${v.inv ? `, invoice ${v.inv}` : ''}.`,
+  ],
+  cancelled: v => [
+    `${v.workshop}: job ${v.wo}${v.plate ? ` for ${v.plate}` : ''} has been cancelled.`,
+    v.workshop_phone && `Questions? Call ${v.workshop_phone}.`,
+  ],
 };
 
-// ─── SMS templates per status ─────────────────────────────────
-const SMS_TEMPLATES = {
-  pending:          'Hi {recipient_name}, your work order {order_number} has been placed. You can track it here: {tracking_url}',
-  confirmed:        'Hi {recipient_name}, your work order {order_number} is confirmed and will be serviced soon.',
-  assigned:         'Your work order {order_number} has been assigned to mechanic {driver_name}. Tracking: {tracking_url}',
-  accepted:         'Mechanic {driver_name} has accepted your work order {order_number} and will begin shortly.',
-  in_progress:      'Your work order {order_number} is now in progress.',
-  inspection:       'Your work order {order_number} is in final inspection.',
-  ready_for_pickup: 'Good news! Your vehicle for work order {order_number} is ready for pickup.',
-  completed:        'Hi {recipient_name}, your work order {order_number} has been completed. Thank you!',
-  cancelled:        'Your work order {order_number} has been cancelled. Please contact us with any questions.',
-};
-
-// ─── Email subjects per status ────────────────────────────────
-const EMAIL_SUBJECTS = {
-  pending:          'Work Order {order_number} — Placed Successfully',
-  confirmed:        'Work Order {order_number} Confirmed',
-  assigned:         'Mechanic Assigned to Work Order {order_number}',
-  accepted:         'Work Order {order_number} Accepted by Mechanic',
-  in_progress:      'Work Order {order_number} In Progress',
-  inspection:       'Work Order {order_number} In Final Inspection',
-  ready_for_pickup: 'Work Order {order_number} Ready for Pickup',
-  completed:        'Work Order {order_number} Completed!',
-  cancelled:        'Work Order {order_number} Cancelled',
-};
-
-// ─── Push notification templates ──────────────────────────────
-const PUSH_TEMPLATES = {
-  // For customer
-  customer: {
-    pending:          { title: 'Work Order Placed',      body: 'Your work order {order_number} has been placed. Track it online!' },
-    confirmed:        { title: 'Work Order Confirmed',   body: 'Your work order {order_number} is confirmed.' },
-    assigned:         { title: 'Mechanic Assigned',      body: 'Your work order {order_number} has been assigned to {driver_name}.' },
-    accepted:         { title: 'Mechanic Accepted Job',  body: '{driver_name} has accepted your work order {order_number}.' },
-    in_progress:      { title: 'In Progress',            body: '{order_number} is being worked on!' },
-    inspection:       { title: 'In Inspection',          body: '{order_number} is in final inspection.' },
-    ready_for_pickup: { title: 'Ready for Pickup',       body: '{order_number} is ready for pickup.' },
-    completed:        { title: 'Completed!',             body: '{order_number} has been completed.' },
-    cancelled:        { title: 'Work Order Cancelled',   body: '{order_number} has been cancelled.' },
-  },
-  // For mechanic
-  driver: {
-    assigned:         { title: 'New Job Assigned',       body: 'You have a new work order: {order_number} for {recipient_name}.' },
-    accepted:         { title: 'Job Accepted',           body: 'You accepted {order_number}. Head to the service bay.' },
-    in_progress:      { title: 'In Progress',            body: 'You are working on {order_number}.' },
-    inspection:       { title: 'In Inspection',          body: '{order_number} is in final inspection.' },
-    ready_for_pickup: { title: 'Ready for Pickup',       body: '{order_number} is ready for the customer to collect.' },
-    completed:        { title: 'Job Complete',           body: 'You completed {order_number}. Great job!' },
-    cancelled:        { title: 'Work Order Cancelled',   body: '{order_number} has been cancelled.' },
-  },
-  // For admin / ops team
-  admin: {
-    assigned:         { title: 'Mechanic Assigned',      body: '{driver_name} assigned to {order_number}.' },
-    accepted:         { title: 'Job Accepted',           body: '{driver_name} accepted {order_number}.' },
-    in_progress:      { title: 'Work Order In Progress', body: '{driver_name} started work on {order_number}.' },
-    inspection:       { title: 'In Inspection',          body: '{order_number} is in final inspection.' },
-    ready_for_pickup: { title: 'Ready for Pickup',       body: '{order_number} is ready for the customer to collect.' },
-    completed:        { title: 'Work Order Completed',   body: '{driver_name} completed {order_number}.' },
-    cancelled:        { title: 'Work Order Cancelled',   body: '{order_number} has been cancelled.' },
-  },
-};
+/** The customer SMS for a milestone, or null for any other status. */
+export function customerSmsText(status, vars) {
+  const build = CUSTOMER_SMS[status];
+  return build ? build(vars).filter(Boolean).join(' ') : null;
+}
 
 // ─── Helper: log notification to DB ───────────────────────────
 async function logNotification({
@@ -169,8 +148,10 @@ async function logNotification({
 }) {
   try {
     await execute(
+      // Was (tenant_id, …, order_id, …, driver_id): none of those columns
+      // exist, so every send failed to log and the error was swallowed.
       `INSERT INTO notifications
-       (tenant_id, type, recipient_phone, recipient_email, template_key, message, order_id, user_id, driver_id, status, error_message, sent_at)
+       (workshop_id, type, recipient_phone, recipient_email, template_key, message, work_order_id, user_id, mechanic_id, status, error_message, sent_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === 'sent' ? 'NOW()' : 'NULL'})`,
       [workshopId, type, recipientPhone || null, recipientEmail || null,
        templateKey || null, message, orderId || null, userId || null,
@@ -181,43 +162,129 @@ async function logNotification({
   }
 }
 
-// ─── Helper: build tracking URL ───────────────────────────────
-function trackingUrl(token) {
-  let base = config.frontendUrl || 'http://localhost:5173';
-  // Production safety fallback — never send localhost links in prod emails
-  if (process.env.NODE_ENV === 'production' && base.includes('localhost')) {
-    base = 'https://delivery.pioneercarservice.com';
-  }
-  return `${base}/track/${token}`;
+// ─── Helper: what a customer message says about one job ───────
+
+/** settings JSON column as an object (mysql2 may return it parsed or as text). */
+function parseSettings(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return {}; }
 }
 
-// ─── Helper: build template vars ──────────────────────────────
-function buildVars(order, extra = {}) {
-  // NOTE: reads from the REAL work_orders columns (car_workshop.sql), not
-  // the old delivery-app field names (recipient_*/order_number/tracking_token/
-  // driver_*/cod_amount/delivery_fee/client_*) this used to read — those
-  // don't exist on this table, so every field here was always empty/undefined
-  // regardless of status, on top of the status-key mismatch fixed above.
-  // Template placeholder NAMES (e.g. {recipient_name}) are kept as-is so the
-  // SMS/email/push template strings above don't need to change.
+/** "AED 1,250.00" */
+function money(amount, currency) {
+  return `${currency} ${Number(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/**
+ * Everything a customer message says about one work order, read from the
+ * real tables — the work order, its vehicle, its main job card, its latest
+ * live invoice, the customer and the workshop. Shared by the SMS, the
+ * status email (lib/email.js buildWorkOrderStatusEmail) and manual sends.
+ *
+ * Billed on account (internal customers; fleet, insurance or corporate
+ * payers — the gate-pass rule in lib/workflow.js paymentSettled) means
+ * nothing to pay at collection; otherwise the amount due is the invoice
+ * balance (or the work order total while there is no invoice yet).
+ *
+ * @param {object} order       a work_orders row (SELECT * is enough)
+ * @param {number} workshopId
+ * @param {string} [status]    the milestone, for the customer stage label;
+ *                             defaults to order.status
+ * @returns {Promise<object>}  { customer_name, customer_email, work_order_number,
+ *   job_card_number, make_model, plate, vehicle, stage, on_account, amount_due,
+ *   amount_due_text, invoice_number, currency, link, workshop: { name, phone,
+ *   email, address } }
+ */
+export async function customerMessageView(order, workshopId, status = order?.status) {
+  const wid = workshopId || order.workshop_id;
+  const [[ws] = [], [veh] = [], [jc] = [], [inv] = [], [cust] = []] = await Promise.all([
+    query('SELECT name, phone, email, currency, settings, address, area, city, emirate FROM workshops WHERE id = ?', [wid]),
+    order.vehicle_id ? query('SELECT plate_number, make, model FROM vehicles WHERE id = ?', [order.vehicle_id]) : [],
+    query(
+      `SELECT job_card_number FROM job_cards
+        WHERE work_order_id = ? AND workshop_id = ? AND parent_job_card_id IS NULL
+        ORDER BY status = 'cancelled', id LIMIT 1`, [order.id, wid]),
+    query(
+      `SELECT invoice_number, status, total_amount, amount_paid FROM invoices
+        WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('void','cancelled')
+        ORDER BY id DESC LIMIT 1`, [order.id, wid]),
+    order.customer_id
+      ? query('SELECT full_name, email, customer_class, customer_subcategory FROM customers WHERE id = ?', [order.customer_id])
+      : [],
+  ]);
+
+  const settings = parseSettings(ws?.settings);
+  const currency = ws?.currency || 'AED';
+  const makeModel = [veh?.make, veh?.model].filter(Boolean).join(' ').trim();
+  const plate = String(veh?.plate_number || '').trim();
+  const { cls } = jobClassification({ ...order, customer_class: cust?.customer_class, customer_subcategory: cust?.customer_subcategory });
+  const onAccount = cls === 'internal' || ['fleet', 'insurance', 'corporate'].includes(order.payer_type);
+  const due = inv
+    ? Math.max(0, Number(inv.total_amount || 0) - Number(inv.amount_paid || 0))
+    : Math.max(0, Number(order.total_amount || 0));
+  const amountDue = Math.round(due * 100) / 100;
+
   return {
-    recipient_name:     order.customer_name        || 'Customer',
-    order_number:       order.work_order_number    || '',
-    tracking_token:     order.service_status_token || '',
-    tracking_url:       trackingUrl(order.service_status_token),
-    driver_name:        order.mechanic_name         || extra.driver_name || 'your mechanic',
-    driver_phone:       order.mechanic_phone        || extra.driver_phone || '',
-    cod_amount:         order.cash_amount ? `${extra.currency || 'AED'} ${parseFloat(order.cash_amount).toFixed(2)}` : '',
-    delivery_fee:       order.service_fee ? `${extra.currency || 'AED'} ${parseFloat(order.service_fee).toFixed(2)}` : '',
-    // Part-level variables (formerly package-level)
-    barcode:            extra.barcode              || order.barcode || '',
-    package_number:     extra.package_number       || '',
-    package_status:     extra.package_status       || '',
-    packages_delivered: extra.packages_delivered != null ? String(extra.packages_delivered) : '',
-    packages_total:     extra.packages_total != null ? String(extra.packages_total) : '',
-    master_tracking:    order.service_status_token || '',
+    customer_name: String(order.customer_name || cust?.full_name || '').trim(),
+    customer_email: cust?.email || null,
+    work_order_number: order.work_order_number || '',
+    job_card_number: jc?.job_card_number || null,
+    make_model: makeModel,
+    plate,
+    vehicle: `${makeModel || 'car'}${plate ? ` (${plate})` : ''}`,
+    stage: woLabel({ ...order, status }, 'customer'),
+    on_account: onAccount,
+    amount_due: onAccount ? 0 : amountDue,
+    amount_due_text: !onAccount && amountDue > 0 ? money(amountDue, currency) : '',
+    invoice_number: inv?.invoice_number || null,
+    currency,
+    link: customerStatusUrl(order),
+    workshop: {
+      name: settings.company_name || ws?.name || 'Pioneer Car Service',
+      phone: ws?.phone || '',
+      email: ws?.email || '',
+      address: [ws?.address, ws?.area, ws?.city || ws?.emirate].filter(Boolean).join(', '),
+    },
+  };
+}
+
+/**
+ * Template variables for a customer message — the names the built-in SMS
+ * use, plus the older ones ({order_number}, {customer_name},
+ * {tracking_url}…) so a saved custom message still fills in.
+ */
+export function customerVars(view, extra = {}) {
+  const payment = view.on_account ? 'Billed to your account.'
+    : view.amount_due > 0 ? `Amount due: ${view.amount_due_text}.` : '';
+  return {
+    name: view.customer_name,
+    customer_name: view.customer_name,
+    wo: view.work_order_number,
+    work_order_number: view.work_order_number,
+    order_number: view.work_order_number,
+    jc: view.job_card_number || '',
+    vehicle: view.make_model || 'car',
+    plate: view.plate,
+    vehicle_plate: view.vehicle,
+    link: view.link || '',
+    tracking_url: view.link || '',
+    amount_due: view.on_account ? 'Billed to your account' : view.amount_due_text,
+    payment,
+    inv: view.invoice_number || '',
+    workshop: view.workshop.name,
+    workshop_phone: view.workshop.phone,
     ...extra,
   };
+}
+
+/** Active managers and Service Advisor desks (legacy dispatcher) to tell about a closed or cancelled job. */
+async function managerIds(workshopId, exceptUserId) {
+  const rows = await query(
+    "SELECT id FROM users WHERE workshop_id = ? AND is_active = 1 AND role IN ('admin','workshop_manager','general_manager','dispatcher') AND id != ?",
+    [workshopId, exceptUserId || 0]
+  );
+  return rows.map(r => r.id);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -225,30 +292,44 @@ function buildVars(order, extra = {}) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Fire all notification channels for a work order status change.
+ * Fire the notification channels for a work order status change.
+ *
+ *   pending, ready_for_pickup, completed, cancelled → customer SMS + email
+ *   assigned                                        → the technician
+ *   completed, cancelled                            → managers (push + in-app)
+ *   every status                                    → Socket.io event
  *
  * @param {Object}  opts
- * @param {Object}  opts.order       – Full work order row (with mechanic_name, customer fields, etc.)
+ * @param {Object}  opts.order       – Work order row (SELECT * from work_orders)
  * @param {string}  opts.status      – The new status
  * @param {number}  opts.workshopId  – Workshop ID
  * @param {number}  [opts.changedBy] – User ID who triggered the change
  * @param {Object}  [opts.extra]     – Extra template variables
  */
 export async function notifyWorkOrderStatus({ order, status, workshopId, changedBy, extra = {} }) {
-  const [_t] = await query('SELECT currency FROM workshops WHERE id = ?', [workshopId]);
-  const currency = _t?.currency || 'AED';
-  const vars = buildVars(order, { ...extra, currency });
   const meta = STATUS_META[status];
-  if (!meta) return;
+  if (!meta || !order) return;
 
   const results = { sms: null, email: null, push: null, socket: null };
+  // `order` is the row as it was before the change (or the new row, when a
+  // job is opened). Reopening a cancelled job is not "vehicle received" again.
+  const reopened = status === 'pending' && order.status && order.status !== 'pending';
+  const milestone = CUSTOMER_MILESTONES.includes(status) && !reopened;
+  let view = null;
+  if (milestone) {
+    try {
+      view = await customerMessageView(order, workshopId, status);
+    } catch (e) {
+      console.error('[Notify] Could not read the job for the customer message:', e.message);
+    }
+  }
 
   // ──────────────────────────────────────
-  //  1. SMS to customer
+  //  1. SMS to customer (milestones only)
   // ──────────────────────────────────────
-  if (SMS_TEMPLATES[status] && order.customer_phone) {
+  if (view && order.customer_phone) {
     try {
-      const body = interpolate(SMS_TEMPLATES[status], vars);
+      const body = customerSmsText(status, customerVars(view, extra));
       const smsResult = await sendSMS(order.customer_phone, body);
       results.sms = smsResult;
       await logNotification({
@@ -263,150 +344,83 @@ export async function notifyWorkOrderStatus({ order, status, workshopId, changed
   }
 
   // ──────────────────────────────────────
-  //  2. Email to customer (if email available)
+  //  2. Email to customer (milestones only): the job's own email, else the
+  //     customer record's; on close / cancel also the account email when it
+  //     differs (business record).
   // ──────────────────────────────────────
-  const recipientEmail = order.customer_email || order.customer_email_ref;
-  if (EMAIL_SUBJECTS[status] && recipientEmail) {
-    try {
-      const branding = await getWorkshopBranding(workshopId);
-      const subject  = interpolate(EMAIL_SUBJECTS[status], vars);
-      const html     = buildWorkOrderStatusEmail({
-        order, status,
-        trackingUrl: trackingUrl(order.service_status_token),
-        branding, currency,
-      });
-      const emailResult = await sendEmail({ to: recipientEmail, subject, html, tenantId: workshopId });
-      results.email = emailResult;
-      await logNotification({
-        workshopId, type: 'email', recipientEmail,
-        templateKey: `order_${status}`, message: subject, orderId: order.id,
-        status: emailResult.success ? 'sent' : 'failed',
-        errorMessage: emailResult.error || null,
-      });
-    } catch (e) {
-      console.error('[Notify] Email error:', e.message);
+  if (view) {
+    const jobEmail = order.customer_email || order.customer_email_ref || view.customer_email;
+    const recipients = [{ to: jobEmail, key: `order_${status}` }];
+    if (['completed', 'cancelled'].includes(status) && view.customer_email && view.customer_email !== jobEmail) {
+      recipients.push({ to: view.customer_email, key: `client_${status}` });
     }
-  }
-
-  // ──────────────────────────────────────
-  //  3. Email to customer account (business record) — if customer_id has email
-  // ──────────────────────────────────────
-  if (['completed', 'cancelled'].includes(status) && order.customer_id) {
-    try {
-      const [customer] = await query('SELECT email, full_name FROM customers WHERE id = ?', [order.customer_id]);
-      if (customer?.email && customer.email !== recipientEmail) {
-        const branding = await getWorkshopBranding(workshopId);
-        const subject  = interpolate(`Work Order ${order.work_order_number} — ${meta.label}`, vars);
-        const html     = buildWorkOrderStatusEmail({ order, status, trackingUrl: trackingUrl(order.service_status_token), branding, currency });
-        await sendEmail({ to: customer.email, subject, html, tenantId: workshopId });
+    let branding = null;
+    for (const { to, key } of recipients) {
+      if (!to) continue;
+      try {
+        branding ||= await getWorkshopBranding(workshopId);
+        const subject = customerEmailSubject(status, view);
+        const html = buildWorkOrderStatusEmail({ status, view, branding });
+        const emailResult = await sendEmail({ to, subject, html, tenantId: workshopId });
+        if (key.startsWith('order_')) results.email = emailResult;
         await logNotification({
-          workshopId, type: 'email', recipientEmail: customer.email,
-          templateKey: `client_${status}`, message: subject, orderId: order.id,
-          status: 'sent',
+          workshopId, type: 'email', recipientEmail: to,
+          templateKey: key, message: subject, orderId: order.id,
+          status: emailResult.success ? 'sent' : 'failed',
+          errorMessage: emailResult.error || null,
         });
+      } catch (e) {
+        console.error('[Notify] Email error:', e.message);
       }
-    } catch (e) { /* non-blocking */ }
+    }
   }
 
   // ──────────────────────────────────────
-  //  4. Push notification to mechanic (Web Push + FCM)
-  // ──────────────────────────────────────────
-  if (PUSH_TEMPLATES.driver[status] && order.mechanic_id) {
+  //  3. The technician — only when a job is assigned to them. The same
+  //     notice as every other assign path (one per assignment, dedup'd).
+  // ──────────────────────────────────────
+  if (status === 'assigned' && order.mechanic_id) {
     try {
-      // Look up the user_id linked to this mechanic
-      const [mechanic] = await query('SELECT user_id FROM mechanics WHERE id = ?', [order.mechanic_id]);
-      if (mechanic?.user_id) {
-        const t = PUSH_TEMPLATES.driver[status];
-        const pushPayload = {
-          title: interpolate(t.title, vars),
-          body:  interpolate(t.body,  vars),
-          url:   '/mechanic/orders',
-          tag:   `order-${order.id}`,
-          data:  { orderId: order.id, status, orderNumber: order.work_order_number },
-        };
-        // Web Push (browser)
-        await sendPushToUser(mechanic.user_id, pushPayload);
-        // FCM (mobile app)
-        await sendFCMToUser(mechanic.user_id, pushPayload).catch(e =>
-          console.error('[Notify] FCM (mechanic) error:', e.message)
-        );
-      }
+      const { notifyTechnicianAssigned } = await import('./workflow.js');
+      await notifyTechnicianAssigned({ workshopId, workOrderId: order.id, mechanicId: order.mechanic_id });
     } catch (e) {
-      console.error('[Notify] Push (mechanic) error:', e.message);
+      console.error('[Notify] Technician notice error:', e.message);
     }
   }
 
   // ──────────────────────────────────────
-  //  5. Push notification to admin/ops team (Web Push + FCM)
+  //  4. Managers — push + in-app when the job is closed or cancelled
   // ──────────────────────────────────────
-  if (PUSH_TEMPLATES.admin[status]) {
+  if (view && ['completed', 'cancelled'].includes(status)) {
     try {
-      const t = PUSH_TEMPLATES.admin[status];
-      // Get all admin/manager users for this workshop
-      const admins = await query(
-        "SELECT id FROM users WHERE tenant_id = ? AND role IN ('admin','manager','dispatcher') AND id != ?",
-        [workshopId, changedBy || 0]
-      );
-      for (const admin of admins) {
+      const ref = `${view.work_order_number}${view.plate ? ` · ${view.plate}` : ''}`;
+      const title = status === 'completed' ? `Job closed: ${ref}` : `Job cancelled: ${ref}`;
+      const what = `${view.job_card_number ? `Job card ${view.job_card_number}` : `Job ${view.work_order_number}`} · ${view.vehicle}`;
+      const body = status === 'completed'
+        ? `${what} is closed${view.invoice_number ? ` — invoice ${view.invoice_number}` : ''}.`
+        : `${what} was cancelled.`;
+      for (const userId of await managerIds(workshopId, changedBy)) {
         const pushPayload = {
-          title: interpolate(t.title, vars),
-          body:  interpolate(t.body,  vars),
-          url:   `/orders`,
-          tag:   `admin-order-${order.id}`,
-          data:  { orderId: order.id, status, orderNumber: order.work_order_number },
+          title, body,
+          url:  `/work-orders/${order.id}`,
+          tag:  `admin-order-${order.id}`,
+          data: { orderId: order.id, status, orderNumber: order.work_order_number },
         };
-        await sendPushToUser(admin.id, pushPayload).catch(() => {});
-        await sendFCMToUser(admin.id, pushPayload).catch(() => {});
-      }
-    } catch (e) {
-      console.error('[Notify] Push (admin) error:', e.message);
-    }
-  }
-
-  // ──────────────────────────────────────
-  //  5b. In-app notifications (mechanic + admin team)
-  // ──────────────────────────────────────
-  try {
-    // In-app to mechanic
-    if (order.mechanic_id) {
-      const [mch] = await query('SELECT user_id FROM mechanics WHERE id = ?', [order.mechanic_id]);
-      if (mch?.user_id) {
-        const driverTmpl = PUSH_TEMPLATES.driver[status];
-        if (driverTmpl) {
-          await createInAppNotification({
-            workshopId, userId: mch.user_id,
-            title: interpolate(driverTmpl.title, vars),
-            body: interpolate(driverTmpl.body, vars),
-            type: 'order_update', icon: meta.icon,
-            link: '/mechanic/orders', orderId: order.id,
-          });
-        }
-      }
-    }
-
-    // In-app to admin/ops team
-    const adminTmpl = PUSH_TEMPLATES.admin[status];
-    if (adminTmpl) {
-      const adminUsers = await query(
-        "SELECT id FROM users WHERE tenant_id = ? AND role IN ('admin','manager','dispatcher') AND id != ?",
-        [workshopId, changedBy || 0]
-      );
-      for (const au of adminUsers) {
+        await sendPushToUser(userId, pushPayload).catch(() => {});
+        await sendFCMToUser(userId, pushPayload).catch(() => {});
         await createInAppNotification({
-          workshopId, userId: au.id,
-          title: interpolate(adminTmpl.title, vars),
-          body: interpolate(adminTmpl.body, vars),
-          type: 'order_update', icon: meta.icon,
-          link: `/orders`, orderId: order.id,
+          workshopId, userId, title, body,
+          type: `workflow_${status === 'completed' ? 'closed' : 'cancelled'}`, icon: meta.icon,
+          link: `/work-orders/${order.id}`, orderId: order.id,
         }).catch(() => {});
       }
+    } catch (e) {
+      console.error('[Notify] Manager notice error:', e.message);
     }
-  } catch (e) {
-    console.error('[Notify] In-app error:', e.message);
   }
 
   // ──────────────────────────────────────
-  //  6. Socket.io real-time event
+  //  5. Socket.io real-time event
   // ──────────────────────────────────────
   try {
     const io = getIO();
@@ -414,8 +428,9 @@ export async function notifyWorkOrderStatus({ order, status, workshopId, changed
       orderId:     order.id,
       orderNumber: order.work_order_number,
       status,
+      statusLabel: meta.label,
       previousStatus: order.status,
-      driverName:  vars.driver_name,
+      driverName:  order.mechanic_name || null,
       timestamp:   new Date().toISOString(),
     });
   } catch (e) {
@@ -426,143 +441,95 @@ export async function notifyWorkOrderStatus({ order, status, workshopId, changed
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  Notify: Mechanic assigned to work order
+//  Notify: Technician assigned to work order
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Notify when a mechanic is assigned to a work order.
+ * Notify when a technician is assigned to a work order (Team Leader board,
+ * job assignment, auto-assign).
+ *
+ * The customer is not told: assignment is an internal step. The technician
+ * gets the shared "Job assigned" notice (lib/workflow.js
+ * notifyTechnicianAssigned — in-app + push, opening the job card in the
+ * technician app; dedup'd against onTechnicianAssigned) and an email to
+ * their own login, with the job card, vehicle and reported issue — no
+ * customer name, phone, address or money. Managers and Service Advisor
+ * desks get an in-app line that says "{technician} assigned to work order …".
+ *
+ * @param {object} opts
+ * @param {object} opts.order    work order row (id and work_order_number at least)
+ * @param {object} opts.driver   the technician (mechanics row: id, full_name, user_id?)
+ * @param {number} opts.tenantId workshop id
  */
 export async function notifyMechanicAssigned({ order, driver, tenantId }) {
   const workshopId = tenantId;
-  const [_t] = await query('SELECT currency FROM workshops WHERE id = ?', [workshopId]);
-  const currency = _t?.currency || 'AED';
-  const vars = buildVars(order, {
-    driver_name:  driver.full_name || driver.name,
-    driver_phone: driver.phone,
-    currency,
-  });
+  if (!order?.id || !driver?.id) return;
+  const technicianName = driver.full_name || driver.name || 'A technician';
 
-  // SMS to customer
-  if (SMS_TEMPLATES.assigned && order.customer_phone) {
-    try {
-      const body = interpolate(SMS_TEMPLATES.assigned, vars);
-      const smsResult = await sendSMS(order.customer_phone, body);
+  let job = null;
+  try {
+    const { notifyTechnicianAssigned } = await import('./workflow.js');
+    job = await notifyTechnicianAssigned({ workshopId, workOrderId: order.id, mechanicId: driver.id });
+  } catch (e) {
+    console.error('[Notify] Technician notice error:', e.message);
+  }
+
+  // Email to the technician's own login
+  try {
+    const userId = driver.user_id
+      || (await query('SELECT user_id FROM mechanics WHERE id = ? AND workshop_id = ?', [driver.id, workshopId]))[0]?.user_id;
+    const [techUser] = userId ? await query('SELECT email, full_name FROM users WHERE id = ?', [userId]) : [];
+    if (techUser?.email && job) {
+      const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const cell = 'padding:8px 12px;border:1px solid #e2e8f0;';
+      const row = (label, value) => value
+        ? `<tr><td style="${cell}font-weight:600;background:#f8fafc;width:140px;">${label}</td><td style="${cell}">${esc(value)}</td></tr>` : '';
+      const subject = `Job card assigned — ${job.jobCardNumber || order.work_order_number}${job.plate ? ` · ${job.plate}` : ''}`;
+      const r = await sendNotificationEmail({
+        to: techUser.email,
+        subject,
+        title: 'New job card',
+        body: `
+          <p>Hi <strong>${esc(techUser.full_name || driver.full_name || '')}</strong>,</p>
+          <p>A job card has been assigned to you:</p>
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            ${row('Job card', job.jobCardNumber)}
+            ${row('Work order', order.work_order_number)}
+            ${row('Vehicle', [job.plate, job.makeModel].filter(Boolean).join(' · '))}
+            ${row('Reported issue', job.complaint)}
+          </table>
+          <p>Open My Jobs and press Start when you begin.</p>
+        `,
+        ctaText: 'Open My Jobs',
+        ctaUrl: `${customerAppBase()}${job.link}`,
+        tenantId: workshopId,
+      });
       await logNotification({
-        workshopId, type: 'sms', recipientPhone: order.customer_phone,
-        templateKey: 'driver_assigned', message: body, orderId: order.id,
-        driverId: driver.id, status: smsResult.success ? 'sent' : 'failed',
+        workshopId, type: 'email', recipientEmail: techUser.email,
+        templateKey: 'technician_assigned_email', message: subject,
+        orderId: order.id, driverId: driver.id, userId, status: r.success ? 'sent' : 'failed',
+        errorMessage: r.error || null,
       });
-    } catch (e) { /* non-blocking */ }
-  }
-
-  // Email to customer
-  const recipientEmail = order.customer_email || order.customer_email_ref;
-  if (recipientEmail) {
-    try {
-      const branding = await getWorkshopBranding(workshopId);
-      const subject  = interpolate(EMAIL_SUBJECTS.assigned, vars);
-      const html     = buildWorkOrderStatusEmail({
-        order: { ...order, driver_name: vars.driver_name, driver_phone: vars.driver_phone },
-        status: 'assigned',
-        trackingUrl: trackingUrl(order.service_status_token),
-        branding, currency,
-      });
-      await sendEmail({ to: recipientEmail, subject, html, tenantId: workshopId });
-      await logNotification({
-        workshopId, type: 'email', recipientEmail,
-        templateKey: 'driver_assigned', message: subject, orderId: order.id,
-        driverId: driver.id, status: 'sent',
-      });
-    } catch (e) { /* non-blocking */ }
-  }
-
-  // Push to the mechanic (Web Push + FCM)
-  if (driver.user_id) {
-    try {
-      const pushPayload = {
-        title: 'New Job Assigned',
-        body:  `You have a new work order: ${order.work_order_number} for ${order.customer_name}`,
-        url:   '/mechanic/orders',
-        tag:   `assigned-${order.id}`,
-        data:  { orderId: order.id, orderNumber: order.work_order_number },
-      };
-      await sendPushToUser(driver.user_id, pushPayload);
-      await sendFCMToUser(driver.user_id, pushPayload).catch(e =>
-        console.error('[Notify] FCM (mechanic assign) error:', e.message)
-      );
-    } catch (e) { /* non-blocking */ }
-  }
-
-  // Email to the MECHANIC's own account email
-  if (driver.user_id) {
-    try {
-      const [driverUser] = await query('SELECT email, full_name FROM users WHERE id = ?', [driver.user_id]);
-      if (driverUser?.email) {
-        const branding = await getWorkshopBranding(workshopId);
-        const { sendNotificationEmail } = await import('./email.js');
-        const dispatchDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-        const dispatchTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-        await sendNotificationEmail({
-          to: driverUser.email,
-          subject: `New Job Assigned — ${order.work_order_number}`,
-          title: 'New Job Assignment',
-          body: `
-            <p>Hi <strong>${driverUser.full_name || 'Mechanic'}</strong>,</p>
-            <p>A new work order has been assigned to you:</p>
-            <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;width:140px;">Work Order</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${order.work_order_number}</td></tr>
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Customer</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${order.customer_name || '—'}</td></tr>
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Phone</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${order.customer_phone || '—'}</td></tr>
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Drop-off Address</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${order.dropoff_address || '—'}</td></tr>
-              ${order.cash_amount ? `<tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Cash Payment Amount</td><td style="padding:8px 12px;border:1px solid #e2e8f0;color:#f97316;font-weight:700;">${currency} ${parseFloat(order.cash_amount).toFixed(2)}</td></tr>` : ''}
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Dispatch Date</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${dispatchDate}</td></tr>
-              <tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Dispatch Time</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${dispatchTime}</td></tr>
-              ${order.notes ? `<tr><td style="padding:8px 12px;border:1px solid #e2e8f0;font-weight:600;background:#f8fafc;">Notes</td><td style="padding:8px 12px;border:1px solid #e2e8f0;">${order.notes}</td></tr>` : ''}
-            </table>
-            <p>Please log in to your mechanic dashboard to view full details and start the job.</p>
-          `,
-          ctaText: 'View My Jobs',
-          ctaUrl: `${config.frontendUrl || 'http://localhost:5173'}/mechanic/orders`,
-          tenantId: workshopId,
-        });
-        await logNotification({
-          workshopId, type: 'email', recipientEmail: driverUser.email,
-          templateKey: 'driver_assignment_email', message: `Mechanic assignment email for ${order.work_order_number}`,
-          orderId: order.id, driverId: driver.id, userId: driver.user_id, status: 'sent',
-        });
-      }
-    } catch (e) {
-      console.error('[Notify] Mechanic email error:', e.message);
     }
+  } catch (e) {
+    console.error('[Notify] Technician email error:', e.message);
   }
 
-  // In-app notification to the mechanic
-  if (driver.user_id) {
-    try {
-      const dispatchDateStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      await createInAppNotification({
-        workshopId, userId: driver.user_id,
-        title: 'New Job Assigned',
-        body: `Work order ${order.work_order_number} for ${order.customer_name || 'customer'}. Pickup from ${order.dropoff_address || 'workshop'}. Dispatched: ${dispatchDateStr}${order.cash_amount ? '. Cash payment: ' + currency + ' ' + parseFloat(order.cash_amount).toFixed(2) : ''}`,
-        type: 'assignment', icon: 'assignment',
-        link: '/mechanic/orders', orderId: order.id,
-      });
-    } catch (e) { /* non-blocking */ }
-  }
-
-  // In-app notification to admin team
+  // In-app notification to managers and Service Advisor desks. Keeps the
+  // phrase "assigned to work order" (scripts/qa/intake-test.mjs).
   try {
     const adminUsers = await query(
-      "SELECT id FROM users WHERE tenant_id = ? AND role IN ('admin','manager','dispatcher')",
+      "SELECT id FROM users WHERE workshop_id = ? AND is_active = 1 AND role IN ('admin','workshop_manager','general_manager','dispatcher')",
       [workshopId]
     );
+    const plate = job?.plate ? ` · ${job.plate}` : '';
     for (const au of adminUsers) {
       await createInAppNotification({
         workshopId, userId: au.id,
-        title: 'Mechanic Assigned',
-        body: `${vars.driver_name} assigned to work order ${order.work_order_number}`,
+        title: 'Technician assigned',
+        body: `${technicianName} assigned to work order ${order.work_order_number}${plate}`,
         type: 'assignment', icon: 'assignment',
-        link: `/orders`, orderId: order.id,
+        link: `/work-orders/${order.id}`, orderId: order.id,
       }).catch(() => {});
     }
   } catch (e) { /* non-blocking */ }
@@ -574,7 +541,7 @@ export async function notifyMechanicAssigned({ order, driver, tenantId }) {
       orderId:     order.id,
       orderNumber: order.work_order_number,
       driverId:    driver.id,
-      driverName:  vars.driver_name,
+      driverName:  technicianName,
       timestamp:   new Date().toISOString(),
     });
   } catch (e) { /* non-blocking */ }
@@ -584,28 +551,13 @@ export async function notifyMechanicAssigned({ order, driver, tenantId }) {
 //  Notify: Cash payment collected
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * A cash payment was recorded. Staff screens are refreshed over the socket;
+ * the customer is not sent an SMS (payment is part of the invoice, and the
+ * customer hears from us only at the four milestones).
+ */
 export async function notifyCashCollected({ order, amount, tenantId }) {
   const workshopId = tenantId;
-  const [_t] = await query('SELECT currency FROM workshops WHERE id = ?', [workshopId]);
-  const currency = _t?.currency || 'AED';
-  const vars = buildVars(order, { amount: `${currency} ${parseFloat(amount).toFixed(2)}`, currency });
-
-  // SMS to customer
-  if (order.customer_phone) {
-    try {
-      const body = interpolate(
-        'Cash payment of {amount} has been collected for work order {order_number}. Thank you!',
-        vars
-      );
-      await sendSMS(order.customer_phone, body);
-      await logNotification({
-        workshopId, type: 'sms', recipientPhone: order.customer_phone,
-        templateKey: 'cod_collected', message: body, orderId: order.id, status: 'sent',
-      });
-    } catch (e) { /* non-blocking */ }
-  }
-
-  // Socket broadcast
   try {
     const io = getIO();
     io.to(`workshop:${workshopId}`).emit('work-order:cash-collected', {
@@ -622,6 +574,12 @@ export async function notifyCashCollected({ order, amount, tenantId }) {
 /**
  * Send a custom notification via one or more channels.
  *
+ * With `orderId`, placeholders in the message and subject are filled in from
+ * that work order — the same names the built-in customer messages use:
+ * {name}, {vehicle}, {plate}, {wo}, {jc}, {link}, {amount_due}, {inv},
+ * {workshop}, {workshop_phone} (and the older {work_order_number},
+ * {customer_name}, {tracking_url}). Unknown placeholders are left as typed.
+ *
  * @param {Object}  opts
  * @param {string[]} opts.channels  – ['sms', 'email', 'push']
  * @param {string}  opts.phone      – Recipient phone (for SMS)
@@ -635,6 +593,19 @@ export async function notifyCashCollected({ order, amount, tenantId }) {
 export async function sendCustomNotification({ channels = [], phone, email, message, subject, tenantId, orderId, userId }) {
   const workshopId = tenantId;
   const results = {};
+
+  if (orderId && workshopId && /\{\{?\s*\w+\s*\}?\}/.test(`${message || ''} ${subject || ''}`)) {
+    try {
+      const [order] = await query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ?', [orderId, workshopId]);
+      if (order) {
+        const vars = customerVars(await customerMessageView(order, workshopId));
+        message = interpolate(message, vars);
+        if (subject) subject = interpolate(subject, vars);
+      }
+    } catch (e) {
+      console.error('[Notify] Custom message placeholders:', e.message);
+    }
+  }
 
   if (channels.includes('sms') && phone) {
     try {
@@ -650,11 +621,11 @@ export async function sendCustomNotification({ channels = [], phone, email, mess
 
   if (channels.includes('email') && email) {
     try {
-      const { sendNotificationEmail } = await import('./email.js');
+      const safe = String(message || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
       const r = await sendNotificationEmail({
         to: email, subject: subject || 'Notification from Pioneer',
         title: subject || 'Notification',
-        body: `<p>${message}</p>`,
+        body: `<p>${safe}</p>`,
         tenantId: workshopId,
       });
       results.email = r;
@@ -671,7 +642,7 @@ export async function sendCustomNotification({ channels = [], phone, email, mess
       const pushPayload = {
         title: subject || 'Notification',
         body:  message,
-        url:   orderId ? `/orders/${orderId}` : '/',
+        url:   orderId ? `/work-orders/${orderId}` : '/',
       };
       const r = await sendPushToUser(userId, pushPayload);
       results.push = r;
@@ -688,68 +659,23 @@ export async function sendCustomNotification({ channels = [], phone, email, mess
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * JUDGMENT CALL: the original `notifyPackageStatus` modeled MPS (multi-piece
- * shipment) tracking — "Package 2/3 delivered" — which assumed packages carry
- * their own barcode/tracking and move through a delivery lifecycle independent
- * of the parent order. That doesn't map cleanly onto `parts.js`, where a "part"
- * is an inventory line item consumed within a work order (per the mapping doc,
- * parts.js drops parcel-specific tracking/proof-of-delivery fields).
- *
- * Rather than dropping this notification entirely, we repurpose it as a generic
- * "part status" notification — useful for cases like "part backordered" /
- * "part restocked" / "part installed" — while keeping the exact same function
- * shape, DB logging, and socket-emit structure as the source. If this doesn't
- * end up wired to any route, it's safe to leave unused; the shape is preserved
- * so a calling route can adopt it for low-stock/restock alerts too.
+ * A part on a work order changed status (routes/parts.js: ordered,
+ * installed, returned…). Staff screens are refreshed over the socket. The
+ * customer is not texted — the old per-part SMS was the courier's
+ * "package 2/3 delivered" message, and the customer hears from us only at
+ * the four milestones.
  *
  * @param {Object}  opts
  * @param {Object}  opts.order        – Parent work order row
- * @param {Object}  opts.pkg          – Part row (id, barcode/part_number, sequence, status, recipient_name, etc.)
+ * @param {Object}  opts.pkg          – Part row (id, barcode/part_number, sequence)
  * @param {string}  opts.newStatus    – The new part status
  * @param {number}  opts.tenantId     – Workshop ID
- * @param {number}  [opts.changedBy]
- * @param {number}  [opts.delivered]  – Count of parts installed/delivered
+ * @param {number}  [opts.delivered]  – Count of parts installed
  * @param {number}  [opts.total]      – Total parts on the work order
  */
-export async function notifyPartStatus({ order, pkg, newStatus, tenantId, changedBy, delivered = 0, total = 0 }) {
+export async function notifyPartStatus({ order, pkg, newStatus, tenantId, delivered = 0, total = 0 }) {
   const workshopId = tenantId;
   if (!order || !pkg) return;
-
-  const PART_SMS = {
-    picked_up:  'Part {package_number}/{packages_total} for work order {order_number} has been picked up. Ref: {barcode}',
-    in_transit: 'Part {package_number}/{packages_total} for work order {order_number} is on its way!',
-    delivered:  'Part {package_number}/{packages_total} for work order {order_number} has been installed ({packages_delivered}/{packages_total} complete).',
-    failed:     'Part {package_number}/{packages_total} for work order {order_number} could not be sourced.',
-  };
-
-  const template = PART_SMS[newStatus];
-  if (!template) return;
-
-  const recipientPhone = pkg.recipient_phone || order.customer_phone;
-  if (!recipientPhone) return;
-
-  const vars = buildVars(order, {
-    barcode: pkg.barcode,
-    package_number: String(pkg.sequence || 1),
-    package_status: newStatus,
-    packages_delivered: String(delivered),
-    packages_total: String(total),
-    recipient_name: pkg.recipient_name || order.customer_name || 'Customer',
-  });
-
-  try {
-    const body = interpolate(template, vars);
-    await sendSMS(recipientPhone, body);
-    await logNotification({
-      workshopId, type: 'sms', recipientPhone,
-      templateKey: `package_${newStatus}`, message: body, orderId: order.id,
-      status: 'sent',
-    });
-  } catch (e) {
-    console.error('[Notify] Part SMS error:', e.message);
-  }
-
-  // Socket.io real-time event for part status
   try {
     const io = getIO();
     io.to(`workshop:${workshopId}`).emit('part:status-changed', {
@@ -772,4 +698,6 @@ export default {
   notifyCashCollected,
   notifyPartStatus,
   sendCustomNotification,
+  customerMessageView,
+  customerSmsText,
 };

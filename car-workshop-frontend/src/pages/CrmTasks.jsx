@@ -10,6 +10,15 @@ import api from '../lib/api';
 import './CRMPages.css';
 import './CrmSurface.css';
 
+// Where a task's record lives, so the follow-up is one click from the work.
+const RELATED_LINK = {
+  enquiry:    { label: 'Open the enquiry', to: id => `/enquiries?id=${id}` },
+  quote:      { label: 'Open the estimate', to: id => `/estimates?id=${id}` },
+  work_order: { label: 'Open the job card', to: id => `/work-orders/${id}` },
+  reminder:   { label: 'Open service reminders', to: () => '/crm/reminders' },
+  invoice:    { label: 'Open invoices', to: () => '/invoices' },
+};
+
 /**
  * Tasks & Follow-ups — one list of what staff owe customers.
  *
@@ -130,7 +139,7 @@ export default function CrmTasks() {
   // Staff list for assignment. Optional — the page works unassigned if the
   // users endpoint is not permitted for this role.
   useEffect(() => {
-    api.get('/users?limit=100')
+    api.get('/settings/users')  // there is no /users endpoint; the staff list lives under settings
       .then(r => { if (r?.success) setStaff(r.data || []); })
       .catch(() => {});
   }, []);
@@ -390,6 +399,11 @@ export default function CrmTasks() {
                       <span className="cs-task-body">
                         <div className="cs-task-title">{r.title}</div>
                         {r.details && <div className="cs-task-note">{r.details}</div>}
+                        {RELATED_LINK[r.related_type] && r.related_id && (
+                          <button type="button" className="cs-task-link" onClick={() => navigate(RELATED_LINK[r.related_type].to(r.related_id))}>
+                            {RELATED_LINK[r.related_type].label} →
+                          </button>
+                        )}
                       </span>
                     </div>
                   </td>

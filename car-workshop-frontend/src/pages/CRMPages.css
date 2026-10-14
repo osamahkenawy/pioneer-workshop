@@ -2856,6 +2856,7 @@ textarea.form-control {
 }
 .veh-search input:focus { border-color: var(--veh-accent); box-shadow: 0 0 0 3px rgba(21,159,217,0.12); }
 .veh-select {
+  flex-shrink: 0; min-width: 160px;  /* the search box was squeezing "Newest first" to "est first" */
   padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 9px;
   font-size: 13.5px; color: #334155; background: #fff; cursor: pointer; outline: none;
 }

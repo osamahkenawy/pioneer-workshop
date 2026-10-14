@@ -22,10 +22,10 @@ git fetch origin && git reset --hard origin/main
 npm install
 
 echo "  Running migrations..."
-mysql -u root -proot car_workshop < "\/src/migrations/car_workshop.sql"          2>/dev/null || true
-mysql -u root -proot car_workshop < "\/src/migrations/post/00_schema_patches.sql" 2>/dev/null || true
-mysql -u root -proot car_workshop < "\/src/migrations/post/01_seed_countries.sql"  2>/dev/null || true
-mysql -u root -proot car_workshop < "\/src/migrations/post/02_sow_schema.sql"     2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "\/src/migrations/car_workshop.sql"          2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "\/src/migrations/post/00_schema_patches.sql" 2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "\/src/migrations/post/01_seed_countries.sql"  2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "\/src/migrations/post/02_sow_schema.sql"     2>/dev/null || true
 
 echo "  Restarting backend..."
 pm2 restart car-workshop-backend

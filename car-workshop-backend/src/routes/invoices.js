@@ -4,10 +4,15 @@ import QRCode from 'qrcode';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { requireManager } from '../lib/access.js';
 import { getFinancialConfig } from '../lib/financial.js';
+import { createItemisedInvoice } from '../lib/job-card-billing.js';
 import { logAudit } from '../lib/audit.js';
+import { config } from '../config.js';
+import { assertSafeOutboundUrl } from '../lib/url-guard.js';
 import https from 'https';
 import http from 'http';
+import { requireCapability } from '../lib/roles.js';
 
 const router = express.Router();
 
@@ -27,12 +32,17 @@ const router = express.Router();
  */
 
 // ── Helper: fetch remote image as buffer ─────────────────────
-function fetchImageBuffer(url) {
+// The URL is workshop-controlled (Settings → logo), so every hop — the first
+// request and each redirect — goes through the SSRF guard: no private,
+// loopback or metadata addresses, at most 3 redirects.
+async function fetchImageBuffer(url, hops = 0) {
+  if (hops > 3) throw new Error('Too many redirects');
+  await assertSafeOutboundUrl(url, { requireHttps: false });
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
     client.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchImageBuffer(res.headers.location).then(resolve).catch(reject);
+        return fetchImageBuffer(new URL(res.headers.location, url).toString(), hops + 1).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
       const chunks = [];
@@ -45,7 +55,8 @@ function fetchImageBuffer(url) {
 
 // ── Generate secure public token for invoice QR
 function generatePublicToken(workshopId, invoiceId) {
-  const secret = process.env.JWT_SECRET || 'pioneer_workshop_secret_2026';
+  // Same secret as the JWTs (config.js refuses to start in production without one)
+  const secret = config.jwt.secret;
   const hmac = crypto.createHmac('sha256', secret).update(`${workshopId}-${invoiceId}`).digest('hex').slice(0, 16);
   return `${workshopId}-${invoiceId}-${hmac}`;
 }
@@ -94,8 +105,10 @@ export async function generateInvoicePDF(res, { invoice, workshop, customer, ite
       } else {
         const fsM = await import('fs');
         const pathM = await import('path');
+        // Only files under uploads/ — not any path the setting points at
+        const uploadsRoot = pathM.default.resolve('uploads');
         const localPath = pathM.default.resolve(workshop.logo_url.replace(/^\//, ''));
-        if (fsM.default.existsSync(localPath)) {
+        if (localPath.startsWith(uploadsRoot + pathM.default.sep) && fsM.default.existsSync(localPath)) {
           logoBuffer = fsM.default.readFileSync(localPath);
         }
       }
@@ -371,21 +384,49 @@ router.get('/:id/pdf', async (req, res) => {
 });
 
 // ── Generate next invoice number for workshop
+// The highest INV- number so far, plus one. It used to read the most recent
+// row, so a credit note (CN-INV-…, parsed as 0) or an imported number reset
+// the sequence to INV-0001. A unique key on (workshop_id, invoice_number)
+// (migrations/20261011_invoice_number_unique.sql) catches the remaining race.
 async function getNextInvoiceNumber(workshopId) {
-  const [last] = await query(
-    "SELECT invoice_number FROM invoices WHERE workshop_id = ? ORDER BY id DESC LIMIT 1",
+  const [row] = await query(
+    `SELECT MAX(CAST(SUBSTRING(invoice_number, 5) AS UNSIGNED)) AS n
+       FROM invoices WHERE workshop_id = ? AND invoice_number REGEXP '^INV-[0-9]+$'`,
     [workshopId]
   );
-  if (!last || !last.invoice_number) return 'INV-0001';
-  const num = parseInt(last.invoice_number.replace('INV-', '')) || 0;
-  return `INV-${String(num + 1).padStart(4, '0')}`;
+  return `INV-${String((Number(row?.n) || 0) + 1).padStart(4, '0')}`;
+}
+
+// A credit note number that does not collide with an earlier credit note on
+// the same invoice: CN-INV-0007, then CN-INV-0007-2, …
+async function nextCreditNoteNumber(workshopId, invoiceNumber) {
+  const [row] = await query(
+    'SELECT COUNT(*) AS n FROM invoices WHERE workshop_id = ? AND (invoice_number = ? OR invoice_number LIKE ?)',
+    [workshopId, `CN-${invoiceNumber}`, `CN-${invoiceNumber}-%`]
+  );
+  return Number(row?.n) ? `CN-${invoiceNumber}-${Number(row.n) + 1}` : `CN-${invoiceNumber}`;
 }
 
 // ── Auto-create invoice from a completed work order (exported for work-orders.js to use)
 // RENAMED from createInvoiceFromOrder -> createInvoiceFromWorkOrder. This export
 // name matters: other route files import it by this exact name.
 async function createInvoiceFromWorkOrder(workOrderId, workshopId, createdBy) {
-  try {
+  // Two invoices raised at the same moment can pick the same next number;
+  // the unique key rejects the second, which then retries with a fresh one.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await createInvoiceFromWorkOrderOnce(workOrderId, workshopId, createdBy);
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY' && attempt < 3) continue;
+      console.error('Error creating invoice from work order:', error);
+      return null;
+    }
+  }
+  return null;
+}
+
+async function createInvoiceFromWorkOrderOnce(workOrderId, workshopId, createdBy) {
+  {
     const [order] = await query(
       `SELECT o.*, c.full_name as customer_full_name, c.email as customer_email
        FROM work_orders o
@@ -408,6 +449,14 @@ async function createInvoiceFromWorkOrder(workOrderId, workshopId, createdBy) {
     // Get workshop info
     const [workshop] = await query('SELECT currency FROM workshops WHERE id = ?', [workshopId]);
     const currency = workshop?.currency || 'AED';
+
+    // Itemised job cards (every one created since 20261006_job_card_billing)
+    // bill service_fee + every item + VAT. Everything below is the legacy
+    // service_fee-only path, kept as-is for the imported rows whose items are
+    // a breakdown of service_fee rather than an addition to it.
+    if (order.billing_basis === 'itemised') {
+      return await createItemisedInvoice({ order, invoiceNumber, currency, createdBy });
+    }
 
     // Build invoice from work order details — use real VAT from workshop config
     const subtotal = order.service_fee || 0;
@@ -458,9 +507,6 @@ async function createInvoiceFromWorkOrder(workOrderId, workshopId, createdBy) {
     }
 
     return { id: invoiceId, invoice_number: invoiceNumber };
-  } catch (error) {
-    console.error('Error creating invoice from work order:', error);
-    return null;
   }
 }
 
@@ -471,9 +517,14 @@ export { createInvoiceFromWorkOrder };
 router.post('/generate-missing', async (req, res) => {
   try {
     const orders = await query(
+      // Itemised job cards only: an imported legacy row carries a gross,
+      // VAT-inclusive service_fee (or 0), so "generating" its invoice would
+      // invent a zero or double-taxed bill for work already invoiced in the
+      // old system.
       `SELECT o.id FROM work_orders o
        LEFT JOIN invoices i ON i.work_order_id = o.id AND i.workshop_id = o.workshop_id
-       WHERE o.workshop_id = ? AND o.status IN ('confirmed','assigned','accepted','in_progress','ready_for_pickup','completed')
+       WHERE o.workshop_id = ? AND o.billing_basis = 'itemised'
+         AND o.status IN ('estimate_approved','confirmed','assigned','accepted','in_progress','inspection','ready_for_pickup','completed')
          AND i.id IS NULL
        ORDER BY o.id`,
       [req.workshopId]
@@ -506,15 +557,20 @@ router.get('/stats', async (req, res) => {
     const [stats] = await query(`
       SELECT
         COUNT(*) as total,
+        COALESCE(SUM(CASE WHEN status NOT IN ('void','cancelled') THEN total_amount ELSE 0 END), 0) as total_amount,
         SUM(CASE WHEN status = 'paid' THEN total_amount ELSE 0 END) as total_paid,
         SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid_count,
-        SUM(CASE WHEN status IN ('draft','sent') THEN total_amount ELSE 0 END) as total_pending,
-        SUM(CASE WHEN status IN ('draft','sent') THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN status IN ('draft','sent','partially_paid') THEN total_amount ELSE 0 END) as total_pending,
+        SUM(CASE WHEN status IN ('draft','sent','partially_paid') THEN 1 ELSE 0 END) as pending_count,
         SUM(CASE WHEN status = 'overdue' THEN total_amount ELSE 0 END) as total_overdue,
         SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END) as overdue_count,
         SUM(CASE WHEN status = 'void' THEN 1 ELSE 0 END) as void_count
       FROM invoices WHERE workshop_id = ?
     `, [t]);
+    // Per-status counts for the filter pills (the page used to count only the
+    // invoices it had loaded)
+    const byStatus = await query('SELECT status, COUNT(*) AS n FROM invoices WHERE workshop_id = ? GROUP BY status', [t]);
+    stats.by_status = Object.fromEntries(byStatus.map(r => [r.status, Number(r.n)]));
     res.json({ success: true, data: stats });
   } catch (error) {
     console.error('Invoice stats error:', error);
@@ -549,8 +605,9 @@ router.get('/', async (req, res) => {
        ${where}`, params
     );
 
-    const pg = parseInt(page);
-    const lm = parseInt(limit);
+    // Clamped: a non-numeric page/limit used to reach the SQL as LIMIT NaN (500)
+    const pg = Math.max(parseInt(page, 10) || 1, 1);
+    const lm = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
     const offset = (pg - 1) * lm;
 
     const invoices = await query(`
@@ -713,7 +770,7 @@ router.patch('/:id/status', async (req, res) => {
 });
 
 // ── DELETE /api/invoices/:id
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireManager, async (req, res) => {
   try {
     const [invoice] = await query(
       'SELECT id FROM invoices WHERE id = ? AND workshop_id = ?',
@@ -818,7 +875,7 @@ router.patch('/refunds/:id', async (req, res) => {
     if (action === 'approve' && refund.invoice_id) {
       const [inv] = await query('SELECT * FROM invoices WHERE id = ?', [refund.invoice_id]);
       if (inv) {
-        const cnNumber = `CN-${inv.invoice_number}`;
+        const cnNumber = await nextCreditNoteNumber(inv.workshop_id, inv.invoice_number);
         await execute(
           `INSERT INTO invoices (workshop_id, work_order_id, invoice_number, customer_id,
             subtotal, discount_amount, tax_rate, tax_amount, total_amount,
@@ -871,7 +928,7 @@ router.post('/:id/credit-note', async (req, res) => {
     const { amount, reason } = req.body;
     const creditAmount = amount ? Math.min(parseFloat(amount), parseFloat(original.total_amount)) : parseFloat(original.total_amount);
 
-    const invoiceNumber = `CN-${original.invoice_number}`;
+    const invoiceNumber = await nextCreditNoteNumber(original.workshop_id, original.invoice_number);
 
     const result = await execute(
       `INSERT INTO invoices (workshop_id, work_order_id, invoice_number, customer_id,
@@ -1032,7 +1089,7 @@ router.post('/from-settlement', async (req, res) => {
 // PAYMENT-TO-INVOICE RECONCILIATION
 // ═══════════════════════════════════════════════════════════════
 
-router.post('/:id/record-payment', async (req, res) => {
+router.post('/:id/record-payment', requireCapability('delivery.handover'), async (req, res) => {
   try {
     const { amount, payment_method, reference, notes } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });

@@ -31,7 +31,11 @@ export const config = {
   },
 
   jwt: {
-    secret: process.env.JWT_SECRET || 'dev-only-change-me-in-production',
+    // The fallback is public (it is in this file), so a production server
+    // running on it would accept tokens anyone can forge. Refuse to start.
+    secret: process.env.JWT_SECRET || (process.env.NODE_ENV === 'production'
+      ? (() => { throw new Error('JWT_SECRET must be set in production'); })()
+      : 'dev-only-change-me-in-production'),
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   },
 

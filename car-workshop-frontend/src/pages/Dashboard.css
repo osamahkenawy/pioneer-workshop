@@ -17,10 +17,22 @@
   border-radius: 20px;
   color: white;
   position: relative;
+  gap: 24px;
+}
+.dashboard-header > *:not(.dashboard-header-deco) { position: relative; z-index: 1; }
+
+/* Glow shapes, clipped to the header's rounded box. Kept off the header
+   itself so its children (the widget panel) are not clipped with them. */
+.dashboard-header-deco {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
 }
 
-.dashboard-header::before {
+.dashboard-header-deco::before {
   content: '';
   position: absolute;
   top: -50%;
@@ -31,7 +43,7 @@
   pointer-events: none;
 }
 
-.dashboard-header::after {
+.dashboard-header-deco::after {
   content: '';
   position: absolute;
   bottom: -30%;
@@ -575,7 +587,7 @@
 
 .quick-actions-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, 1fr);  /* 8 actions → two even rows */
   gap: 16px;
 }
 
@@ -1098,8 +1110,14 @@
 .header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
+.header-actions .btn-primary,
+.header-actions .btn-auto-refresh,
+.header-actions .last-refreshed { white-space: nowrap; }
+.header-actions .btn-primary { padding: 10px 18px; }
 
 /* ── COD Widget ── */
 .cod-widget-row {
@@ -1236,7 +1254,7 @@
   }
   
   .quick-actions-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
   }
 
   .recent-data-row.triple {
@@ -1274,14 +1292,14 @@
     border-radius: 14px;
   }
 
-  .dashboard-header::before {
+  .dashboard-header-deco::before {
     width: 200px;
     height: 200px;
     right: -10%;
     top: -30%;
   }
 
-  .dashboard-header::after {
+  .dashboard-header-deco::after {
     width: 150px;
     height: 150px;
     bottom: -20%;
@@ -1338,7 +1356,7 @@
   }
   
   .quick-actions-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 10px;
   }
 
@@ -1480,4 +1498,32 @@
     padding: 5px 10px;
     font-size: 0.72rem;
   }
+}
+
+/* ── Period honesty (an empty period says so, and offers all time) ── */
+.period-empty-hint {
+  display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 10px; padding: 6px 8px 6px 12px; border-radius: 10px;
+  background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.88); font-size: 12.5px;
+}
+.period-empty-hint button {
+  border: none; border-radius: 8px; padding: 4px 10px; cursor: pointer;
+  background: #fff; color: #1e3a6b; font-weight: 700; font-size: 12px; font-family: inherit;
+}
+.metric-sub { font-size: 0.75rem; color: var(--gray-400, #94a3b8); font-weight: 500; }
+.metric-trend.neutral { background: #f1f5f9; color: #475569; }
+.chart-empty {
+  height: 100%; min-height: 200px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px; color: #94a3b8; font-size: 13px;
+}
+.chart-empty button {
+  border-width: 1.5px; border-style: solid; border-color: #e2e8f0; border-radius: 9px;
+  background: #fff; color: #334155; padding: 6px 14px; font-weight: 600; font-size: 12.5px;
+  cursor: pointer; font-family: inherit;
+}
+.chart-empty button:hover { background: #f6f8fb; }
+
+/* The status ring keeps its legend underneath on a phone (Dashboard.jsx). */
+@media (max-width: 600px) {
+  .pipeline-chart .chart-body { height: 320px; }
 }

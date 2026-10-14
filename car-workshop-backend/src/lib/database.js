@@ -503,7 +503,7 @@ async function runMultiTenantMigrations() {
         id INT AUTO_INCREMENT PRIMARY KEY,
         workshop_id INT NOT NULL,
         tracking_token VARCHAR(20) NOT NULL,
-        barcode_value VARCHAR(20) NOT NULL,
+        barcode_value VARCHAR(64) NOT NULL,
         batch_name VARCHAR(100) DEFAULT NULL,
         is_used TINYINT(1) DEFAULT 0,
         work_order_id INT DEFAULT NULL,

@@ -109,7 +109,7 @@ vatRouter.post('/submit-fta', async (req, res) => {
       [fta_submission_id, req.workshopId, ...transaction_ids]
     );
 
-    await logAudit(req.workshopId, req.userId, 'FTA_SUBMIT', 'vat_transactions', null, null,
+    await logAudit(req.workshopId, req.user?.id, 'FTA_SUBMIT', 'vat_transactions', null, null,
       { fta_submission_id, count: transaction_ids.length });
 
     res.json({ success: true, fta_submission_id, submitted_count: transaction_ids.length });
@@ -181,7 +181,7 @@ evhcRouter.post('/', async (req, res) => {
           inspection_items, overall_score, status)
        VALUES (?,?,?,?,?,?,?,?)`,
       [req.workshopId, work_order_id || null, job_card_id || null, vehicle_id,
-       technician_id || req.userId, JSON.stringify(items), score, 'in_progress']
+       technician_id || req.user?.id, JSON.stringify(items), score, 'in_progress']
     );
 
     res.status(201).json({ success: true, id: result.insertId, overall_score: score });
@@ -340,7 +340,7 @@ groupIntegrationRouter.post('/outbound', authMiddleware, async (req, res) => {
       [result.insertId]
     );
 
-    await logAudit(req.workshopId, req.userId, 'OUTBOUND_INTEGRATION', 'group_integration_events', result.insertId, null, { event_type, external_ref });
+    await logAudit(req.workshopId, req.user?.id, 'OUTBOUND_INTEGRATION', 'group_integration_events', result.insertId, null, { event_type, external_ref });
     res.json({ success: true, event_id: result.insertId });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to send integration event' });

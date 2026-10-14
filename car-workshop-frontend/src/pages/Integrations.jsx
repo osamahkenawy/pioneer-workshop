@@ -720,41 +720,44 @@ function APIDocsTab() {
     setTimeout(() => setCopiedIdx(null), 2000);
   };
 
+  // Paths, scopes and fields must match routes/api-v1.js exactly. These were
+  // copied from the delivery product (/work-orders, orders:read,
+  // recipient_address, …) and none of the examples worked.
   const ENDPOINTS = [
     {
-      method: 'GET', path: '/work-orders', title: t('integrations.docs.list_orders', 'List WorkOrders'),
-      desc: t('integrations.docs.list_orders_desc', 'Fetch orders with pagination and optional filters.'),
-      perms: 'orders:read',
+      method: 'GET', path: '/work_orders', title: t('integrations.docs.list_orders', 'List Work Orders'),
+      desc: t('integrations.docs.list_orders_desc', 'Fetch work orders, newest first, with pagination and optional filters.'),
+      perms: 'work_orders:read',
       params: 'page, limit, status, from, to, service_status_token',
-      curl: `curl -s "${baseUrl}/work-orders?limit=10&status=pending" \\\n  -H "X-API-Key: ${selectedKey}"`,
+      curl: `curl -s "${baseUrl}/work_orders?limit=10&status=pending" \\\n  -H "X-API-Key: ${selectedKey}"`,
     },
     {
-      method: 'GET', path: '/work-orders/:id', title: t('integrations.docs.get_order', 'Get WorkOrder'),
-      desc: t('integrations.docs.get_order_desc', 'Fetch a single order by ID or tracking token. Includes status history.'),
-      perms: 'orders:read',
-      curl: `curl -s "${baseUrl}/work-orders/123" \\\n  -H "X-API-Key: ${selectedKey}"`,
+      method: 'GET', path: '/work_orders/:id', title: t('integrations.docs.get_order', 'Get Work Order'),
+      desc: t('integrations.docs.get_order_desc', 'Fetch one work order by ID or service status token, with its lines and status history.'),
+      perms: 'work_orders:read',
+      curl: `curl -s "${baseUrl}/work_orders/123" \\\n  -H "X-API-Key: ${selectedKey}"`,
     },
     {
-      method: 'POST', path: '/work-orders', title: t('integrations.docs.create_order', 'Create WorkOrder'),
-      desc: t('integrations.docs.create_order_desc', 'Create a new delivery order. Required fields: recipient_name, recipient_phone, recipient_address.'),
-      perms: 'orders:write',
-      curl: `curl -s "${baseUrl}/work-orders" \\\n  -X POST \\\n  -H "X-API-Key: ${selectedKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "recipient_name": "Ahmed Ali",\n    "recipient_phone": "0501234567",\n    "recipient_address": "Downtown Dubai, Tower 1",\n    "payment_method": "cod",\n    "cash_amount": 150,\n    "service_fee": 25\n  }'`,
+      method: 'POST', path: '/work_orders', title: t('integrations.docs.create_order', 'Create Work Order'),
+      desc: t('integrations.docs.create_order_desc', 'Open a job card. Required: customer_name, customer_phone, description. The total and VAT are calculated from service_fee and items.'),
+      perms: 'work_orders:write',
+      curl: `curl -s "${baseUrl}/work_orders" \\\n  -X POST \\\n  -H "X-API-Key: ${selectedKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "customer_name": "Ahmed Ali",\n    "customer_phone": "+971501234567",\n    "description": "Brake noise from front left",\n    "odometer_in": 85000,\n    "service_fee": 80,\n    "items": [{ "name": "Brake pads", "quantity": 1, "unit_price": 150 }]\n  }'`,
     },
     {
-      method: 'PATCH', path: '/work-orders/:id/cancel', title: t('integrations.docs.cancel_order', 'Cancel WorkOrder'),
-      desc: t('integrations.docs.cancel_order_desc', 'Cancel a pending/confirmed order. Cannot cancel orders already in transit or delivered.'),
-      perms: 'orders:write',
-      curl: `curl -s "${baseUrl}/work-orders/123/cancel" \\\n  -X PATCH \\\n  -H "X-API-Key: ${selectedKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"reason": "Customer requested cancellation"}'`,
+      method: 'PATCH', path: '/work_orders/:id/cancel', title: t('integrations.docs.cancel_order', 'Cancel Work Order'),
+      desc: t('integrations.docs.cancel_order_desc', 'Cancel a work order before work starts (pending, confirmed, assigned or estimate approved).'),
+      perms: 'work_orders:write',
+      curl: `curl -s "${baseUrl}/work_orders/123/cancel" \\\n  -X PATCH \\\n  -H "X-API-Key: ${selectedKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"reason": "Customer requested cancellation"}'`,
     },
     {
-      method: 'GET', path: '/service-status/:token', title: t('integrations.docs.track_order', 'Track WorkOrder'),
-      desc: t('integrations.docs.track_order_desc', 'Track an order by its tracking token. WarrantyClaims current status and full status history.'),
-      perms: 'tracking:read',
-      curl: `curl -s "${baseUrl}/service-status/TR0B64E7E75FBF" \\\n  -H "X-API-Key: ${selectedKey}"`,
+      method: 'GET', path: '/service-status/:token', title: t('integrations.docs.track_order', 'Service Status'),
+      desc: t('integrations.docs.track_order_desc', 'Look up a work order by its service status token. Returns the current status and full status history.'),
+      perms: 'service_status:read',
+      curl: `curl -s "${baseUrl}/service-status/<token>" \\\n  -H "X-API-Key: ${selectedKey}"`,
     },
     {
       method: 'GET', path: '/customers', title: t('integrations.docs.list_customers', 'List Customers'),
-      desc: t('integrations.docs.list_customers_desc', 'List all merchant customers. Useful for getting customer_id to associate with orders.'),
+      desc: t('integrations.docs.list_customers_desc', 'List your customers, to find the customer_id to attach to a work order.'),
       perms: 'customers:read',
       curl: `curl -s "${baseUrl}/customers" \\\n  -H "X-API-Key: ${selectedKey}"`,
     },

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polygon, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
+import { useTranslation } from 'react-i18next';
 import { Map as MapIcon, HalfMoon, SunLight, PlanetSat, Expand, Collapse, NavArrowDown } from 'iconoir-react';
 import { MARKER_ICONS } from './LocationPicker';
 import 'leaflet/dist/leaflet.css';
@@ -80,6 +81,8 @@ function InvalidateOnResize({ trigger }) {
      mapRef        — ref to expose flyTo/fitBounds
      showControls  — show tile switcher + fullscreen (default true)
      stats         — { unassigned, active, mechanics } for overlay
+   Legend words are the workshop's (mapView.*): the courier legend said
+   "Pickup" and "Mechanics" for the customer's location and the technicians.
    ══════════════════════════════════════════════════════════════ */
 const MapView = forwardRef(function MapView({
   markers = [], polygons = [], polylines = [],
@@ -87,6 +90,7 @@ const MapView = forwardRef(function MapView({
   height = 400, onMarkerClick, flyTarget,
   showControls = true, stats,
 }, ref) {
+  const { t } = useTranslation();
   const [tile, setTile] = useState('street');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
@@ -205,7 +209,7 @@ const MapView = forwardRef(function MapView({
         {/* Empty state overlay */}
         {markers.length === 0 && polygons.length === 0 && (
           <div className="mapview-empty-overlay">
-            <span>No locations to display</span>
+            <span>{t('mapView.empty', 'No locations to display')}</span>
           </div>
         )}
       </MapContainer>
@@ -215,21 +219,21 @@ const MapView = forwardRef(function MapView({
         <>
           {/* Tile Switcher — top right */}
           <div className="mapview-tile-switcher">
-            {Object.entries(TILES).map(([key, t]) => (
+            {Object.entries(TILES).map(([key, layer]) => (
               <button
                 key={key}
                 className={`mapview-tile-btn ${tile === key ? 'active' : ''}`}
                 onClick={() => setTile(key)}
-                title={t.label}
+                title={layer.label}
               >
-                <span className="mapview-tile-icon"><t.Icon width={14} height={14} /></span>
-                <span className="mapview-tile-label">{t.label}</span>
+                <span className="mapview-tile-icon"><layer.Icon width={14} height={14} /></span>
+                <span className="mapview-tile-label">{layer.label}</span>
               </button>
             ))}
           </div>
 
           {/* Fullscreen Toggle — below zoom controls, top left */}
-          <button className="mapview-fullscreen-btn" onClick={toggleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+          <button className="mapview-fullscreen-btn" onClick={toggleFullscreen} title={isFullscreen ? t('mapView.exit_fullscreen', 'Exit full screen') : t('mapView.fullscreen', 'Full screen')}>
             {isFullscreen ? <Collapse width={16} height={16} /> : <Expand width={16} height={16} />}
           </button>
 
@@ -240,21 +244,21 @@ const MapView = forwardRef(function MapView({
                 <div className="mapview-stat">
                   <span className="mapview-stat-dot" style={{ background: '#f59e0b' }} />
                   <span className="mapview-stat-val">{stats.unassigned}</span>
-                  <span className="mapview-stat-label">Unassigned</span>
+                  <span className="mapview-stat-label">{t('mapView.unassigned', 'Unassigned')}</span>
                 </div>
               )}
               {stats.active != null && (
                 <div className="mapview-stat">
                   <span className="mapview-stat-dot" style={{ background: '#3b82f6' }} />
                   <span className="mapview-stat-val">{stats.active}</span>
-                  <span className="mapview-stat-label">Active</span>
+                  <span className="mapview-stat-label">{t('mapView.active', 'Active')}</span>
                 </div>
               )}
               {stats.mechanics != null && (
                 <div className="mapview-stat">
                   <span className="mapview-stat-dot" style={{ background: '#22c55e' }} />
                   <span className="mapview-stat-val">{stats.mechanics}</span>
-                  <span className="mapview-stat-label">Mechanics</span>
+                  <span className="mapview-stat-label">{t('mapView.technicians', 'Technicians')}</span>
                 </div>
               )}
             </div>
@@ -264,21 +268,21 @@ const MapView = forwardRef(function MapView({
           <div className={`mapview-legend ${showLegend ? '' : 'collapsed'}`}>
             <button className="mapview-legend-toggle" onClick={() => setShowLegend(l => !l)}>
               <NavArrowDown width={12} height={12} style={{ transform: showLegend ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.2s', marginRight: 4 }} />
-              Legend
+              {t('mapView.legend', 'Legend')}
             </button>
             {showLegend && (
               <div className="mapview-legend-items">
                 <div className="mapview-legend-item">
-                  <span className="mapview-legend-dot" style={{ background: '#ef4444' }} /> Unassigned
+                  <span className="mapview-legend-dot" style={{ background: '#ef4444' }} /> {t('mapView.unassigned', 'Unassigned')}
                 </div>
                 <div className="mapview-legend-item">
-                  <span className="mapview-legend-dot" style={{ background: '#7c3aed' }} /> In Progress
+                  <span className="mapview-legend-dot" style={{ background: '#7c3aed' }} /> {t('mapView.in_work', 'In work')}
                 </div>
                 <div className="mapview-legend-item">
-                  <span className="mapview-legend-dot" style={{ background: '#1e40af' }} /> Pickup
+                  <span className="mapview-legend-dot" style={{ background: '#1e40af' }} /> {t('mapView.customer_location', 'Customer location')}
                 </div>
                 <div className="mapview-legend-item">
-                  <span className="mapview-legend-dot" style={{ background: '#16a34a' }} /> Mechanics
+                  <span className="mapview-legend-dot" style={{ background: '#16a34a' }} /> {t('mapView.technicians', 'Technicians')}
                 </div>
               </div>
             )}

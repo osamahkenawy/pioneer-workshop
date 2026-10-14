@@ -2,9 +2,12 @@ import express from 'express';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { managerForWrites } from '../lib/access.js';
 
 const router = express.Router();
 router.use(authMiddleware);
+// Creating API keys hands out access that bypasses staff roles; managers only.
+router.use(managerForWrites);
 
 // ── Ensure extra columns exist (idempotent) ────────────────
 (async () => {

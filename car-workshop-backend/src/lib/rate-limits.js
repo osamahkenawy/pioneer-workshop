@@ -101,6 +101,24 @@ export const passwordResetLimiter = rateLimit({
   handler,
 });
 
+/**
+ * Redeeming a link's token (set or reset a password, confirm an address):
+ * 5 failed tries / hour per IP. The body carries only the token, so the
+ * bucket is the IP alone, and under passwordResetLimiter every customer on
+ * the workshop's Wi-Fi shared five set-password saves an hour. A token that
+ * works is used up by the request, so a success is not counted: guessing
+ * stays at five tries an hour, and real customers are not locked out.
+ */
+export const tokenRedeemLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  handler,
+  skipSuccessfulRequests: true,
+});
+
 /** Account creation: 5 / hour per IP+identifier. */
 export const registrationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -165,6 +183,42 @@ export const publicTrackingLimiter = rateLimit({
 export const publicEnquiryLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  handler,
+});
+
+/**
+ * Customer estimate approval link (GET /api/public/estimates/:token and its
+ * per-line decide route).
+ *
+ * Used to share publicEnquiryLimiter's 10/hour. A customer spends one request
+ * opening the page and one per line they approve or reject, so an estimate of
+ * ten or more lines could not be finished at all — and on mobile carrier NAT
+ * every customer on the same public IP shared those ten. The URL carries a
+ * 192-bit random token, so guessing it is not what the limit protects against;
+ * this only caps a runaway client.
+ */
+export const estimateApprovalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  handler,
+});
+
+/**
+ * The customer's inspection link (GET /api/public/inspections/:token, its
+ * documents and the one-time sign route). Same shape as the estimate link: a
+ * customer opens the page, its photos and signs — a handful of requests — and
+ * on carrier NAT many customers share an IP. The 256-bit token is what stops
+ * guessing; this only caps a runaway client.
+ */
+export const inspectionLinkLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.ip,

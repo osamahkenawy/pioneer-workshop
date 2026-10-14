@@ -68,7 +68,7 @@ const SuperAdminVacancies = () => {
   const fetchOpenings = async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API}/super-admin/vacancies`, { headers: hdrs() });
+      const r = await fetch(`${API}/admin/careers/vacancies`, { headers: hdrs() });
       if (r.ok) { const d = await r.json(); setOpenings(d.openings || []); setStats(d.stats || {}); }
     } catch (_) {}
     setLoading(false);
@@ -80,26 +80,26 @@ const SuperAdminVacancies = () => {
       if (filterStatus) p.set('status', filterStatus);
       if (filterOpening) p.set('opening_id', filterOpening);
       if (searchTerm) p.set('search', searchTerm);
-      const r = await fetch(`${API}/super-admin/applications?${p}`, { headers: hdrs() });
+      const r = await fetch(`${API}/admin/careers/applications?${p}`, { headers: hdrs() });
       if (r.ok) { const d = await r.json(); setApplications(d.applications || []); }
     } catch (_) {}
   };
 
   const saveOpening = async () => {
     const method = editId ? 'PUT' : 'POST';
-    const url = editId ? `${API}/super-admin/vacancies/${editId}` : `${API}/super-admin/vacancies`;
+    const url = editId ? `${API}/admin/careers/vacancies/${editId}` : `${API}/admin/careers/vacancies`;
     await fetch(url, { method, headers: hdrs(), body: JSON.stringify(form) });
     closeModal(); fetchOpenings();
   };
 
   const deleteOpening = async (id) => {
     if (!(await askConfirm({ title: 'Delete vacancy?', message: 'This vacancy and ALL its applications will be deleted.', danger: true, confirmLabel: 'Delete' }))) return;
-    await fetch(`${API}/super-admin/vacancies/${id}`, { method: 'DELETE', headers: hdrs() });
+    await fetch(`${API}/admin/careers/vacancies/${id}`, { method: 'DELETE', headers: hdrs() });
     fetchAll();
   };
 
   const toggleOpening = async (id) => {
-    await fetch(`${API}/super-admin/vacancies/${id}/toggle`, { method: 'PATCH', headers: hdrs() });
+    await fetch(`${API}/admin/careers/vacancies/${id}/toggle`, { method: 'PATCH', headers: hdrs() });
     fetchOpenings();
   };
 
@@ -115,7 +115,7 @@ const SuperAdminVacancies = () => {
   const closeModal = () => { setShowModal(false); setEditId(null); setForm(blankForm); };
 
   const updateAppStatus = async (appId, status) => {
-    await fetch(`${API}/super-admin/applications/${appId}/status`, {
+    await fetch(`${API}/admin/careers/applications/${appId}/status`, {
       method: 'PATCH', headers: hdrs(), body: JSON.stringify({ status }),
     });
     fetchApplications(); fetchOpenings();
@@ -124,7 +124,7 @@ const SuperAdminVacancies = () => {
 
   const deleteApp = async (id) => {
     if (!(await askConfirm({ title: 'Delete application?', message: 'This applicant record will be permanently removed.', danger: true, confirmLabel: 'Delete' }))) return;
-    await fetch(`${API}/super-admin/applications/${id}`, { method: 'DELETE', headers: hdrs() });
+    await fetch(`${API}/admin/careers/applications/${id}`, { method: 'DELETE', headers: hdrs() });
     fetchAll(); if (showAppDetail?.id === id) setShowAppDetail(null);
   };
 

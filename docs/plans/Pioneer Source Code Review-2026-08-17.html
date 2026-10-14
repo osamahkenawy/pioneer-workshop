@@ -91,7 +91,7 @@ INSERT INTO users ... ('admin', 'Demo@12345' ...);      // default admin passwor
 
 // deploy/deploy-rhel.sh (in public repo - repo is public, verified via GitHub API)
 DB_USER="root"
-DB_PASS="Root@12345"                     // hardcoded MySQL root password
+DB_PASS="[redacted]"                     // hardcoded MySQL root password
 SERVER_IP="10.10.241.84"                 // internal server IP
 JWT_SECRET=rhel-staging-jwt-secret-$(date +%s)   // timestamp-derived secret
 // SMTP_* blank, but script writes .env with BACKEND_URL/FRONTEND_URL=http://{IP} (HTTP, no TLS)</pre>

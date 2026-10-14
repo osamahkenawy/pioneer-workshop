@@ -149,11 +149,14 @@ router.post('/', async (req, res) => {
     }
     if (!customerId) {
       // Create new customer
+      // customers has full_name/type — name, customer_type and created_by do
+      // not exist, so creating a customer at the receiving desk always failed.
+      const CUSTOMER_TYPES = ['individual', 'business', 'corporate', 'insurance', 'fleet', 'other'];
       const custResult = await execute(
-        `INSERT INTO customers (workshop_id, name, phone, email, customer_type, created_by)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO customers (workshop_id, full_name, phone, email, type)
+         VALUES (?, ?, ?, ?, ?)`,
         [req.workshopId, customer_name, customer_phone || null,
-         customer_email || null, customer_type, req.userId]
+         customer_email || null, CUSTOMER_TYPES.includes(customer_type) ? customer_type : 'individual']
       );
       customerId = custResult.insertId;
     }
@@ -210,7 +213,7 @@ router.post('/', async (req, res) => {
        complaints || null, condition_notes || null,
        condition_photos ? JSON.stringify(condition_photos) : null,
        mulkia_photo || null, id_photo || null,
-       advisor_id || req.userId, req.userId]
+       advisor_id || req.user?.id, req.user?.id]
     );
     const formId = result.insertId;
 
@@ -233,7 +236,7 @@ router.post('/', async (req, res) => {
       );
     }
 
-    await logAudit(req.workshopId, req.userId, 'CREATE', 'vehicle_receiving_forms', formId, null,
+    await logAudit(req.workshopId, req.user?.id, 'CREATE', 'vehicle_receiving_forms', formId, null,
       { form_number, customer_type, new_customer: !existingCustomerId, new_vehicle: !existingVehicleId });
 
     res.status(201).json({
@@ -313,7 +316,7 @@ router.post('/:id/submit', async (req, res) => {
       [req.params.id, req.workshopId]
     );
 
-    await logAudit(req.workshopId, req.userId, 'SUBMIT', 'vehicle_receiving_forms', req.params.id, 'draft', { status: 'submitted' });
+    await logAudit(req.workshopId, req.user?.id, 'SUBMIT', 'vehicle_receiving_forms', req.params.id, 'draft', { status: 'submitted' });
     res.json({ success: true, message: 'VRF submitted' });
   } catch (err) {
     console.error('POST /vehicle-receiving/:id/submit error:', err);
@@ -364,10 +367,10 @@ router.post('/credit-facilities', async (req, res) => {
          credit_limit = VALUES(credit_limit), status = 'pending_approval'`,
       [req.workshopId, customer_id, company_name || null, trade_licence_no || null,
        trade_licence_expiry || null, tax_registration_no || null, commercial_reg_no || null,
-       parseFloat(credit_limit), parseInt(payment_terms_days || 30), req.userId]
+       parseFloat(credit_limit), parseInt(payment_terms_days || 30), req.user?.id]
     );
 
-    await logAudit(req.workshopId, req.userId, 'CREATE', 'credit_facilities', result.insertId, null, { customer_id, credit_limit });
+    await logAudit(req.workshopId, req.user?.id, 'CREATE', 'credit_facilities', result.insertId, null, { customer_id, credit_limit });
     res.status(201).json({ success: true, id: result.insertId });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to create credit facility' });
@@ -385,9 +388,9 @@ router.patch('/credit-facilities/:id/approve', async (req, res) => {
       `UPDATE credit_facilities SET status = ?, approved_by = ?, approved_at = NOW(),
        rejection_reason = CASE WHEN ? = 'rejected' THEN ? ELSE NULL END
        WHERE id = ? AND workshop_id = ?`,
-      [status, req.userId, status, rejection_reason || null, req.params.id, req.workshopId]
+      [status, req.user?.id, status, rejection_reason || null, req.params.id, req.workshopId]
     );
-    await logAudit(req.workshopId, req.userId, 'APPROVE', 'credit_facilities', req.params.id, null, { status });
+    await logAudit(req.workshopId, req.user?.id, 'APPROVE', 'credit_facilities', req.params.id, null, { status });
     res.json({ success: true, message: `Credit facility ${status}` });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to update credit facility' });

@@ -1,65 +1,62 @@
 /* ══════════════════════════════════════════════════════════════
- * CustomerVerifyEmail.jsx — Email Verification Landing Page
+ * CustomerVerifyEmail.jsx — the link in the confirmation e-mail.
+ * Route: /customer/verify-email?token=… (older e-mails point at
+ * /portal/verify-email or /merchant/verify-email; PortalRedirect sends them here).
  * ══════════════════════════════════════════════════════════════ */
 import { useState, useEffect } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
-import { CheckCircle, WarningTriangle, Mail } from 'iconoir-react';
+import { useSearchParams, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { CheckCircle, WarningTriangle } from 'iconoir-react';
+import api from '../../lib/customerApi';
+import { logoSrc, onLogoError } from '../../components/service-status/workshopLogo';
+import { PORTAL } from './portalPaths';
 import './CustomerAuth.css';
 
-const API_URL = import.meta.env.VITE_API_URL || '/api';
-
 export default function CustomerVerifyEmail() {
+  const { t } = useTranslation();
   const [params] = useSearchParams();
-  const navigate  = useNavigate();
-  const [status, setStatus] = useState('loading');
-  const [message, setMessage] = useState('');
+  const token = params.get('token');
+  const [status, setStatus] = useState(token ? 'loading' : 'error');
 
   useEffect(() => {
-    const token = params.get('token');
-    if (!token) { setStatus('error'); setMessage('Missing verification token.'); return; }
-
+    if (!token) return;
+    let alive = true;
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/customer-auth/verify-email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token }),
-        });
-        const data = await res.json();
-        if (data.success) { setStatus('success'); setMessage('Your email has been verified!'); }
-        else { setStatus('error'); setMessage(data.message || 'Verification failed'); }
-      } catch { setStatus('error'); setMessage('Verification request failed'); }
+        const res = await api.post('/customer-auth/verify-email', { token });
+        if (alive) setStatus(res.success ? 'success' : 'error');
+      } catch {
+        if (alive) setStatus('error');
+      }
     })();
-  }, [params]);
+    return () => { alive = false; };
+  }, [token]);
 
   return (
     <div className="ca-page">
-      <div className="ca-panel-form" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', width: '100%', maxWidth: '100%' }}>
-        <div className="ca-form-container" style={{ textAlign: 'center' }}>
+      <div className="ca-left">
+        <div className="ca-logo-box"><img src={logoSrc(null)} alt="Pioneer" className="ca-logo" onError={onLogoError} /></div>
+        <div className="ca-form ca-center">
           {status === 'loading' && (
             <>
-              <div className="ca-spinner-wrap"><div className="ca-spinner" /></div>
-              <h2>Verifying your email…</h2>
+              <span className="ca-spinner" style={{ borderColor: '#e2e8f0', borderTopColor: '#c2410c' }} aria-hidden="true" />
+              <h1 className="ca-title" role="status">{t('portal.verify.checking', 'Confirming your e-mail…')}</h1>
             </>
           )}
           {status === 'success' && (
             <>
-              <CheckCircle width={56} height={56} style={{ color: '#22c55e', margin: '0 auto 16px' }} />
-              <h2 style={{ color: '#0f172a' }}>Email Verified!</h2>
-              <p className="ca-subtitle">{message}</p>
-              <button className="ca-btn" onClick={() => navigate('/merchant/login')} style={{ marginTop: 24 }}>
-                <Mail width={18} height={18} /> Go to Login
-              </button>
+              <CheckCircle width={56} height={56} className="ca-icon-ok" aria-hidden="true" />
+              <h1 className="ca-title">{t('portal.verify.done_title', 'E-mail confirmed')}</h1>
+              <p className="ca-subtitle">{t('portal.verify.done_text', 'Your customer portal is ready. You can sign in now.')}</p>
+              <Link to={PORTAL.login} className="ca-btn ca-btn-primary">{t('portal.auth.go_to_login', 'Go to sign in')}</Link>
             </>
           )}
           {status === 'error' && (
             <>
-              <WarningTriangle width={56} height={56} style={{ color: '#ef4444', margin: '0 auto 16px' }} />
-              <h2 style={{ color: '#0f172a' }}>Verification Failed</h2>
-              <p className="ca-subtitle">{message}</p>
-              <button className="ca-btn" onClick={() => navigate('/merchant/login')} style={{ marginTop: 24 }}>
-                Back to Login
-              </button>
+              <WarningTriangle width={56} height={56} className="ca-icon-warn" aria-hidden="true" />
+              <h1 className="ca-title">{t('portal.verify.failed_title', "We couldn't confirm your e-mail")}</h1>
+              <p className="ca-subtitle">{t('portal.verify.failed_text', 'The link was already used or has run out. Sign in to have the e-mail sent again.')}</p>
+              <Link to={PORTAL.login} className="ca-btn ca-btn-outline">{t('portal.auth.back_to_login', 'Back to sign in')}</Link>
             </>
           )}
         </div>

@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js';
 const router = express.Router();
 
 /**
- * GET /api/stats?period=month|week — car workshop platform KPIs
+ * GET /api/stats?period=week|month|all — car workshop platform KPIs
  *
  * The dashboard is period-based rather than day-based: a workshop that has
  * booked nothing since this morning still wants to see how the week/month is
@@ -18,23 +18,42 @@ router.get('/', authMiddleware, async (req, res) => {
     const workshopId = req.workshopId;
     const today = new Date().toISOString().slice(0, 10);
 
-    const period = req.query.period === 'week' ? 'week' : 'month';
+    // 'all' is an explicit choice on the switcher. The tiles used to fall back
+    // to all-time figures on their own whenever the month was empty, while the
+    // switcher still said "This Month" — so the numbers and their label disagreed.
+    const period = ['week', 'all'].includes(req.query.period) ? req.query.period : 'month';
     // Predicates for "in the selected period" / "in the one before it",
     // applied to whichever date column a given metric is measured on.
-    const inPeriod = (col) => period === 'week'
+    const inPeriod = (col) => period === 'all' ? '1=1'
+      : period === 'week'
       ? `YEARWEEK(${col}, 1) = YEARWEEK(CURDATE(), 1)`
       : `YEAR(${col}) = YEAR(CURDATE()) AND MONTH(${col}) = MONTH(CURDATE())`;
-    const inPrevPeriod = (col) => period === 'week'
-      ? `YEARWEEK(${col}, 1) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 1 WEEK), 1)`
-      : `YEAR(${col}) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND MONTH(${col}) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))`;
+    // The previous period up to the same point (like-for-like). Comparing the
+    // month so far with the whole of last month made every tile read as a
+    // drop for most of the month. All time has nothing before it.
+    const inPrevPeriod = (col) => period === 'all' ? '1=0'
+      : period === 'week'
+      ? `YEARWEEK(${col}, 1) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 1 WEEK), 1) AND WEEKDAY(${col}) <= WEEKDAY(CURDATE())`
+      : `YEAR(${col}) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND MONTH(${col}) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))
+         AND DAY(${col}) <= DAY(CURDATE())`;
     // Range echoed back so the dashboard can deep-link into the work order
     // list with the same window it is showing.
     const [periodRange] = await query(
-      period === 'week'
+      period === 'all'
+        ? `SELECT COALESCE(DATE(MIN(created_at)), CURDATE()) AS start_date, CURDATE() AS end_date
+             FROM work_orders WHERE workshop_id = ?`
+        : period === 'week'
         ? `SELECT DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) AS start_date,
                   DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY) AS end_date`
-        : `SELECT DATE_FORMAT(CURDATE(), '%Y-%m-01') AS start_date, LAST_DAY(CURDATE()) AS end_date`
+        : `SELECT DATE_FORMAT(CURDATE(), '%Y-%m-01') AS start_date, LAST_DAY(CURDATE()) AS end_date`,
+      period === 'all' ? [workshopId] : []
     );
+
+    // Revenue per job card. Itemised job cards (since 20261006) carry labour
+    // in service_fee and parts in items, totalled in total_amount; legacy
+    // imported rows carry their whole (VAT-inclusive) bill in service_fee.
+    // Summing service_fee alone would drop the parts on every new job card.
+    const REVENUE = `CASE WHEN billing_basis = 'itemised' THEN total_amount ELSE service_fee - discount END`;
 
     // ── Period-scoped headline figures ──
     const [ordersPeriod] = await query(
@@ -42,7 +61,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const [completedPeriod] = await query(
       `SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${inPeriod('completed_at')}`, [workshopId]);
     const [revenuePeriod] = await query(
-      `SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders
+      `SELECT COALESCE(SUM(${REVENUE}), 0) as total FROM work_orders
         WHERE workshop_id = ? AND status = 'completed' AND ${inPeriod('completed_at')}`, [workshopId]);
     const [cancelledPeriod] = await query(
       `SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status = 'cancelled' AND ${inPeriod('cancelled_at')}`, [workshopId]);
@@ -55,7 +74,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const [completedPrev] = await query(
       `SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${inPrevPeriod('completed_at')}`, [workshopId]);
     const [revenuePrev] = await query(
-      `SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders
+      `SELECT COALESCE(SUM(${REVENUE}), 0) as total FROM work_orders
         WHERE workshop_id = ? AND status = 'completed' AND ${inPrevPeriod('completed_at')}`, [workshopId]);
 
     // Work orders today
@@ -85,7 +104,7 @@ router.get('/', authMiddleware, async (req, res) => {
     );
     // Pending
     const [pendingWorkOrders] = await query(
-      "SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status IN ('pending','confirmed')",
+      "SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status IN ('pending','confirmed','estimate_approved')",
       [workshopId]
     );
     // Cancelled today (there's no separate 'failed' status any more — a job
@@ -96,12 +115,12 @@ router.get('/', authMiddleware, async (req, res) => {
     );
     // Total revenue today (completed work orders)
     const [revenueToday] = await query(
-      "SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND DATE(completed_at) = CURDATE()",
+      `SELECT COALESCE(SUM(${REVENUE}), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND DATE(completed_at) = CURDATE()`,
       [workshopId]
     );
     // Revenue this month
     const [revenueMonth] = await query(
-      "SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND MONTH(completed_at) = MONTH(CURDATE()) AND YEAR(completed_at) = YEAR(CURDATE())",
+      `SELECT COALESCE(SUM(${REVENUE}), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND MONTH(completed_at) = MONTH(CURDATE()) AND YEAR(completed_at) = YEAR(CURDATE())`,
       [workshopId]
     );
     // Available mechanics
@@ -129,12 +148,13 @@ router.get('/', authMiddleware, async (req, res) => {
     );
     // Daily volume across the selected period (7 days for a week, the whole
     // month otherwise) — the trend chart follows the period switcher too.
+    const bucket = period === 'all' ? "DATE_FORMAT(created_at, '%Y-%m-01')" : 'DATE(created_at)';
     const workOrdersChart = await query(
-      `SELECT DATE(created_at) as date, COUNT(*) as total,
+      `SELECT ${bucket} as date, COUNT(*) as total,
               SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
               SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as failed
        FROM work_orders WHERE workshop_id = ? AND ${inPeriod('created_at')}
-       GROUP BY DATE(created_at) ORDER BY date`,
+       GROUP BY ${bucket} ORDER BY date`,
       [workshopId]
     );
     // Status breakdown — all-time snapshot of the workshop's pipeline. Kept
@@ -152,7 +172,8 @@ router.get('/', authMiddleware, async (req, res) => {
       `SELECT COUNT(*) as total,
               SUM(status = 'completed') as completed,
               SUM(status IN ('assigned','accepted','in_progress','inspection','ready_for_pickup')) as active,
-              COALESCE(SUM(CASE WHEN status = 'completed' THEN service_fee - discount ELSE 0 END), 0) as revenue
+              COALESCE(SUM(CASE WHEN status = 'completed' THEN ${REVENUE} ELSE 0 END), 0) as revenue,
+              SUM(status = 'cancelled') as cancelled
        FROM work_orders WHERE workshop_id = ?`,
       [workshopId]
     );
@@ -234,7 +255,7 @@ router.get('/', authMiddleware, async (req, res) => {
       [workshopId]
     );
     const [revenueYesterday] = await query(
-      "SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND DATE(completed_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)",
+      `SELECT COALESCE(SUM(${REVENUE}), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND DATE(completed_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`,
       [workshopId]
     );
 
@@ -262,7 +283,9 @@ router.get('/', authMiddleware, async (req, res) => {
     const oy = workOrdersYesterday.count || 0;
     const dy = completedYesterday.count || 0;
     const ry = parseFloat(revenueYesterday.total) || 0;
-    const calcDelta = (curr, prev) => prev > 0 ? Math.round(((curr - prev) / prev) * 100) : (curr > 0 ? 100 : 0);
+    // null when there is nothing to compare with: "100% vs last month" off a
+    // previous period of zero says nothing, and the badge should not render.
+    const calcDelta = (curr, prev) => (period === 'all' || !(prev > 0)) ? null : Math.round(((curr - prev) / prev) * 100);
 
     // Map work_orders_chart → daily_chart with the `orders` field name the
     // frontend expects, filling every day in the period so the line is
@@ -274,7 +297,10 @@ router.get('/', authMiddleware, async (req, res) => {
     // Don't draw the rest of the month as a flat zero line — stop at today.
     const lastDay = periodEnd > now ? now : periodEnd;
     const dayCount = Math.max(1, Math.round((lastDay - periodStart) / 86400000) + 1);
-    const dailyChart = Array.from({ length: dayCount }, (_, i) => {
+    const monthlyChart = () => workOrdersChart.map(r => ({
+      date: String(r.date).slice(0, 10), orders: r.total || 0, delivered: Number(r.completed) || 0, failed: Number(r.failed) || 0,
+    }));
+    const dailyChart = period === 'all' ? monthlyChart() : Array.from({ length: dayCount }, (_, i) => {
       const d = new Date(periodStart);
       d.setDate(d.getDate() + i);
       const iso = asIso(d);
@@ -296,6 +322,7 @@ router.get('/', authMiddleware, async (req, res) => {
         // Which window everything above is measured over
         period: {
           type: period,
+          granularity: period === 'all' ? 'month' : 'day',
           start_date: String(periodRange.start_date).slice(0, 10),
           end_date: String(periodRange.end_date).slice(0, 10),
         },
@@ -315,7 +342,9 @@ router.get('/', authMiddleware, async (req, res) => {
           revenue_period:    parseFloat(revenuePeriod.total) || 0,
           avg_minutes_period: Math.round(avgServicePeriod.avg_minutes || 0),
           success_rate_period: (ordersPeriod.count || 0) > 0
-            ? Math.round(((completedPeriod.count || 0) / ordersPeriod.count) * 100) : 0,
+            ? Math.round(((completedPeriod.count || 0) / ordersPeriod.count) * 100) : null,
+          cancelled_all_time: parseInt(totalsAllTime.cancelled) || 0,
+          waiting_orders: pendingWorkOrders.count || 0,
           delta_orders_period:    calcDelta(ordersPeriod.count || 0, ordersPrev.count || 0),
           delta_completed_period: calcDelta(completedPeriod.count || 0, completedPrev.count || 0),
           delta_revenue_period:   calcDelta(parseFloat(revenuePeriod.total) || 0, parseFloat(revenuePrev.total) || 0),
@@ -329,6 +358,13 @@ router.get('/', authMiddleware, async (req, res) => {
           success_rate: successRate,
           revenue_today: parseFloat(revenueToday.total) || 0,
           revenue_month: parseFloat(revenueMonth.total) || 0,
+          // The dashboard reads available_/total_mechanics; the *_drivers
+          // names are the delivery-era originals, kept for older callers.
+          // Reading one while sending the other is why the tile said 0/0.
+          available_mechanics: availableMechanics.count || 0,
+          total_mechanics: totalMechanics.count || 0,
+          busy_mechanics: Number(mechanicUtilization.find(r => r.status === 'busy')?.count) || 0,
+          offline_mechanics: Number(mechanicUtilization.find(r => ['offline', 'on_break'].includes(r.status))?.count) || 0,
           available_drivers: availableMechanics.count || 0,
           total_drivers: totalMechanics.count || 0,
           avg_delivery_minutes: Math.round(avgServiceTime.avg_minutes || 0),

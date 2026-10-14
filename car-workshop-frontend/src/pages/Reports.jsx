@@ -28,7 +28,7 @@ const KPI = ({ label, value, sub, color, icon: Icon }) => (
       <Icon width={20} height={20} />
     </div>
     <div className="rpt-kpi-body">
-      <div className="rpt-kpi-value">{value}</div>
+      <div className="rpt-kpi-value">{value !== '' && value != null && Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-AE') : value}</div>
       <div className="rpt-kpi-label">{label}</div>
       {sub && <div className="rpt-kpi-sub">{sub}</div>}
     </div>

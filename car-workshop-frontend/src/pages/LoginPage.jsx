@@ -1,8 +1,11 @@
 import { useState, useContext, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Eye, EyeClosed, WarningTriangle, Mail, ArrowLeft, CheckCircle, Language } from 'iconoir-react';
 import { AuthContext } from '../context/AuthContext';
+import { homeFor, technicianTarget, isTechnicianPath, CustomerSessionNote } from '../components/Protected';
+import { isCustomer, isTechnician } from '../lib/modules';
+import { PORTAL, isPortalPath } from './CustomerPortal/portalPaths';
 import './LoginPage.css';
 import { escapeHtml } from '../utils/escapeHtml';
 
@@ -23,6 +26,29 @@ const LANGUAGES = [
   { code: 'sw', label: 'Kiswahili', dir: 'ltr' },
 ];
 
+// Right-hand photo. Uses src/assets/images/login-workshop.(jpg|jpeg|png|webp)
+// when that file exists; otherwise LoginPage.css's default background stays.
+// A glob rather than an import so the build does not fail before the photo
+// has been added.
+const loginPhotos = import.meta.glob('../assets/images/login-workshop.{jpg,jpeg,png,webp}', { eager: true, import: 'default' });
+const loginPhoto = Object.values(loginPhotos)[0];
+
+/**
+ * Where to go after signing in. Protected sends a signed-out visitor here with
+ * the page they asked for (state.from: an e-mail or notification link); go
+ * back there when it is a page of this app for this kind of account,
+ * otherwise to the account's home page.
+ */
+function afterLogin(user, from) {
+  const ok = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//')
+    && from.split(/[?#]/)[0] !== '/login' && !isPortalPath(from);
+  if (!ok) return homeFor(user);
+  const path = from.split(/[?#]/)[0];
+  if (isTechnician(user)) return technicianTarget(path) ?? from;
+  if (isTechnicianPath(path)) return homeFor(user);
+  return from;
+}
+
 export default function LoginPage() {
   const { t, i18n } = useTranslation();
   const isRTL = i18n.language === 'ar';
@@ -35,6 +61,8 @@ export default function LoginPage() {
   const [showPw,   setShowPw]   = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState('');
+  // A customer who signed in here with their portal login: sent to the portal's sign-in
+  const [customerHere, setCustomerHere] = useState(false);
 
   /* ── Forgot-password state ── */
   const [view,     setView]     = useState('login'); // 'login' | 'forgot' | 'sent' | 'verify'
@@ -49,8 +77,9 @@ export default function LoginPage() {
   /* ── Branding state ── */
   const [branding, setBranding] = useState(null);
 
-  const { login } = useContext(AuthContext);
+  const { login, logout } = useContext(AuthContext);
   const navigate  = useNavigate();
+  const location  = useLocation();
 
   /* ── Fetch workshop branding on mount ── */
   useEffect(() => {
@@ -67,11 +96,22 @@ export default function LoginPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setCustomerHere(false);
     setLoading(true);
     try {
       const result = await login(username, password);
-      if (result.success) {
-        navigate(result.role === 'mechanic' ? '/mechanic/work-orders' : '/dashboard');
+      if (result.success && isCustomer(result.user)) {
+        // This is the staff sign-in. A customer account must not open a staff
+        // session: end it and point them to the customer portal's sign-in.
+        await logout();
+        setCustomerHere(true);
+      } else if (result.success) {
+        // Back to the page asked for, else technicians → My Jobs (/mechanic)
+        // and everyone else → Dashboard
+        navigate(afterLogin(result.user, location.state?.from));
+      } else if (result.code === 'USE_CUSTOMER_PORTAL') {
+        // A customer portal account: the server refused a staff session
+        setCustomerHere(true);
       } else if (result.code === 'EMAIL_NOT_VERIFIED') {
         // Switch to verification view with the entered email
         setView('verify');
@@ -194,9 +234,21 @@ export default function LoginPage() {
               <p className="lp-subtitle">{t('auth.welcome_subtitle')}</p>
 
               <form onSubmit={handleSubmit} className="login-form">
+                <CustomerSessionNote />
                 {error && (
                   <div className="lp-error">
                     <WarningTriangle width={16} height={16} />&nbsp;{error}
+                  </div>
+                )}
+                {customerHere && (
+                  <div className="lp-error" role="alert">
+                    <WarningTriangle width={16} height={16} />&nbsp;
+                    <span>
+                      {t('session.customer_on_staff_login', 'This is the staff sign-in. Customers sign in to the customer portal.')}{' '}
+                      <Link to={PORTAL.login} style={{ color: 'inherit', fontWeight: 700, textDecoration: 'underline' }}>
+                        {t('session.customer_portal_sign_in', 'Go to the customer sign-in')}
+                      </Link>
+                    </span>
                   </div>
                 )}
 
@@ -239,6 +291,13 @@ export default function LoginPage() {
                   {loading ? t('auth.signing_in') : t('auth.sign_in')}
                 </button>
               </form>
+
+              <p style={{ margin: '18px 0 0', fontSize: 13.5, color: '#475569', textAlign: 'center' }}>
+                {t('session.customer_question', 'Customer?')}{' '}
+                <Link to={PORTAL.login} style={{ color: '#1e3a6b', fontWeight: 700 }}>
+                  {t('session.customer_portal_link', 'Sign in to your portal')}
+                </Link>
+              </p>
             </div>
           )}
 
@@ -376,7 +435,7 @@ export default function LoginPage() {
         </div>
       </div>
 
-      <div className="login-right" />
+      <div className="login-right" style={loginPhoto ? { backgroundImage: `url(${loginPhoto})`, backgroundPosition: '62% center' } : undefined} />
     </div>
   );
 }

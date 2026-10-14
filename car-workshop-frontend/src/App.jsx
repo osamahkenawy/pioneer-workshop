@@ -1,10 +1,12 @@
-import { Suspense, lazy, useContext } from 'react';
-import { Routes, Route, Navigate, Link } from 'react-router-dom';
-import { AuthContext } from './context/AuthContext';
-import Layout from './components/Layout';
+import { Suspense, lazy } from 'react';
+import { Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
+import Protected, { RoleHome, StaffSessionNote, TECHNICIAN_HOME } from './components/Protected';
 import Loader from './components/Loader';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
+import { MODULES } from './lib/modules';
+import { PORTAL, PORTAL_BASE } from './pages/CustomerPortal/portalPaths';
+import PortalRedirect from './pages/CustomerPortal/PortalRedirect';
 
 /* ── Staff app (lazy) ─────────────────────────────────────── */
 const WorkOrders        = lazy(() => import('./pages/WorkOrders'));
@@ -13,20 +15,24 @@ const VehicleInspection = lazy(() => import('./pages/VehicleInspection'));
 const TeamLeader = lazy(() => import('./pages/TeamLeader'));
 const FleetIntake = lazy(() => import('./pages/FleetIntake'));
 const FleetIntakeQueue = lazy(() => import('./pages/FleetIntakeQueue'));
+const Estimates = lazy(() => import('./pages/Estimates'));
+const Appointments = lazy(() => import('./pages/Appointments'));
 const Customers         = lazy(() => import('./pages/Customers'));
 const Enquiries         = lazy(() => import('./pages/Enquiries'));
 const CustomerFeedback  = lazy(() => import('./pages/CustomerFeedback'));
 const CustomerSurveyPublic = lazy(() => import('./pages/CustomerSurveyPublic'));
 const EstimateApproval = lazy(() => import('./pages/EstimateApproval'));
+const InspectionLink = lazy(() => import('./pages/InspectionLink'));
 const Vehicles          = lazy(() => import('./pages/Vehicles'));
 const Parts             = lazy(() => import('./pages/Parts'));
 const Mechanics         = lazy(() => import('./pages/Mechanics'));
 const JobAssignment     = lazy(() => import('./pages/JobAssignment'));
-const ServiceTracking   = lazy(() => import('./pages/ServiceTracking'));
+const VehicleStatusBoard = lazy(() => import('./pages/VehicleStatusBoard'));
 const WarrantyClaims    = lazy(() => import('./pages/WarrantyClaims'));
 const ServiceBays       = lazy(() => import('./pages/ServiceBays'));
 const ServicePricing    = lazy(() => import('./pages/ServicePricing'));
 const Inventory         = lazy(() => import('./pages/Inventory'));
+const Store             = lazy(() => import('./pages/Store'));
 const MechanicEarnings  = lazy(() => import('./pages/MechanicEarnings'));
 const Wallet            = lazy(() => import('./pages/Wallet'));
 const Invoices          = lazy(() => import('./pages/Invoices'));
@@ -40,10 +46,11 @@ const Notifications     = lazy(() => import('./pages/Notifications'));
 const Settings          = lazy(() => import('./pages/Settings'));
 const Integrations      = lazy(() => import('./pages/Integrations'));
 
-/* ── Mechanic app ─────────────────────────────────────────── */
-const MechanicDashboard = lazy(() => import('./pages/MechanicDashboard'));
-const MechanicHome      = lazy(() => import('./pages/MechanicHome'));
-const MechanicScan      = lazy(() => import('./pages/MechanicScan'));
+/* ── Technician app (users.role 'mechanic') ───────────────── */
+const TechnicianHome    = lazy(() => import('./pages/technician/TechnicianHome'));
+const TechnicianJob     = lazy(() => import('./pages/technician/TechnicianJob'));
+const TechnicianScan    = lazy(() => import('./pages/technician/TechnicianScan'));
+const TechnicianHistory = lazy(() => import('./pages/technician/TechnicianHistory'));
 
 /* ── Public / auth ────────────────────────────────────────── */
 const RegisterPage        = lazy(() => import('./pages/RegisterPage'));
@@ -56,7 +63,7 @@ const Customer360  = lazy(() => import('./pages/Customer360'));
 const CrmReminders = lazy(() => import('./pages/CrmReminders'));
 const CrmTasks     = lazy(() => import('./pages/CrmTasks'));
 
-/* ── Customer portal ("merchant" area) ────────────────────── */
+/* ── Customer portal (/customer/*, paths from portalPaths.js) ─ */
 const CustomerLayout          = lazy(() => import('./pages/CustomerPortal/CustomerLayout'));
 const CustomerLogin           = lazy(() => import('./pages/CustomerPortal/CustomerLogin'));
 const CustomerRegister        = lazy(() => import('./pages/CustomerPortal/CustomerRegister'));
@@ -65,12 +72,9 @@ const CustomerVerifyEmail     = lazy(() => import('./pages/CustomerPortal/Custom
 const CustomerDashboard       = lazy(() => import('./pages/CustomerPortal/CustomerDashboard'));
 const CustomerWorkOrders      = lazy(() => import('./pages/CustomerPortal/CustomerWorkOrders'));
 const CustomerWorkOrderDetail = lazy(() => import('./pages/CustomerPortal/CustomerWorkOrderDetail'));
-const CustomerCreateOrder     = lazy(() => import('./pages/CustomerPortal/CustomerCreateOrder'));
-const CustomerAddresses       = lazy(() => import('./pages/CustomerPortal/CustomerAddresses'));
+const CustomerVehicles        = lazy(() => import('./pages/CustomerPortal/CustomerVehicles'));
 const CustomerInvoices        = lazy(() => import('./pages/CustomerPortal/CustomerInvoices'));
-const CustomerWallet          = lazy(() => import('./pages/CustomerPortal/CustomerWallet'));
 const CustomerSettings        = lazy(() => import('./pages/CustomerPortal/CustomerSettings'));
-const CustomerTracking        = lazy(() => import('./pages/CustomerPortal/CustomerTracking'));
 
 /* ── Super admin ──────────────────────────────────────────── */
 const SuperAdminLogin           = lazy(() => import('./pages/SuperAdmin/SuperAdminLogin'));
@@ -98,11 +102,10 @@ const SuperAdminSystemHealth    = lazy(() => import('./pages/SuperAdmin/SuperAdm
 const SuperAdminTickets         = lazy(() => import('./pages/SuperAdmin/SuperAdminTickets'));
 const SuperAdminVacancies       = lazy(() => import('./pages/SuperAdmin/SuperAdminVacancies'));
 
-function Protected({ children }) {
-  const { user, loading } = useContext(AuthContext);
-  if (loading) return <Loader />;
-  if (!user) return <Navigate to="/login" replace />;
-  return <Layout>{children}</Layout>;
+/** A redirect that keeps the query string (?wo= on old technician links, ?phase= on the board). */
+function KeepQuery({ to }) {
+  const { search } = useLocation();
+  return <Navigate to={to + search} replace />;
 }
 
 function SignupSuccess() {
@@ -134,15 +137,22 @@ export default function App() {
         <Route path="/signup-success" element={<SignupSuccess />} />
         <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="/service-status/:token" element={<ServiceStatusPublic />} />
+        {/* Every link the system sends (SMS, email, WhatsApp, job sheet QR) uses
+            /track/:token, which had no route and bounced customers to the login. */}
+        <Route path="/track/:token" element={<ServiceStatusPublic />} />
         {/* Public customer feedback survey — personalised link or anonymous / QR */}
         <Route path="/survey" element={<CustomerSurveyPublic />} />
         <Route path="/survey/:token" element={<CustomerSurveyPublic />} />
         {/* Public estimate approval — link emailed from POST /estimates/:id/send */}
         <Route path="/estimate-approval/:token" element={<EstimateApproval />} />
+        {/* The customer's copy of the vehicle inspection, and where they sign —
+            link sent from POST /vehicle-inspections/:id/share */}
+        <Route path="/inspection/:token" element={<InspectionLink />} />
         {/* Fleet coordinator intake — no login; the token names the fleet account */}
         <Route path="/fleet-intake/:token" element={<FleetIntake />} />
 
-        {/* ── Staff app ── */}
+        {/* ── Staff app ── Protected finds each page's menu module in Layout's
+            ROUTE_MODULES; a role without it sees "Not available for your role". */}
         <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
         <Route path="/work-orders" element={<Protected><WorkOrders /></Protected>} />
         <Route path="/work-orders/:id" element={<Protected><WorkOrderDetail /></Protected>} />
@@ -156,7 +166,12 @@ export default function App() {
         <Route path="/job-assignment" element={<Protected><JobAssignment /></Protected>} />
         <Route path="/team-leader" element={<Protected><TeamLeader /></Protected>} />
         <Route path="/fleet-intake" element={<Protected><FleetIntakeQueue /></Protected>} />
-        <Route path="/service-tracking" element={<Protected><ServiceTracking /></Protected>} />
+        <Route path="/estimates" element={<Protected><Estimates /></Protected>} />
+        <Route path="/appointments" element={<Protected><Appointments /></Protected>} />
+        {/* Vehicle Status Board: every car in the workshop, by step. Service Tracking
+            (the courier tracking page it replaced) redirects here. */}
+        <Route path="/vehicle-board" element={<Protected module={MODULES.vehicleBoard}><VehicleStatusBoard /></Protected>} />
+        <Route path="/service-tracking" element={<KeepQuery to="/vehicle-board" />} />
         <Route path="/warranty-claims" element={<Protected><WarrantyClaims /></Protected>} />
         {/* CRM. /crm/customers with no id shows a search; with an id, the 360 view. */}
         <Route path="/crm/customers" element={<Protected><Customer360 /></Protected>} />
@@ -166,6 +181,8 @@ export default function App() {
         <Route path="/service-bays" element={<Protected><ServiceBays /></Protected>} />
         <Route path="/service-pricing" element={<Protected><ServicePricing /></Protected>} />
         <Route path="/inventory" element={<Protected><Inventory /></Protected>} />
+        <Route path="/store" element={<Protected><Store /></Protected>} />
+        {/* Staff only: Protected sends a technician to My Jobs. */}
         <Route path="/mechanic-earnings" element={<Protected><MechanicEarnings /></Protected>} />
         <Route path="/wallet" element={<Protected><Wallet /></Protected>} />
         <Route path="/invoices" element={<Protected><Invoices /></Protected>} />
@@ -175,30 +192,44 @@ export default function App() {
         <Route path="/complaints" element={<Protected><Complaints /></Protected>} />
         <Route path="/performance" element={<Protected><Performance /></Protected>} />
         <Route path="/technician-kpi" element={<Protected><TechnicianKpi /></Protected>} />
-        <Route path="/notifications" element={<Protected><Notifications /></Protected>} />
+        {/* Templates, SMS / e-mail logs, broadcasts: managers only (the bell is for everyone) */}
+        <Route path="/notifications" element={<Protected managersOnly><Notifications /></Protected>} />
         <Route path="/settings" element={<Protected><Settings /></Protected>} />
         <Route path="/api-keys" element={<Protected><Integrations /></Protected>} />
 
-        {/* ── Mechanic app ── */}
-        <Route path="/mechanic/dashboard" element={<Protected><MechanicHome /></Protected>} />
-        <Route path="/mechanic/work-orders" element={<Protected><MechanicDashboard /></Protected>} />
-        <Route path="/mechanic/scan" element={<Protected><MechanicScan /></Protected>} />
+        {/* ── Technician app ── (Protected keeps technicians inside it) */}
+        <Route path={TECHNICIAN_HOME} element={<Protected><TechnicianHome /></Protected>} />
+        <Route path={`${TECHNICIAN_HOME}/jobs/:jobCardId`} element={<Protected><TechnicianJob /></Protected>} />
+        <Route path={`${TECHNICIAN_HOME}/scan`} element={<Protected><TechnicianScan /></Protected>} />
+        <Route path={`${TECHNICIAN_HOME}/history`} element={<Protected><TechnicianHistory /></Protected>} />
+        {/* Old technician addresses (bookmarks, notifications already sent) */}
+        <Route path={`${TECHNICIAN_HOME}/dashboard`} element={<KeepQuery to={TECHNICIAN_HOME} />} />
+        <Route path={`${TECHNICIAN_HOME}/work-orders`} element={<KeepQuery to={TECHNICIAN_HOME} />} />
+        <Route path={`${TECHNICIAN_HOME}/orders`} element={<KeepQuery to={TECHNICIAN_HOME} />} />
 
-        {/* ── Customer portal ── */}
-        <Route path="/merchant/login" element={<CustomerLogin />} />
-        <Route path="/merchant/register" element={<CustomerRegister />} />
-        <Route path="/merchant/reset-password" element={<CustomerResetPassword />} />
-        <Route path="/merchant/verify-email" element={<CustomerVerifyEmail />} />
-        <Route path="/merchant/dashboard" element={<CustomerLayout><CustomerDashboard /></CustomerLayout>} />
-        <Route path="/merchant/work-orders" element={<CustomerLayout><CustomerWorkOrders /></CustomerLayout>} />
-        <Route path="/merchant/work-orders/:id" element={<CustomerLayout><CustomerWorkOrderDetail /></CustomerLayout>} />
-        <Route path="/merchant/create-order" element={<CustomerLayout><CustomerCreateOrder /></CustomerLayout>} />
-        <Route path="/merchant/addresses" element={<CustomerLayout><CustomerAddresses /></CustomerLayout>} />
-        <Route path="/merchant/invoices" element={<CustomerLayout><CustomerInvoices /></CustomerLayout>} />
-        <Route path="/merchant/wallet" element={<CustomerLayout><CustomerWallet /></CustomerLayout>} />
-        <Route path="/merchant/settings" element={<CustomerLayout><CustomerSettings /></CustomerLayout>} />
-        <Route path="/merchant/service-status" element={<CustomerLayout><CustomerTracking /></CustomerLayout>} />
-        <Route path="/merchant" element={<Navigate to="/merchant/dashboard" replace />} />
+        {/* ── Customer portal: /customer/* ──
+            Its own session (CustomerAuthContext); CustomerLayout sends a signed-out
+            visitor to the sign-in page. A staff session open in the same browser
+            does not take these pages over: the sign-in pages say it is open.
+            Not the staff pages /customers, /customer-feedback, /customer-experience. */}
+        <Route path={PORTAL.login} element={<><StaffSessionNote /><CustomerLogin /></>} />
+        <Route path={PORTAL.register} element={<><StaffSessionNote /><CustomerRegister /></>} />
+        <Route path={PORTAL.resetPassword} element={<CustomerResetPassword />} />
+        <Route path={PORTAL.setPassword} element={<CustomerResetPassword />} />
+        <Route path={PORTAL.verifyEmail} element={<CustomerVerifyEmail />} />
+        <Route path={PORTAL.home} element={<CustomerLayout><CustomerDashboard /></CustomerLayout>} />
+        <Route path={PORTAL.jobs} element={<CustomerLayout><CustomerWorkOrders /></CustomerLayout>} />
+        <Route path={PORTAL.job(':id')} element={<CustomerLayout><CustomerWorkOrderDetail /></CustomerLayout>} />
+        <Route path={PORTAL.vehicles} element={<CustomerLayout><CustomerVehicles /></CustomerLayout>} />
+        <Route path={PORTAL.invoices} element={<CustomerLayout><CustomerInvoices /></CustomerLayout>} />
+        <Route path={PORTAL.settings} element={<CustomerLayout><CustomerSettings /></CustomerLayout>} />
+        {/* /customer, old page names under /customer/*, and the old /merchant/* and
+            /portal/* addresses (links in e-mails already sent) → the matching page,
+            query string kept. An unknown page goes Home, whose sign-in guard sends a
+            signed-out visitor to /customer/login. */}
+        <Route path={`${PORTAL_BASE}/*`} element={<PortalRedirect />} />
+        <Route path="/portal/*" element={<PortalRedirect />} />
+        <Route path="/merchant/*" element={<PortalRedirect />} />
 
         {/* ── Super admin ── */}
         <Route path="/super-admin/login" element={<SuperAdminLogin />} />
@@ -228,9 +259,10 @@ export default function App() {
           <Route path="vacancies" element={<SuperAdminVacancies />} />
         </Route>
 
-        {/* ── Defaults ── */}
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        {/* ── Defaults: the home page of whoever is signed in (staff → /dashboard,
+            technician → /mechanic, customer → /customer/dashboard, nobody → /login) ── */}
+        <Route path="/" element={<RoleHome />} />
+        <Route path="*" element={<RoleHome />} />
       </Routes>
     </Suspense>
   );

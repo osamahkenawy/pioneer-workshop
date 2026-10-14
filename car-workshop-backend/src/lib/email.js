@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from '../config.js';
 import { query } from './database.js';
+import { customerAppBase } from './customer-link.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,22 +99,23 @@ async function getFromName(workshopId) {
 }
 
 /**
- * Get the public base URL for constructing absolute links.
- * In production uses FRONTEND_URL; locally falls back to localhost.
+ * Get the public base URL for constructing absolute links: FRONTEND_URL,
+ * with the same production safety net as customer links (lib/customer-link.js
+ * — never a localhost or the old delivery.* host in a production email).
  */
 function getBaseUrl() {
-  if (config.frontendUrl && config.frontendUrl !== 'http://localhost:5173') return config.frontendUrl;
-  if (process.env.NODE_ENV === 'production') return 'https://delivery.pioneercarservice.com';
-  return config.frontendUrl || 'http://localhost:5173';
+  return customerAppBase();
 }
 
 /**
  * Get the backend API base URL (for serving uploaded files like logos).
+ * BACKEND_URL when set; in production the app's own origin, which serves
+ * the API (the front end calls it on the relative /api).
  */
 function getApiBaseUrl() {
-  return process.env.BACKEND_URL || (process.env.NODE_ENV === 'production'
-    ? 'https://delivery.pioneercarservice.com'
-    : `http://localhost:${config.port || 4001}`);
+  if (process.env.BACKEND_URL) return process.env.BACKEND_URL.replace(/\/+$/, '');
+  if (config.env === 'production') return customerAppBase();
+  return `http://localhost:${config.port || 4000}`;
 }
 
 /**
@@ -405,88 +407,142 @@ export async function sendNotificationEmail({ to, subject, title, body, ctaText,
   return sendEmail({ to, subject, html, tenantId, fromName: branding.name, attachments: allAttachments.length ? allAttachments : undefined });
 }
 
+/** HTML-escape a value for an email body (customer names, notes, numbers). */
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 /**
- * Build a work-order-status email with a nice status timeline table.
+ * The four moments a customer is emailed about their job (lib/notify.js
+ * CUSTOMER_MILESTONES), keyed on the work_orders.status that triggers each.
+ * `subject` is the subject wording; the accent colours carry white CTA text
+ * at 4.5:1 or better.
  */
-export function buildWorkOrderStatusEmail({ order, status, trackingUrl, branding, currency = 'AED' }) {
-  const statusEmoji = {
-    pending:    '🕐', confirmed: '✅', assigned: '👤', accepted: '✅', picked_up: '📦',
-    in_transit: '🚗', delivered: '🎉', failed: '❌', returned: '↩️', cancelled: '🚫',
-  };
-  const statusLabel = {
-    pending: 'Pending', confirmed: 'Confirmed', assigned: 'Assigned', accepted: 'Accepted',
-    picked_up: 'Vehicle Picked Up', in_transit: 'In Progress',
-    delivered: 'Completed', failed: 'Service Failed',
-    returned: 'Returned', cancelled: 'Cancelled',
-  };
-  const statusColor = {
-    pending: '#f59e0b', confirmed: '#10b981', assigned: '#6366f1', accepted: '#7c3aed',
-    picked_up: '#3b82f6', in_transit: '#f97316',
-    delivered: '#16a34a', failed: '#dc2626',
-    returned: '#8b5cf6', cancelled: '#94a3b8',
-  };
+const CUSTOMER_EMAIL = {
+  pending:          { subject: 'Vehicle received',        title: 'Vehicle received',       accent: '#0369a1' },
+  ready_for_pickup: { subject: 'Ready for collection',    title: 'Ready for collection',   accent: '#c2410c' },
+  completed:        { subject: 'Job closed, thank you',   title: 'Job closed — thank you', accent: '#15803d' },
+  cancelled:        { subject: 'Job cancelled',           title: 'Job cancelled',          accent: '#475569' },
+};
 
-  const emoji  = statusEmoji[status]  || '&#128203;';
-  const label  = statusLabel[status]  || status;
-  const color  = statusColor[status]  || '#f97316';
+/**
+ * Subject line of a customer status email:
+ * "{plate} — Ready for collection ({WO number})". The plate is left out
+ * when the job has no vehicle.
+ *
+ * @param {string} status  one of CUSTOMER_EMAIL's keys
+ * @param {object} view    customerMessageView() from lib/notify.js
+ * @returns {string|null}  null for a status customers are not emailed about
+ */
+export function customerEmailSubject(status, view) {
+  const copy = CUSTOMER_EMAIL[status];
+  if (!copy) return null;
+  const plate = view?.plate ? `${view.plate} — ` : '';
+  const wo = view?.work_order_number ? ` (${view.work_order_number})` : '';
+  return `${plate}${copy.subject}${wo}`;
+}
 
-  // Map status colors to safe light backgrounds (email clients don't support hex-alpha)
-  const statusBg = {
-    pending: '#fef3c7', confirmed: '#d1fae5', assigned: '#e0e7ff', accepted: '#f3e8ff',
-    picked_up: '#dbeafe', in_transit: '#ffedd5',
-    delivered: '#dcfce7', failed: '#fee2e2',
-    returned: '#ede9fe', cancelled: '#f1f5f9',
-  };
-  const bgColor = statusBg[status] || '#fff7ed';
+/**
+ * The customer's email at one of the four moments they hear from the
+ * workshop: the job is opened, the car is ready for collection, the job is
+ * closed, the job is cancelled.
+ *
+ * Built only from what lib/notify.js customerMessageView() read from the
+ * real tables (work order, vehicle, main job card, invoice, workshop): the
+ * customer's name, the vehicle and plate, the work order and job card
+ * numbers, the stage in customer wording, what to do next (come to collect,
+ * the amount due) and the workshop's contact details, with a "View your
+ * vehicle status" button to /service-status/{token}. Never the technician,
+ * the customer's own address or staff notes. Every value is HTML-escaped.
+ *
+ * @param {object} opts
+ * @param {'pending'|'ready_for_pickup'|'completed'|'cancelled'} opts.status
+ * @param {object} opts.view      customerMessageView(order, workshopId, status)
+ * @param {object} opts.branding  getWorkshopBranding(workshopId)
+ * @returns {string|null} the HTML, or null for any other status
+ */
+export function buildWorkOrderStatusEmail({ status, view, branding = {} }) {
+  const copy = CUSTOMER_EMAIL[status];
+  if (!copy || !view) return null;
+  const ws = view.workshop || {};
+  const workshopName = ws.name || branding.name || 'Pioneer Car Service';
+  const vehicle = esc(view.vehicle || 'car');
+  const wo = esc(view.work_order_number || '');
+  const jc = view.job_card_number ? esc(view.job_card_number) : '';
+  const inv = view.invoice_number ? esc(view.invoice_number) : '';
+
+  const lead = {
+    pending: `We have received your <strong>${vehicle}</strong>${jc ? ` and opened job card <strong>${jc}</strong>` : ''}.`,
+    ready_for_pickup: `Your <strong>${vehicle}</strong> has passed its final quality check and test drive and is ready for collection.`,
+    completed: `Thank you for choosing ${esc(workshopName)}. Job <strong>${wo}</strong> is closed${inv ? `, invoice <strong>${inv}</strong>` : ''}.`,
+    cancelled: `Job <strong>${wo}</strong> for your <strong>${vehicle}</strong> has been cancelled.`,
+  }[status];
+
+  let payment = '';
+  if (status === 'ready_for_pickup') {
+    payment = view.on_account
+      ? 'The work is billed to your account — there is nothing to pay at collection.'
+      : view.amount_due > 0
+        ? `Amount due at collection: <strong>${esc(view.amount_due_text)}</strong>${inv ? ` (invoice ${inv})` : ''}.`
+        : 'There is nothing to pay at collection.';
+  }
+  const next = {
+    pending: 'Nothing for now. We will contact you if anything needs your approval, and you can follow your car at any time.',
+    ready_for_pickup: `Please call us to agree a time, then come and collect your car. ${payment}`,
+    completed: 'If anything is not right with the work, please call us.',
+    cancelled: 'If you have any questions, please call us.',
+  }[status];
+
+  const row = (label, value) => value ? `
+      <tr>
+        <td style="padding:8px 0;color:#64748b;width:130px;vertical-align:top;">${label}</td>
+        <td style="padding:8px 0;font-weight:600;color:#1e293b;">${value}</td>
+      </tr>` : '';
+  const details = [
+    row('Vehicle', esc(view.make_model)),
+    row('Plate', esc(view.plate)),
+    row('Job card', jc),
+    row('Work order', wo),
+    row('Invoice', inv),
+    status === 'ready_for_pickup'
+      ? row('To pay', view.on_account ? 'Billed to your account' : view.amount_due > 0 ? esc(view.amount_due_text) : 'Nothing to pay')
+      : '',
+  ].join('');
+
+  const phone = ws.phone ? `<a href="tel:${esc(String(ws.phone).replace(/[^\d+]/g, ''))}" style="color:#1e293b;font-weight:600;text-decoration:none;">${esc(ws.phone)}</a>` : '';
+  const mail = ws.email ? `<a href="mailto:${esc(ws.email)}" style="color:#1e293b;text-decoration:none;">${esc(ws.email)}</a>` : '';
+  const contact = [esc(workshopName), phone, mail, esc(ws.address || '')].filter(Boolean).join('<br>');
 
   const bodyHtml = `
     <p style="margin:0 0 16px;font-size:15px;color:#374151;">
-      Hi <strong>${order.recipient_name || 'there'}</strong>,
+      Hello${view.customer_name ? ` <strong>${esc(view.customer_name)}</strong>` : ''},
     </p>
-    <div style="background:${bgColor};border-left:4px solid ${color};border-radius:0 8px 8px 0;padding:16px 20px;margin:0 0 20px;">
-      <p style="margin:0;font-size:18px;font-weight:700;color:${color};">
-        ${emoji} ${label}
-      </p>
-      <p style="margin:6px 0 0;font-size:14px;color:#475569;">
-        Work order <strong>${order.order_number}</strong> is now <strong>${label.toLowerCase()}</strong>.
-      </p>
+    <div style="background:#f8fafc;border-inline-start:4px solid ${copy.accent};border-left:4px solid ${copy.accent};border-radius:0 8px 8px 0;padding:16px 20px;margin:0 0 20px;">
+      ${view.stage && view.stage !== copy.title ? `<p style="margin:0 0 6px;font-size:18px;font-weight:700;color:${copy.accent};">${esc(view.stage)}</p>` : ''}
+      <p style="margin:0;font-size:14px;color:#475569;">${lead}</p>
     </div>
-    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;font-size:13px;">
-      <tr>
-        <td style="padding:8px 0;color:#94a3b8;width:120px;">Work Order Number</td>
-        <td style="padding:8px 0;font-weight:600;color:#1e293b;">${order.order_number}</td>
-      </tr>
-      ${order.tracking_token ? `<tr>
-        <td style="padding:8px 0;color:#94a3b8;">Tracking ID</td>
-        <td style="padding:8px 0;font-weight:600;color:#1e293b;">${order.tracking_token}</td>
-      </tr>` : ''}
-      <tr>
-        <td style="padding:8px 0;color:#94a3b8;">Service Address</td>
-        <td style="padding:8px 0;color:#1e293b;">${order.recipient_address || '—'}${order.recipient_emirate ? ', ' + order.recipient_emirate : ''}</td>
-      </tr>
-      ${order.payment_method === 'cod' && parseFloat(order.cod_amount) > 0 ? `<tr>
-        <td style="padding:8px 0;color:#94a3b8;">Cash Payment Amount</td>
-        <td style="padding:8px 0;font-weight:700;color:#d97706;">${currency} ${parseFloat(order.cod_amount).toFixed(2)}</td>
-      </tr>` : ''}
-      ${order.driver_name ? `<tr>
-        <td style="padding:8px 0;color:#94a3b8;">Mechanic</td>
-        <td style="padding:8px 0;color:#1e293b;">${order.driver_name}${order.driver_phone ? ' · ' + order.driver_phone : ''}</td>
-      </tr>` : ''}
-    </table>`;
+    ${details ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;font-size:13px;">${details}
+    </table>` : ''}
+    <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.04em;">What happens next</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#374151;">${next}</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.04em;">Contact us</p>
+    <p style="margin:0;font-size:14px;color:#374151;line-height:1.6;">${contact}</p>`;
 
   return buildEmailTemplate({
     logoUrl: branding.logoUrl,
-    logoAlt: branding.name,
-    accentColor: color,
-    title: `${emoji} Your Work Order is ${label}`,
-    subtitle: `Work Order ${order.order_number}`,
+    logoAlt: branding.name || workshopName,
+    accentColor: copy.accent,
+    title: copy.title,
+    subtitle: [view.plate, view.work_order_number].filter(Boolean).map(esc).join(' · ') || undefined,
     bodyHtml,
-    ctaText: trackingUrl ? 'Track Your Work Order' : undefined,
-    ctaUrl: trackingUrl || undefined,
-    footerName: branding.name,
+    ctaText: view.link ? 'View your vehicle status' : undefined,
+    ctaUrl: view.link || undefined,
+    footerName: branding.name || workshopName,
     isSystem: branding.isSystem,
   });
 }
 
 export { buildEmailTemplate, getWorkshopBranding, getFromName, getDefaultPioneerLogo, getLogoCidAttachment };
-export default { sendEmail, sendNotificationEmail, buildWorkOrderStatusEmail, buildEmailTemplate, getWorkshopBranding, getDefaultPioneerLogo, getLogoCidAttachment };
+export default { sendEmail, sendNotificationEmail, buildWorkOrderStatusEmail, customerEmailSubject, buildEmailTemplate, getWorkshopBranding, getDefaultPioneerLogo, getLogoCidAttachment };

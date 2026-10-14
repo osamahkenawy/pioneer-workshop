@@ -256,6 +256,7 @@ html, body {
 .page-header {
   display: flex;
   flex-direction: column;
+  min-width: 0;          /* let the title shrink instead of pushing the actions */
 }
 
 .page-title {
@@ -263,13 +264,19 @@ html, body {
   font-weight: 700;
   color: #1a1a1a;
   margin: 0;
+  /* One line: a long fallback title used to wrap to four lines on tablets */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-actions {
   display: flex;
   align-items: center;
   gap: 15px;
+  flex-shrink: 0;        /* the bell, language and avatar always stay on screen */
 }
+.topbar-left { min-width: 0; flex: 1 1 auto; }  /* the title gives way first */
 
 /* Role Badge */
 .role-badge {
@@ -291,6 +298,13 @@ html, body {
   background: var(--gradient-primary);
   color: white;
   box-shadow: 0 4px 15px rgba(36, 64, 102, 0.3);
+}
+
+/* Technician (users.role 'mechanic'). Dark orange on a light tint: 4.5:1. */
+.role-badge.technician {
+  background: #fff7ed;
+  color: #c2410c;
+  border: 1px solid #fdba74;
 }
 
 /* User Menu */
@@ -422,7 +436,12 @@ html, body {
   padding-bottom: 80px;
   min-height: calc(100vh - var(--topbar-height));
   background: #f5f7fa;
+  /* clip, not hidden: hidden makes this a scroll container, and then nothing
+     inside it can stick with position: sticky (the technician app's right
+     rail, the Team Board and Vehicle Status Board headers). hidden stays as
+     the fallback for browsers without clip. */
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .main-content.sidebar-closed {
@@ -516,9 +535,14 @@ html, body {
     font-size: 14px;
   }
   
+  /* On a phone the role badge pushed the avatar menu (and logout) off the
+     right edge of the screen. The role is in the avatar menu anyway. */
   .role-badge {
-    font-size: 9px;
-    padding: 3px 8px;
+    display: none;
+  }
+
+  .topbar-actions {
+    gap: 8px;
   }
 }
 
@@ -1121,3 +1145,119 @@ html, body {
   .module-hero { align-items: flex-start; }
   .module-hero-actions { width: 100%; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   Phone top bar: the page title gets the room. The small logo
+   (the sidebar has the big one) and the language button's margin
+   left the title one letter wide ("T…") at 375px.
+   ══════════════════════════════════════════════════════════════ */
+@media (max-width: 576px) {
+  .topbar-brand-mobile { display: none; }
+  .topbar-left { gap: 10px; }
+  .lang-switcher,
+  .rtl .lang-switcher,
+  [dir="rtl"] .lang-switcher { margin-inline: 0; }
+  .lang-toggle { padding: 8px 10px; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   "Not available for your role" (Protected with a module the
+   role does not have)
+   ══════════════════════════════════════════════════════════════ */
+.role-blocked {
+  max-inline-size: 480px;
+  margin: 48px auto;
+  padding: 32px 24px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  text-align: center;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+.role-blocked-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 56px;
+  block-size: 56px;
+  border-radius: 16px;
+  background: #f1f5f9;
+  color: #334155;
+  margin-block-end: 14px;
+}
+[dir="rtl"] .role-blocked-title,
+.role-blocked-title {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 800;
+  color: #0f172a;
+  text-align: center;
+}
+.role-blocked-text {
+  margin: 0 0 20px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #475569;
+}
+.role-blocked-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 44px;
+  padding-inline: 20px;
+  border-radius: 10px;
+  background: var(--primary-color);
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+}
+.role-blocked-btn:hover { color: #fff; opacity: 0.92; }
+.role-blocked-btn:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
+@media (max-width: 576px) {
+  .role-blocked { margin: 24px 0; padding: 24px 16px; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Session notes on the sign-in pages: the staff session and the
+   customer portal session are separate and can both be open in
+   one browser (components/Protected.jsx).
+   ══════════════════════════════════════════════════════════════ */
+.session-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 10px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: start;
+}
+.session-note--bar {
+  border-radius: 0;
+  border-width: 0 0 1px;
+  padding-inline: 16px;
+  justify-content: center;
+}
+.session-note-text { min-inline-size: 0; overflow-wrap: anywhere; }
+.session-note-actions { display: inline-flex; flex-wrap: wrap; gap: 4px 14px; }
+.session-note-link {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #1d4ed8;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.session-note-link:hover { color: #1e40af; }
+.session-note-link:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 4px; }

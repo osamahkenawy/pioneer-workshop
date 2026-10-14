@@ -3,31 +3,50 @@
  *
  * Customer self-registration, login, password reset.
  * Customers are stored in the `customers` table with a linked `users` row (role='customer').
+ * Most workshop customers do not register: staff give them access from the
+ * customer page (lib/portal-access.js), and they choose their password from
+ * the link they are sent (POST /reset-password).
  *
- * Endpoints:
- *   POST /api/customer-portal/auth/register      — customer self-registration
- *   POST /api/customer-portal/auth/login          — customer login → JWT
- *   POST /api/customer-portal/auth/forgot-password — password reset email
- *   POST /api/customer-portal/auth/reset-password  — set new password via token
- *   GET  /api/customer-portal/auth/session         — validate session
- *   PUT  /api/customer-portal/auth/change-password  — change password (authed)
- *   POST /api/customer-portal/auth/verify-email     — email verification
+ * Endpoints (mounted at /api/customer-auth):
+ *   POST /register             — customer self-registration
+ *   POST /verify-email         — email verification
+ *   POST /resend-verification  — send the verification e-mail again
+ *   POST /login                — customer login (e-mail or mobile number) → JWT
+ *   POST /forgot-password      — password reset e-mail
+ *   POST /reset-password       — set a new password via token (also the staff invitation's set-password link)
+ *   GET  /session              — validate session
+ *   PUT  /change-password      — change password (authed)
+ *   POST /logout
+ *
+ * Links in e-mails go to the portal's own pages, /customer/* (portalUrl):
+ * /customer/verify-email, /customer/reset-password, /customer/set-password.
+ * The front end redirects the older /portal/* and /merchant/* paths there.
+ *
+ * The portal sends its token in the Authorization header (crm_token in the
+ * browser). Login no longer sets the shared `auth_token` cookie: the staff
+ * app uses that cookie too, so a customer signing in on a staff member's
+ * browser turned every staff request into the customer's (403s), and logging
+ * out of the portal signed staff out. authMiddleware reads the header first.
  */
 
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
-import { generateToken, authMiddleware } from '../middleware/auth.js';
+import { generateToken, authMiddleware, verifyToken } from '../middleware/auth.js';
 import { sendNotificationEmail } from '../lib/email.js';
-import { config } from '../config.js';
-import { loginLimiter, passwordResetLimiter, registrationLimiter } from '../lib/rate-limits.js';
+import { loginLimiter, passwordResetLimiter, registrationLimiter, tokenRedeemLimiter } from '../lib/rate-limits.js';
+import { portalUrl, phoneKey, phoneKeySql, looksLikePhone, preferBearerToken } from '../lib/portal-access.js';
 
 const router = express.Router();
 
+/** Names go into e-mail HTML. */
+const esc = s => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
 /* ──────────────────────────────────────────────────────────────
  * DB schema migration — ensure customers table has auth columns
- * Runs once on first import (idempotent).
+ * Runs once on first import (idempotent). portal_invited_* also come with
+ * migrations/20261018_customer_portal_invite.sql.
  * ────────────────────────────────────────────────────────────── */
 async function ensureCustomerAuthSchema() {
   const cols = [
@@ -38,6 +57,8 @@ async function ensureCustomerAuthSchema() {
     { col: 'reset_token',         def: "ALTER TABLE customers ADD COLUMN reset_token VARCHAR(255) DEFAULT NULL" },
     { col: 'reset_token_expires', def: "ALTER TABLE customers ADD COLUMN reset_token_expires DATETIME DEFAULT NULL" },
     { col: 'last_login_at',       def: "ALTER TABLE customers ADD COLUMN last_login_at DATETIME DEFAULT NULL" },
+    { col: 'portal_invited_at',   def: "ALTER TABLE customers ADD COLUMN portal_invited_at DATETIME DEFAULT NULL" },
+    { col: 'portal_invited_by',   def: "ALTER TABLE customers ADD COLUMN portal_invited_by INT DEFAULT NULL" },
   ];
 
   for (const { col, def } of cols) {
@@ -82,6 +103,47 @@ async function resolveWorkshop(slug) {
   return w || null;
 }
 
+/**
+ * Customers matching what was typed at sign-in: an e-mail, or a mobile
+ * number in any spelling (05…, +9715…, 009715…). `extraWhere` narrows it
+ * (e.g. 'c.password_hash IS NOT NULL'). Most recently active first.
+ */
+async function findCustomersByLogin(identifier, { workshopId = null, extraWhere = '1=1', limit = 1 } = {}) {
+  const id = String(identifier || '').trim();
+  if (!id) return [];
+  const byPhone = looksLikePhone(id);
+  const match = byPhone ? `${phoneKeySql('c.phone')} = ?` : 'c.email = ?';
+  const params = [byPhone ? phoneKey(id) : id];
+  let scope = 'JOIN workshops w ON c.workshop_id = w.id AND w.status NOT IN (\'cancelled\',\'suspended\')';
+  if (workshopId) { scope += ' AND w.id = ?'; params.unshift(workshopId); }
+  return query(
+    `SELECT c.*, u.id AS u_id, u.username, u.is_active AS user_active
+       FROM customers c
+       ${scope}
+       LEFT JOIN users u ON c.user_id = u.id
+      WHERE ${match} AND ${extraWhere}
+      ORDER BY c.last_login_at IS NULL, c.last_login_at DESC, c.id DESC
+      LIMIT ${Number(limit) || 1}`,
+    params
+  );
+}
+
+function sendVerificationEmail({ to, workshopId, workshopName, name, token }) {
+  return sendNotificationEmail({
+    to,
+    tenantId: workshopId,
+    subject: 'Confirm your e-mail for the customer portal',
+    title: `Welcome to ${workshopName || 'the workshop'}`,
+    body: `
+      <p>Hi <strong>${esc(name)}</strong>,</p>
+      <p>Please confirm your e-mail address to open your customer portal, where you can follow your job card,
+         sign your vehicle inspection, approve estimates and see your invoices.</p>
+    `,
+    ctaText: 'Confirm e-mail',
+    ctaUrl: portalUrl('verify-email', { token }),
+  });
+}
+
 /* ══════════════════════════════════════════════════════════════
  * POST /register — Customer self-registration
  * ══════════════════════════════════════════════════════════════ */
@@ -109,13 +171,18 @@ router.post('/register', registrationLimiter, async (req, res) => {
       return res.status(403).json({ success: false, message: 'This platform is currently suspended' });
     }
 
-    // Check duplicate email/phone within workshop
+    // Check duplicate email/phone within workshop. A customer who has been
+    // here before is already on file: their access comes from the workshop
+    // (the link the Service Advisor sends), not a second record.
     const [existing] = await query(
       'SELECT id FROM customers WHERE workshop_id = ? AND (email = ? OR phone = ?)',
       [workshop.id, email, phone]
     );
     if (existing) {
-      return res.status(409).json({ success: false, message: 'A customer with this email or phone already exists' });
+      return res.status(409).json({
+        success: false, code: 'ALREADY_CUSTOMER',
+        message: 'You are already one of our customers. Sign in, or ask the workshop to send you a link to set up your access.',
+      });
     }
 
     // Hash password
@@ -154,31 +221,12 @@ router.post('/register', registrationLimiter, async (req, res) => {
     // Link customer to user
     await execute('UPDATE customers SET user_id = ? WHERE id = ?', [userId, customerId]);
 
-    // Send verification email
-    const verifyUrl = `${config.frontendUrl}/customer/verify-email?token=${verificationToken}`;
-    sendNotificationEmail({
-      to: email,
-      tenantId: workshop.id,
-      subject: 'Verify your customer account',
-      title: 'Welcome to ' + (workshop.name || 'the workshop'),
-      body: `
-        <p>Hi <strong>${full_name}</strong>,</p>
-        <p>Thank you for registering as a customer. Please verify your email address to activate your account.</p>
-        <p>Click the button below to verify your email.</p>
-      `,
-      ctaText: 'Verify Email',
-      ctaUrl: verifyUrl,
-    }).catch(err => console.error('[CustomerAuth] Verification email error:', err.message));
+    sendVerificationEmail({ to: email, workshopId: workshop.id, workshopName: workshop.name, name: full_name, token: verificationToken })
+      .catch(err => console.error('[CustomerAuth] Verification email error:', err.message));
 
-    // Generate token so customer can login immediately (but limited until verified)
+    // The token comes back in the body (the portal keeps it in the browser);
+    // the account works once the e-mail is confirmed.
     const token = generateToken({ id: userId, username, role: 'customer', workshop_id: workshop.id });
-
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
 
     return res.status(201).json({
       success: true,
@@ -210,14 +258,14 @@ router.post('/register', registrationLimiter, async (req, res) => {
 /* ══════════════════════════════════════════════════════════════
  * POST /verify-email — Verify email with token
  * ══════════════════════════════════════════════════════════════ */
-router.post('/verify-email', passwordResetLimiter, async (req, res) => {
+router.post('/verify-email', tokenRedeemLimiter, async (req, res) => {
   try {
     const { token } = req.body;
     if (!token) return res.status(400).json({ success: false, message: 'Verification token required' });
 
     const [customer] = await query(
       'SELECT id, user_id FROM customers WHERE verification_token = ? AND verification_expires > NOW()',
-      [token]
+      [String(token)]  // never an object: it would format into a match-anything condition
     );
     if (!customer) {
       return res.status(400).json({ success: false, message: 'Invalid or expired verification link' });
@@ -236,62 +284,76 @@ router.post('/verify-email', passwordResetLimiter, async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════════
+ * POST /resend-verification — the confirmation e-mail again
+ * The login screen's "Resend" called the workshop sign-up's
+ * /api/public/resend-verification, which knows nothing of customers.
+ * Same answer whether or not the address is on file.
+ * ══════════════════════════════════════════════════════════════ */
+router.post('/resend-verification', passwordResetLimiter, async (req, res) => {
+  const done = () => res.json({ success: true, message: 'If that account is waiting for confirmation, we have sent the e-mail again.' });
+  try {
+    const identifier = req.body?.email || req.body?.identifier;
+    if (!identifier) return res.status(400).json({ success: false, message: 'Email required' });
+    const [c] = await findCustomersByLogin(identifier, { extraWhere: 'c.is_verified = 0 AND c.password_hash IS NOT NULL' });
+    if (!c || !c.email) return done();
+    const token = crypto.randomBytes(32).toString('hex');
+    await execute('UPDATE customers SET verification_token = ?, verification_expires = ? WHERE id = ?',
+      [token, new Date(Date.now() + 24 * 60 * 60 * 1000), c.id]);
+    const [w] = await query('SELECT name FROM workshops WHERE id = ?', [c.workshop_id]);
+    sendVerificationEmail({ to: c.email, workshopId: c.workshop_id, workshopName: w?.name, name: c.full_name, token })
+      .catch(err => console.error('[CustomerAuth] Resend verification error:', err.message));
+    return done();
+  } catch (err) {
+    console.error('[CustomerAuth] Resend verification error:', err);
+    return res.status(500).json({ success: false, message: 'Request failed' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════
  * POST /login — Customer login
+ * Body: { email, password } — `email` is the e-mail OR the mobile number
+ * (`identifier` is accepted too).
  * ══════════════════════════════════════════════════════════════ */
 router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { email, password, workshop_slug } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password required' });
+    const { password, workshop_slug } = req.body;
+    const identifier = req.body.identifier || req.body.email;
+    if (!identifier || !password) {
+      return res.status(400).json({ success: false, message: 'Email or mobile number and password required' });
     }
 
-    let customer, workshop;
-
+    let workshop = null;
     if (workshop_slug) {
-      // Specific workshop login
       workshop = await resolveWorkshop(workshop_slug);
       if (!workshop) {
         return res.status(400).json({ success: false, message: 'Platform not found' });
       }
-      [customer] = await query(
-        `SELECT c.*, u.id as user_id, u.username, u.is_active as user_active
-         FROM customers c
-         LEFT JOIN users u ON c.user_id = u.id
-         WHERE c.workshop_id = ? AND (c.email = ? OR c.phone = ?) AND c.password_hash IS NOT NULL`,
-        [workshop.id, email, email]
-      );
-    } else {
-      // No workshop specified — search across all active workshops by email/phone
-      [customer] = await query(
-        `SELECT c.*, u.id as user_id, u.username, u.is_active as user_active
-         FROM customers c
-         LEFT JOIN users u ON c.user_id = u.id
-         JOIN workshops w ON c.workshop_id = w.id AND w.status NOT IN ('cancelled','suspended')
-         WHERE (c.email = ? OR c.phone = ?) AND c.password_hash IS NOT NULL
-         ORDER BY c.last_login_at DESC
-         LIMIT 1`,
-        [email, email]
-      );
-      if (customer) {
-        [workshop] = await query(
-          "SELECT id, name, slug, logo_url, logo_url_white, industry, status FROM workshops WHERE id = ?",
-          [customer.workshop_id]
-        );
-      }
     }
-
-    if (!customer || !workshop) {
+    // One phone can be on more than one record (a family car, an old
+    // duplicate): the password decides which one is signing in.
+    const candidates = await findCustomersByLogin(identifier, {
+      workshopId: workshop?.id || null, extraWhere: 'c.password_hash IS NOT NULL', limit: 5,
+    });
+    let customer = null;
+    for (const c of candidates) {
+      if (await bcrypt.compare(String(password), c.password_hash)) { customer = c; break; }
+    }
+    if (!customer) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
-
-    if (!customer.is_active) {
-      return res.status(403).json({ success: false, message: 'Account is deactivated. Contact support.' });
+    if (!workshop) {
+      [workshop] = await query(
+        'SELECT id, name, slug, logo_url, logo_url_white, industry, status, phone, currency FROM workshops WHERE id = ?',
+        [customer.workshop_id]
+      );
     }
 
-    // Verify password
-    const valid = await bcrypt.compare(password, customer.password_hash);
-    if (!valid) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    if (!customer.is_active || (customer.u_id && !customer.user_active)) {
+      return res.status(403).json({ success: false, message: 'Account is deactivated. Contact the workshop.' });
+    }
+    if (!customer.u_id) {
+      // A password with no portal login behind it: the token would name no user.
+      return res.status(403).json({ success: false, code: 'NO_PORTAL_LOGIN', message: 'Your portal access is not set up yet. Ask the workshop to send you a link.' });
     }
 
     if (!customer.is_verified) {
@@ -304,29 +366,20 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     // Update last login
     await execute('UPDATE customers SET last_login_at = NOW() WHERE id = ?', [customer.id]);
-    if (customer.user_id) {
-      await execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [customer.user_id]);
-    }
+    await execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [customer.u_id]);
 
     // Generate JWT
     const token = generateToken({
-      id: customer.user_id,
+      id: customer.u_id,
       username: customer.username || `customer_${customer.id}`,
       role: 'customer',
       workshop_id: workshop.id,
     });
 
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
     return res.json({
       success: true,
       data: {
-        id: customer.user_id,
+        id: customer.u_id,
         customer_id: customer.id,
         full_name: customer.full_name,
         company_name: customer.company_name,
@@ -341,6 +394,8 @@ router.post('/login', loginLimiter, async (req, res) => {
           logo_url: workshop.logo_url,
           logo_url_white: workshop.logo_url_white,
           industry: workshop.industry,
+          phone: workshop.phone || null,
+          currency: workshop.currency || 'AED',
         },
         token,
       },
@@ -353,17 +408,19 @@ router.post('/login', loginLimiter, async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════
  * POST /forgot-password — Send reset email
+ * Body: { email } — the e-mail or mobile number; the link goes to the
+ * e-mail on file. Also for a customer who was given access and never set a
+ * password (their invitation ran out).
  * ══════════════════════════════════════════════════════════════ */
 router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ success: false, message: 'Email required' });
+    const identifier = req.body?.email || req.body?.identifier;
+    if (!identifier) return res.status(400).json({ success: false, message: 'Email required' });
 
     // Always respond success to prevent enumeration
-    const [customer] = await query(
-      'SELECT id, full_name, email, workshop_id FROM customers WHERE email = ? AND password_hash IS NOT NULL',
-      [email]
-    );
+    const [customer] = await findCustomersByLogin(identifier, {
+      extraWhere: "(c.password_hash IS NOT NULL OR c.user_id IS NOT NULL) AND c.is_active = 1 AND c.email IS NOT NULL AND c.email <> ''",
+    });
 
     if (customer) {
       const resetToken = crypto.randomBytes(32).toString('hex');
@@ -374,27 +431,25 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
         [resetToken, resetExpires, customer.id]
       );
 
-      const resetUrl = `${config.frontendUrl}/customer/reset-password?token=${resetToken}`;
-
       sendNotificationEmail({
         to: customer.email,
         tenantId: customer.workshop_id,
-        subject: 'Reset your customer password',
-        title: 'Reset Your Password',
+        subject: 'Reset your customer portal password',
+        title: 'Reset your password',
         body: `
-          <p>Hi <strong>${customer.full_name || 'there'}</strong>,</p>
-          <p>We received a request to reset your customer account password.</p>
-          <p>Click the button below to set a new password. This link expires in <strong>1 hour</strong>.</p>
-          <p>If you didn't request this, you can safely ignore this email.</p>
+          <p>Hi <strong>${esc(customer.full_name || 'there')}</strong>,</p>
+          <p>We received a request to reset the password of your customer portal.</p>
+          <p>Click the button below to choose a new password. This link expires in <strong>1 hour</strong>.</p>
+          <p>If you didn't ask for this, you can ignore this e-mail.</p>
         `,
-        ctaText: 'Reset Password',
-        ctaUrl: resetUrl,
+        ctaText: 'Reset password',
+        ctaUrl: portalUrl('reset-password', { token: resetToken }),
       }).catch(err => console.error('[CustomerAuth] Reset email error:', err.message));
     }
 
     return res.json({
       success: true,
-      message: "If that email is registered, you'll receive a reset link shortly.",
+      message: "If that account is registered, you'll receive a reset link by e-mail shortly.",
     });
   } catch (err) {
     console.error('[CustomerAuth] Forgot password error:', err);
@@ -404,39 +459,49 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════
  * POST /reset-password — Set new password via token
+ * Also the staff invitation's set-password link (lib/portal-access.js).
+ * The link reached the customer through a channel on file, so using it
+ * confirms them (is_verified).
  * ══════════════════════════════════════════════════════════════ */
-router.post('/reset-password', passwordResetLimiter, async (req, res) => {
+router.post('/reset-password', tokenRedeemLimiter, async (req, res) => {
   try {
     const { token, new_password } = req.body;
     if (!token || !new_password) {
       return res.status(400).json({ success: false, message: 'Token and new password required' });
     }
-    if (new_password.length < 6) {
+    if (String(new_password).length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
     const [customer] = await query(
-      'SELECT id, user_id FROM customers WHERE reset_token = ? AND reset_token_expires > NOW()',
-      [token]
+      `SELECT c.id, c.user_id, c.email, c.phone, u.id AS u_id
+         FROM customers c LEFT JOIN users u ON u.id = c.user_id AND u.role = 'customer'
+        WHERE c.reset_token = ? AND c.reset_token_expires > NOW()`,
+      [String(token)]  // never an object: it would format into a match-anything condition
     );
     if (!customer) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired reset link' });
+      return res.status(400).json({ success: false, code: 'LINK_EXPIRED', message: 'This link has expired or was already used. Ask the workshop for a new one.' });
     }
 
-    const hashed = await bcrypt.hash(new_password, 12);
+    const hashed = await bcrypt.hash(String(new_password), 12);
 
-    // Update customer password
+    // Update customer password; the link is used up.
     await execute(
-      'UPDATE customers SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?',
+      'UPDATE customers SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL, is_verified = 1 WHERE id = ?',
       [hashed, customer.id]
     );
 
     // Also update the linked user
-    if (customer.user_id) {
-      await execute('UPDATE users SET password = ? WHERE id = ?', [hashed, customer.user_id]);
+    if (customer.u_id) {
+      await execute('UPDATE users SET password = ? WHERE id = ?', [hashed, customer.u_id]);
     }
 
-    return res.json({ success: true, message: 'Password updated successfully. You can now log in.' });
+    return res.json({
+      success: true,
+      message: 'Password saved. You can now sign in.',
+      // What to sign in with, so the page can say it.
+      data: { email: customer.email || null, phone: customer.phone || null },
+    });
   } catch (err) {
     console.error('[CustomerAuth] Reset password error:', err);
     return res.status(500).json({ success: false, message: 'Reset failed' });
@@ -446,7 +511,7 @@ router.post('/reset-password', passwordResetLimiter, async (req, res) => {
 /* ══════════════════════════════════════════════════════════════
  * GET /session — Validate customer session
  * ══════════════════════════════════════════════════════════════ */
-router.get('/session', authMiddleware, async (req, res) => {
+router.get('/session', preferBearerToken, authMiddleware, async (req, res) => {
   try {
     if (req.user.role !== 'customer') {
       return res.status(403).json({ success: false, message: 'Not a customer account' });
@@ -454,7 +519,8 @@ router.get('/session', authMiddleware, async (req, res) => {
 
     const [customer] = await query(
       `SELECT c.*, w.name as workshop_name, w.slug as workshop_slug, w.logo_url as workshop_logo,
-              w.logo_url_white as workshop_logo_white, w.industry as workshop_type, w.status as workshop_status
+              w.logo_url_white as workshop_logo_white, w.industry as workshop_type, w.status as workshop_status,
+              w.phone as workshop_phone, w.currency as workshop_currency
        FROM customers c
        LEFT JOIN workshops w ON c.workshop_id = w.id
        WHERE c.user_id = ? AND c.workshop_id = ?`,
@@ -488,6 +554,8 @@ router.get('/session', authMiddleware, async (req, res) => {
           logo_url_white: customer.workshop_logo_white,
           industry: customer.workshop_type,
           status: customer.workshop_status,
+          phone: customer.workshop_phone,
+          currency: customer.workshop_currency || 'AED',
         },
       },
     });
@@ -500,7 +568,7 @@ router.get('/session', authMiddleware, async (req, res) => {
 /* ══════════════════════════════════════════════════════════════
  * PUT /change-password — Change password (authenticated)
  * ══════════════════════════════════════════════════════════════ */
-router.put('/change-password', authMiddleware, async (req, res) => {
+router.put('/change-password', preferBearerToken, authMiddleware, async (req, res) => {
   try {
     if (req.user.role !== 'customer') {
       return res.status(403).json({ success: false, message: 'Not a customer account' });
@@ -510,7 +578,7 @@ router.put('/change-password', authMiddleware, async (req, res) => {
     if (!current_password || !new_password) {
       return res.status(400).json({ success: false, message: 'Both passwords required' });
     }
-    if (new_password.length < 6) {
+    if (String(new_password).length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
@@ -520,10 +588,10 @@ router.put('/change-password', authMiddleware, async (req, res) => {
     );
     if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
 
-    const valid = await bcrypt.compare(current_password, customer.password_hash);
+    const valid = customer.password_hash && await bcrypt.compare(String(current_password), customer.password_hash);
     if (!valid) return res.status(400).json({ success: false, message: 'Current password is incorrect' });
 
-    const hashed = await bcrypt.hash(new_password, 12);
+    const hashed = await bcrypt.hash(String(new_password), 12);
     await execute('UPDATE customers SET password_hash = ? WHERE id = ?', [hashed, customer.id]);
     if (req.user.id) {
       await execute('UPDATE users SET password = ? WHERE id = ?', [hashed, req.user.id]);
@@ -537,10 +605,12 @@ router.put('/change-password', authMiddleware, async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════════
- * POST /logout — Clear session cookie
+ * POST /logout — the portal drops its token itself. A customer cookie left
+ * from before (login used to set it) is cleared; a staff member's never is.
  * ══════════════════════════════════════════════════════════════ */
-router.post('/logout', (_req, res) => {
-  res.clearCookie('auth_token');
+router.post('/logout', (req, res) => {
+  const cookieToken = req.cookies?.auth_token;
+  if (cookieToken && verifyToken(cookieToken)?.role === 'customer') res.clearCookie('auth_token');
   return res.json({ success: true, message: 'Logged out' });
 });
 

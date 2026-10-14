@@ -47,34 +47,54 @@ import { authMiddleware } from '../middleware/auth.js';
 import { notifyMechanicAssigned } from '../lib/notify.js';
 import { createInvoiceFromWorkOrder } from './invoices.js';
 import { getRoadDistance } from '../lib/routing.js';
+import { requireCapability } from '../lib/roles.js';
+import { onTechnicianAssigned } from '../lib/workflow.js';
+import { woLabel } from '../lib/status-labels.js';
 
 const router = express.Router();
 router.use(authMiddleware);
 
+// Step 6: "The Team Leader assigns the job to a technician" — capability
+// job.assign (Team Leader, Supervisor, Workshop Foreman, managers), the same
+// rule PATCH /work-orders/:id/assign-mechanic applies. The board itself
+// (GET /) stays readable.
+const canAssign = requireCapability('job.assign');
+// A closed job card is not reopened by assigning or unassigning someone.
+const CLOSED = ['completed', 'cancelled'];
+
+// What a job card is on the board: its number, the car and who it is for.
+// The main job card's number (job_cards.main_for_work_order) is the "JC No."
+// staff work with; the work order number is the fallback.
+const JOB_JOINS = `
+       LEFT JOIN customers c ON wo.customer_id = c.id
+       LEFT JOIN service_bays b ON wo.service_bay_id = b.id
+       LEFT JOIN vehicles v ON wo.vehicle_id = v.id
+       LEFT JOIN job_cards mjc ON mjc.main_for_work_order = wo.id`;
+const JOB_FIELDS = `c.full_name as customer_name_ref, b.name as service_bay_name,
+              v.make AS vehicle_make, v.model AS vehicle_model, v.year AS vehicle_year,
+              v.plate_number AS vehicle_plate_number, v.vin AS vehicle_vin,
+              mjc.job_card_number AS main_job_card_number`;
+
 // GET /api/job-assignment — unassigned work orders + available mechanics
+// Step 6 board. No GPS: technicians work in bays, so the courier-era
+// last_lat/last_lng of each mechanic is not sent any more.
 router.get('/', async (req, res) => {
   try {
     const unassigned = await query(
-      `SELECT wo.*, wo.dropoff_lat, wo.dropoff_lng,
-              c.full_name as customer_name_ref, b.name as service_bay_name
+      `SELECT wo.*, ${JOB_FIELDS}
        FROM work_orders wo
-       LEFT JOIN customers c ON wo.customer_id = c.id
-       LEFT JOIN service_bays b ON wo.service_bay_id = b.id
-       WHERE wo.workshop_id = ? AND wo.status IN ('pending','confirmed') AND wo.mechanic_id IS NULL
+       ${JOB_JOINS}
+       -- estimate_approved: job cards opened from an approved estimate wait here too
+       WHERE wo.workshop_id = ? AND wo.status IN ('pending','confirmed','estimate_approved') AND wo.mechanic_id IS NULL
        ORDER BY wo.scheduled_at ASC, wo.created_at ASC
        LIMIT 500`,
       [req.workshopId]
     );
     const mechanics = await query(
       `SELECT m.*, b.name as service_bay_name,
-              ml.lat as last_lat, ml.lng as last_lng,
               (SELECT COUNT(*) FROM work_orders WHERE mechanic_id = m.id AND status IN ('assigned','accepted','in_progress','inspection','ready_for_pickup')) as active_work_orders
        FROM mechanics m
        LEFT JOIN service_bays b ON m.service_bay_id = b.id
-       LEFT JOIN (
-         SELECT mechanic_id, lat, lng FROM mechanic_locations
-         WHERE id IN (SELECT MAX(id) FROM mechanic_locations GROUP BY mechanic_id)
-       ) ml ON ml.mechanic_id = m.id
        WHERE m.workshop_id = ? AND m.is_active = TRUE AND m.status = 'available'
        ORDER BY m.full_name`,
       [req.workshopId]
@@ -91,71 +111,80 @@ router.get('/', async (req, res) => {
       [req.workshopId]
     );
     const active = await query(
-      `SELECT wo.*, wo.dropoff_lat, wo.dropoff_lng,
-              m.full_name as mechanic_name, m.phone as mechanic_phone,
-              b.name as service_bay_name, c.full_name as customer_name_ref
+      `SELECT wo.*, ${JOB_FIELDS},
+              m.full_name as mechanic_name, m.phone as mechanic_phone
        FROM work_orders wo
        JOIN mechanics m ON wo.mechanic_id = m.id
-       LEFT JOIN service_bays b ON wo.service_bay_id = b.id
-       LEFT JOIN customers c ON wo.customer_id = c.id
+       ${JOB_JOINS}
        WHERE wo.workshop_id = ? AND wo.status IN ('assigned','accepted','in_progress','inspection','ready_for_pickup')
        ORDER BY wo.updated_at DESC
        LIMIT 500`,
       [req.workshopId]
     );
-    // ── Completed / cancelled work orders updated today ──
+    // ── Closed / cancelled work orders updated today ──
     const completed = await query(
-      `SELECT wo.id, wo.work_order_number, wo.status, wo.customer_name, wo.dropoff_address,
-              wo.payment_method, wo.cash_amount,
-              wo.updated_at, wo.created_at,
-              m.full_name as mechanic_name,
-              b.name as service_bay_name, c.full_name as customer_name_ref
+      `SELECT wo.id, wo.work_order_number, wo.status, wo.customer_name, wo.customer_approved_at,
+              wo.estimated_completion_at, wo.description, wo.updated_at, wo.created_at,
+              m.full_name as mechanic_name, ${JOB_FIELDS}
        FROM work_orders wo
        LEFT JOIN mechanics m ON wo.mechanic_id = m.id
-       LEFT JOIN service_bays b ON wo.service_bay_id = b.id
-       LEFT JOIN customers c ON wo.customer_id = c.id
+       ${JOB_JOINS}
        WHERE wo.workshop_id = ? AND wo.status IN ('completed','cancelled')
          AND DATE(wo.updated_at) = CURDATE()
        ORDER BY wo.updated_at DESC
        LIMIT 100`,
       [req.workshopId]
     );
-    // ── Fetch parts for all work orders (unassigned + active) ──
+    // ── Parts and approved work lines for every open work order on the board ──
     const allWorkOrderIds = [...unassigned, ...active].map(o => o.id);
-    let partsByWorkOrder = {};
+    const partsByWorkOrder = {};
+    const itemsByWorkOrder = {};
     if (allWorkOrderIds.length > 0) {
-      const parts = await query(
-        `SELECT id, work_order_id, part_number, name, status, quantity, unit_cost, total_cost
-         FROM parts
-         WHERE work_order_id IN (?) AND workshop_id = ?
-         ORDER BY work_order_id, created_at ASC`,
-        [allWorkOrderIds, req.workshopId]
-      );
-      parts.forEach(p => {
-        if (!partsByWorkOrder[p.work_order_id]) partsByWorkOrder[p.work_order_id] = [];
-        partsByWorkOrder[p.work_order_id].push(p);
-      });
+      const [parts, items] = await Promise.all([
+        query(
+          `SELECT id, work_order_id, part_number, name, status, quantity, unit_cost, total_cost
+           FROM parts
+           WHERE work_order_id IN (?) AND workshop_id = ?
+           ORDER BY work_order_id, created_at ASC`,
+          [allWorkOrderIds, req.workshopId]
+        ),
+        // The work lines on the job card (copied from the approved estimate):
+        // what the Team Leader reads to choose the technician.
+        query(
+          `SELECT id, work_order_id, name, item_type, quantity
+           FROM work_order_items
+           WHERE work_order_id IN (?)
+           ORDER BY work_order_id, id ASC`,
+          [allWorkOrderIds]
+        ),
+      ]);
+      parts.forEach(p => { (partsByWorkOrder[p.work_order_id] ||= []).push(p); });
+      items.forEach(i => { (itemsByWorkOrder[i.work_order_id] ||= []).push(i); });
     }
-    // Attach parts to each work order
+    // Attach parts and work lines to each work order
     const attachData = (workOrders) => workOrders.map(o => ({
       ...o,
       parts: partsByWorkOrder[o.id] || [],
+      items: itemsByWorkOrder[o.id] || [],
     }));
 
     return res.json({ success: true, data: {
       unassigned: attachData(unassigned),
       available_mechanics: mechanics,
       all_mechanics: allMechanics,
+      // The key keeps its courier-era name so existing clients still read it;
+      // it holds the job cards a technician is on (assigned → ready for collection).
       active_deliveries: attachData(active),
       completed_today: completed,
     }});
   } catch (err) {
+    console.error('[job-assignment] board error:', err.message);
     return res.status(500).json({ success: false, message: 'Failed to load job assignment board' });
   }
 });
 
 // POST /api/job-assignment/assign — assign mechanic to a work order
-router.post('/assign', async (req, res) => {
+router.post('/assign', canAssign, async (req, res) => {
   try {
     const { work_order_id, mechanic_id } = req.body;
     if (!work_order_id || !mechanic_id) {
@@ -164,6 +193,9 @@ router.post('/assign', async (req, res) => {
 
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ?', [work_order_id, req.workshopId]);
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (CLOSED.includes(workOrder.status)) {
+      return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: `This job card is ${woLabel(workOrder)} — it cannot be assigned.` });
+    }
 
     const [mechanic] = await query('SELECT * FROM mechanics WHERE id = ? AND workshop_id = ?', [mechanic_id, req.workshopId]);
     if (!mechanic) return res.status(404).json({ success: false, message: 'Mechanic not found' });
@@ -177,16 +209,18 @@ router.post('/assign', async (req, res) => {
       [work_order_id, mechanic_id, req.user.id]
     );
 
-    // Update work order
+    // Update work order. Only a job not yet on the floor moves to 'assigned'
+    // (as PATCH /work-orders/:id/assign-mechanic does): reassigning a job in
+    // progress must not wind its status back.
     await execute(
-      "UPDATE work_orders SET mechanic_id = ?, status = 'assigned' WHERE id = ? AND workshop_id = ?",
+      "UPDATE work_orders SET mechanic_id = ?, status = CASE WHEN status IN ('pending','confirmed') THEN 'assigned' ELSE status END WHERE id = ? AND workshop_id = ? AND status NOT IN ('completed','cancelled')",
       [mechanic_id, work_order_id, req.workshopId]
     );
 
     // Log status change
     await execute(
       'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [work_order_id, 'assigned', req.user.id, `Assigned to mechanic: ${mechanic.full_name}`]
+      [work_order_id, ['pending', 'confirmed'].includes(workOrder.status) ? 'assigned' : workOrder.status, req.user.id, `Assigned to technician: ${mechanic.full_name}`]
     );
 
     // Update mechanic status
@@ -204,6 +238,9 @@ router.post('/assign', async (req, res) => {
       }
     }
 
+    // Step 6: the main job card follows the technician, who is told.
+    await onTechnicianAssigned({ workOrderId: Number(work_order_id), workshopId: req.workshopId, mechanicId: Number(mechanic_id) });
+
     // ── Notify: mechanic assigned (SMS + Email + Push to mechanic & customer) ──
     notifyMechanicAssigned({
       order: workOrder, driver: mechanic, tenantId: req.workshopId,
@@ -217,20 +254,25 @@ router.post('/assign', async (req, res) => {
 });
 
 // POST /api/job-assignment/unassign
-router.post('/unassign', async (req, res) => {
+router.post('/unassign', canAssign, async (req, res) => {
   try {
     const { work_order_id, reason } = req.body;
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ? AND workshop_id = ?', [work_order_id, req.workshopId]);
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (CLOSED.includes(workOrder.status)) {
+      return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: `This job card is ${woLabel(workOrder)} — it cannot be unassigned.` });
+    }
 
     await execute('UPDATE work_order_assignments SET is_current = FALSE WHERE work_order_id = ?', [work_order_id]);
+    // Back to waiting for assignment — 'confirmed' only for a job that was
+    // merely assigned; one already started keeps its status.
     await execute(
-      "UPDATE work_orders SET mechanic_id = NULL, status = 'confirmed' WHERE id = ? AND workshop_id = ?",
+      "UPDATE work_orders SET mechanic_id = NULL, status = CASE WHEN status IN ('assigned','accepted') THEN 'confirmed' ELSE status END WHERE id = ? AND workshop_id = ?",
       [work_order_id, req.workshopId]
     );
     await execute(
       'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [work_order_id, 'confirmed', req.user.id, reason || 'Mechanic unassigned']
+      [work_order_id, ['assigned', 'accepted'].includes(workOrder.status) ? 'confirmed' : workOrder.status, req.user.id, reason || 'Technician unassigned']
     );
 
     if (workOrder.mechanic_id) {
@@ -318,7 +360,7 @@ function allowedSpecialties(workOrder) {
 
 // POST /api/job-assignment/auto-assign
 // Assigns the nearest available mechanic to a single work order
-router.post('/auto-assign', async (req, res) => {
+router.post('/auto-assign', canAssign, async (req, res) => {
   try {
     const { work_order_id } = req.body;
     if (!work_order_id) return res.status(400).json({ success: false, message: 'work_order_id required' });
@@ -348,7 +390,7 @@ router.post('/auto-assign', async (req, res) => {
     );
 
     if (!mechanics.length) {
-      return res.status(409).json({ success: false, message: 'No available mechanics at this time' });
+      return res.status(409).json({ success: false, message: 'No technician is available right now' });
     }
 
     // Apply hard filters: specialty match, min rating, max active-work-orders cap
@@ -362,7 +404,7 @@ router.post('/auto-assign', async (req, res) => {
     if (!eligibleMechanics.length) {
       return res.status(409).json({
         success: false,
-        message: 'No eligible mechanics (filtered by specialty / rating / load cap)',
+        message: 'No eligible technician (trade, rating or job limit)',
         data: { rejected, total_available: mechanics.length },
       });
     }
@@ -406,7 +448,7 @@ router.post('/auto-assign', async (req, res) => {
       if (!within.length) {
         return res.status(409).json({
           success: false,
-          message: `No mechanics within ${cfg.maxDistanceKm} km of drop-off`,
+          message: `No technician within ${cfg.maxDistanceKm} km`,
           data: { closest_km: scored.length ? Math.min(...scored.map(s => s.distKm)).toFixed(2) : null },
         });
       }
@@ -437,7 +479,11 @@ router.post('/auto-assign', async (req, res) => {
     );
     await execute("UPDATE mechanics SET status = 'busy' WHERE id = ?", [best.id]);
 
-    // Notify mechanic (email + push + in-app + SMS to customer)
+    // Step 6, as the manual path: the main job card follows the technician,
+    // who is told (before the e-mail below, so its link names their card).
+    await onTechnicianAssigned({ workOrderId: Number(work_order_id), workshopId: req.workshopId, mechanicId: Number(best.id) });
+
+    // The technician's e-mail (the in-app notice above is not repeated)
     notifyMechanicAssigned({
       order: workOrder, driver: best, tenantId: req.workshopId,
     }).catch(e => console.error('[Notify] Auto-assign error:', e.message));
@@ -455,7 +501,7 @@ router.post('/auto-assign', async (req, res) => {
 
 // POST /api/job-assignment/auto-assign-all
 // Auto-assigns all unassigned pending/confirmed work orders to nearest available mechanics
-router.post('/auto-assign-all', async (req, res) => {
+router.post('/auto-assign-all', canAssign, async (req, res) => {
   try {
     const cfg = await loadAssignmentConfig(req.workshopId);
     const maxWorkOrdersPerMechanic = cfg.maxWorkOrdersPerMechanic;
@@ -478,14 +524,14 @@ router.post('/auto-assign-all', async (req, res) => {
        WHERE m.workshop_id = ? AND m.is_active = TRUE AND m.status = 'available'`,
       [req.workshopId]
     );
-    if (!mechanics.length) return res.status(409).json({ success: false, message: 'No available mechanics' });
+    if (!mechanics.length) return res.status(409).json({ success: false, message: 'No technician is available right now' });
 
     // Pre-filter by min rating (specialty match is per-work-order, applied below)
     const ratingOk = cfg.minRating > 0
       ? mechanics.filter(m => parseFloat(m.rating || 0) >= cfg.minRating)
       : mechanics;
     if (!ratingOk.length) {
-      return res.status(409).json({ success: false, message: `No mechanics meet min rating ${cfg.minRating}` });
+      return res.status(409).json({ success: false, message: `No technician meets the minimum rating ${cfg.minRating}` });
     }
 
     // NOTE: the source used a precomputed OSRM distance-matrix (all drivers x
@@ -568,7 +614,8 @@ router.post('/auto-assign-all', async (req, res) => {
         distance_km: best.distKm < 999 ? Number(best.distKm.toFixed(2)) : null,
       });
 
-      // Notify each mechanic per assignment
+      // Step 6, as the manual path: the main job card follows the technician, who is told.
+      await onTechnicianAssigned({ workOrderId: Number(workOrder.id), workshopId: req.workshopId, mechanicId: Number(best.id) });
       notifyMechanicAssigned({
         order: workOrder, driver: best, tenantId: req.workshopId,
       }).catch(() => {});

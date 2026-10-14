@@ -23,6 +23,7 @@ import { initSocket } from './lib/socket.js';
 // ── Cron / background jobs ────────────────────────────────────────────────
 import { startAcceptanceTimeout } from './lib/acceptance-timeout.js';
 import { startJobDelayChecker } from './lib/job-delay-checker.js';
+import { startPartsEtaAlerts } from './lib/parts-eta-alerts.js';
 import { startDocExpiryCron } from './lib/doc-expiry-cron.js';
 import { startDataRetention } from './lib/data-retention.js';
 import { startTrialEnforcer } from './lib/trial-enforcer.js';
@@ -46,8 +47,6 @@ import serviceStatusRouter from './routes/service-status.js';
 import cashPaymentRouter from './routes/cash-payment.js';
 import warrantyClaimsRouter from './routes/warranty-claims.js';
 import mechanicEarningsRouter from './routes/mechanic-earnings.js';
-import mechanicDocumentsRouter from './routes/mechanic-documents.js';
-import mechanicAppRouter from './routes/mechanic-app.js';
 import customerAuthRouter from './routes/customer-auth.js';
 import customerPortalRouter from './routes/customer-portal.js';
 import walletRouter from './routes/wallet.js';
@@ -73,18 +72,24 @@ import crmCustomersRouter from './routes/crm-customers.js';
 import crmTasksRouter from './routes/crm-tasks.js';
 import crmRemindersRouter from './routes/crm-reminders.js';
 import { startReminderCron } from './lib/reminder-cron.js';
-import superAdminRouter from './routes/super-admin.js';
+import superAdminRouter, { verifySuperAdmin } from './routes/super-admin.js';
+import { authMiddleware } from './middleware/auth.js';
+import { query } from './lib/database.js';
 import superAdminEnhancedRouter from './routes/super-admin-enhanced.js';
 
 // ── SOW: New modules ──────────────────────────────────────────────────────
 import appointmentsRouter from './routes/appointments.js';
 import vehicleReceivingRouter from './routes/vehicle-receiving.js';
 import estimatesRouter, { publicEstimateRouter } from './routes/estimates.js';
+import publicInspectionsRouter from './routes/public-inspections.js';
+import publicServiceStatusRouter from './routes/public-service-status.js';
 import jobCardsRouter from './routes/job-cards.js';
+import workflowRouter from './routes/workflow.js';
+import vehicleBoardRouter from './routes/vehicle-board.js';
 import teamLeaderRouter from './routes/team-leader.js';
 import fleetIntakeRouter, { publicFleetIntakeRouter } from './routes/fleet-intake.js';
 import inventoryRouter from './routes/inventory.js';
-import subletRouter, { proformaRouter, gatePassRouter } from './routes/sublet.js';
+import subletRouter, { proformaRouter } from './routes/sublet.js';
 import { vatRouter, evhcRouter, groupIntegrationRouter } from './routes/vat-evhc-integration.js';
 import disputesRouter from './routes/disputes.js';
 import mechanicKpiRouter from './routes/mechanic-kpi.js';
@@ -169,7 +174,40 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Static file serving for uploaded content (proofs, avatars, documents, etc.)
+// Identity documents and job applicants' CVs are not public files. Staff
+// browsers send the auth cookie with <img>/link requests, so this works for
+// the screens that show them. Signatures, proof photos and logos stay public
+// (customer tracking pages and emails use them).
+app.use(['/uploads/mechanic-docs', '/uploads/resumes'], authMiddleware);
 app.use('/uploads', express.static(new URL('../uploads', import.meta.url).pathname));
+
+// Country list for phone-number inputs (PhoneInput.jsx calls /api/countries;
+// it 404'd and every form fell back to a short built-in list).
+app.get('/api/countries', async (_req, res) => {
+  try {
+    const rows = await query('SELECT name, iso, phone_code FROM countries WHERE is_active = 1 ORDER BY sort_order, name');
+    // The stored flag emojis were saved through a 3-byte charset and read back
+    // as '????'; build each flag from its ISO code (regional indicator letters).
+    const flag = (iso) => /^[A-Za-z]{2}$/.test(iso || '')
+      ? String.fromCodePoint(...[...iso.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)) : '';
+    res.json({ success: true, data: rows.map(r => ({ ...r, flag: flag(r.iso) })) });
+  } catch {
+    res.json({ success: true, data: [] });
+  }
+});
+
+// Workshop logos by relative path, as linked from emails (lib/email.js) and
+// the customer portal: /api/file?path=logos/x.png. Logos only — nothing else
+// under uploads is reachable this way.
+app.get('/api/file', (req, res) => {
+  const rel = String(req.query.path || '');
+  if (!/^logos\/[A-Za-z0-9._-]+\.(png|jpe?g|webp|svg|gif)$/i.test(rel)) {
+    return res.status(404).json({ success: false, message: 'Not found' });
+  }
+  res.sendFile(join(new URL('../uploads', import.meta.url).pathname, rel), err => {
+    if (err && !res.headersSent) res.status(404).json({ success: false, message: 'Not found' });
+  });
+});
 
 app.get('/health', (req, res) => {
   res.json({ success: true, service: 'car-workshop-backend', status: 'ok', time: new Date().toISOString() });
@@ -211,8 +249,13 @@ app.use('/api/warranty-claims', warrantyClaimsRouter);
 
 // ── Mechanic-facing ──────────────────────────────────────────────────────
 app.use('/api/mechanic-earnings', mechanicEarningsRouter);
-app.use('/api/mechanic-documents', mechanicDocumentsRouter);
-app.use('/api/mechanic-app', mechanicAppRouter);
+// /api/mechanic-documents is not mounted: no screen uses it, and the router
+// has no login check of its own. To bring it back, fix its expires_at /
+// document_url columns and mount it as
+// app.use('/api/mechanic-documents', authMiddleware, requireManager, router).
+// /api/mechanic-app (the courier driver app's API) is no longer mounted: the
+// technician app uses /api/job-cards/mine. lib/access.js still refuses the
+// prefix for every role (RETIRED_PREFIXES).
 
 // ── Customer-facing ──────────────────────────────────────────────────────
 app.use('/api/customer-auth', customerAuthRouter);
@@ -238,6 +281,9 @@ app.use('/api/uploads', uploadsRouter);
 // requireApiPermission() inside the router no-ops when req.isApiKey is falsy,
 // so every v1 route was reachable with no credential at all.
 app.use('/api/v1', apiKeyAuth, apiV1Router);
+// The customer's status link (no login). Mounted before /api/public so the
+// public API router never sees these paths.
+app.use('/api/public/service-status', publicServiceStatusRouter);
 app.use('/api/public', publicApiRouter);
 // Customer feedback survey (CES / NPS / CSAT): public form + dashboard analysis
 app.use('/api/public/survey', publicSurveyRouter);
@@ -245,7 +291,8 @@ app.use('/api/customer-survey', adminSurveyRouter);
 
 // ── Marketing / content pages (each file exposes a public + admin router) ─
 app.use('/api/careers', publicCareersRouter);
-app.use('/api/admin/careers', adminCareersRouter);
+// Was mounted with no authentication at all (list/delete applications)
+app.use('/api/admin/careers', verifySuperAdmin, adminCareersRouter);
 // ── CRM phase 1 ──────────────────────────────────────────────
 // Mounted under /api/crm so the module namespace matches the sidebar group and
 // the per-tenant module keys.
@@ -268,8 +315,15 @@ app.use('/api/vehicle-receiving', vehicleReceivingRouter);
 app.use('/api/estimates', estimatesRouter);
 // Customer-facing approve/reject link, emailed from POST /estimates/:id/send
 app.use('/api/public/estimates', publicEstimateRouter);
+// The customer's copy of a vehicle inspection, and their sign-off — link sent
+// from POST /vehicle-inspections/:id/share
+app.use('/api/public/inspections', publicInspectionsRouter);
 // B5: Job cards, technician time capture, QC, loaner vehicles
 app.use('/api/job-cards', jobCardsRouter);
+// Workshop workflow Steps 1–7 (lib/workflow.js)
+app.use('/api/workflow', workflowRouter);
+// Vehicle Status Board: every open car by phase (Steps 1–7), staff only
+app.use('/api/vehicle-board', vehicleBoardRouter);
 // Team leader board: their technicians, the vehicles on the team, time bookings
 app.use('/api/team-leader', teamLeaderRouter);
 // Fleet coordinator intake: the vehicle information section on its own page
@@ -280,9 +334,11 @@ app.use('/api/public/fleet-intake', publicFleetIntakeRouter);
 app.use('/api/inventory', inventoryRouter);
 // B8: Sublet management
 app.use('/api/sublet', subletRouter);
-// B9: Proforma invoices, gate passes
+// B9: Proforma invoices. The old /api/gate-pass router (sublet.js) is not
+// mounted: the gate pass is issued in Step 7 through
+// POST /api/workflow/work-orders/:id/gate-pass (delivery.handover, payment
+// settled), which the legacy routes went around.
 app.use('/api/proforma', proformaRouter);
-app.use('/api/gate-pass', gatePassRouter);
 // Complaints — wires up the pre-existing `disputes` table (intake, SLA
 // timestamps, outcome, authority level); no category taxonomy yet.
 app.use('/api/disputes', disputesRouter);
@@ -319,21 +375,36 @@ initSocket(httpServer);
 // These are resilient to a missing/unreachable DB — each wraps its own
 // interval in try/catch so a DB hiccup doesn't crash the process.
 if (process.env.DISABLE_CRON_JOBS !== 'true') {
-  try { startAcceptanceTimeout(); } catch (e) { console.error('startAcceptanceTimeout failed:', e.message); }
   try { startJobDelayChecker(); } catch (e) { console.error('startJobDelayChecker failed:', e.message); }
+  try { startPartsEtaAlerts(); } catch (e) { console.error('startPartsEtaAlerts failed:', e.message); }
   try { startDocExpiryCron(); } catch (e) { console.error('startDocExpiryCron failed:', e.message); }
-  try { startDataRetention(); } catch (e) { console.error('startDataRetention failed:', e.message); }
-  try { startTrialEnforcer(); } catch (e) { console.error('startTrialEnforcer failed:', e.message); }
   try { startScheduledReports(); } catch (e) { console.error('startScheduledReports failed:', e.message); }
   try { startReminderCron(); } catch (e) { console.error('startReminderCron failed:', e.message); }
 
-  // ensurePushTable() creates push_subscriptions and user_notifications. It was
-  // exported but never called, so on every deployment the in-app notification
-  // table simply did not exist and all seven notification routes returned 500.
-  ensurePushTable()
-    .then(() => console.log('✅ Notification tables ensured'))
-    .catch(e => console.error('ensurePushTable failed:', e.message));
+  // Delivery-SaaS jobs, off unless explicitly asked for:
+  //  - data retention hard-DELETEs parts (and, once its missing table exists,
+  //    work orders) older than the plan's window — 365 days on the fallback plan
+  //  - acceptance timeout un-assigns a mechanic who has not "accepted" within
+  //    30 minutes, undoing the team leader's assignment
+  //  - trial enforcer suspends workshops whose trial has lapsed
+  if (process.env.ENABLE_DATA_RETENTION === 'true') {
+    try { startDataRetention(); } catch (e) { console.error('startDataRetention failed:', e.message); }
+  }
+  if (process.env.ENABLE_ACCEPTANCE_TIMEOUT === 'true') {
+    try { startAcceptanceTimeout(); } catch (e) { console.error('startAcceptanceTimeout failed:', e.message); }
+  }
+  if (process.env.ENABLE_TRIAL_ENFORCER === 'true') {
+    try { startTrialEnforcer(); } catch (e) { console.error('startTrialEnforcer failed:', e.message); }
+  }
 }
+
+// ensurePushTable() creates push_subscriptions and user_notifications. It was
+// exported but never called, so on every deployment the in-app notification
+// table simply did not exist and all seven notification routes returned 500.
+// A table, not a job — so it runs whether or not cron jobs are enabled.
+ensurePushTable()
+  .then(() => console.log('✅ Notification tables ensured'))
+  .catch(e => console.error('ensurePushTable failed:', e.message));
 
 httpServer.listen(config.port, () => {
   console.log(`Car Workshop Platform API listening on port ${config.port} (${config.env})`);

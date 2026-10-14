@@ -77,10 +77,14 @@ export function initSocket(httpServer) {
         // admitted, and customer tokens carry one, so customers could listen
         // to staff movements. Customers get their own per-order track:{token}
         // room instead, which the tracking page already uses.
-        const STAFF_ROLES = new Set(['admin', 'dispatcher', 'manager', 'owner', 'mechanic', 'staff']);
+        // Staff is every users.role except 'customer'. The old allow-list
+        // ('admin','dispatcher','manager','owner','mechanic','staff') predates
+        // the workshop roles, so a workshop/general manager, service advisor,
+        // supervisor or foreman never joined the room at all.
         const role = String(decoded.role || '').toLowerCase();
+        const isStaff = role && role !== 'customer';
 
-        if (decoded.workshop_id && STAFF_ROLES.has(role)) {
+        if (decoded.workshop_id && isStaff) {
           socket.join(`workshop:${decoded.workshop_id}`);
         }
         if (decoded.id) {
@@ -104,6 +108,10 @@ export function initSocket(httpServer) {
 
     socket.on('join', handleAuth);
     socket.on('authenticate', handleAuth);
+    // The web client sends its token in the handshake (io(url, { auth })),
+    // which was never read — so its sockets connected but joined no room and
+    // no notification ever arrived live.
+    if (socket.handshake?.auth?.token) handleAuth(socket.handshake.auth);
 
     socket.on('disconnect', (reason) => {
       console.log(`[Socket] Client disconnected: ${socket.id} (${reason})`);

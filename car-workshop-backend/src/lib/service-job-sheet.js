@@ -7,12 +7,21 @@
  * Same pdfkit/qrcode/bwip-js/arabic-reshaper layout engine and Arabic RTL
  * handling, but the printed fields now describe a work order / vehicle /
  * customer instead of a shipment / package / recipient:
- *   - tracking_number / barcode  -> work_order_number / barcode of work order
- *   - recipient (name/phone/address) -> customer (name/phone/address)
+ *   - tracking_number / barcode  -> job card + work order number
+ *   - recipient (name/phone/address) -> customer (name/phone)
  *   - sender (workshop drop-off contact) -> workshop info (kept from tenant/workshop)
- *   - package weight/dimensions -> vehicle make/model/plate
- *   - COD badge -> cash payment badge
- *   - tracking_token / /track/:token -> service_status_token / service status link
+ *   - package weight/dimensions -> vehicle make/model/plate/VIN, reported issue
+ *   - COD badge -> "pay at collection" line
+ *   - tracking_token / /track/:token -> the customer status link
+ *     (lib/customer-link.js, /service-status/:token)
+ *
+ * The scan block at the top carries a QR of the customer status link: the
+ * customer opens their status page with it, and the technician app's Scan
+ * page (jsQR, or BarcodeDetector) reads the token out of the same link to
+ * open the job card. Next to it, the job card number in Code-128 (readable
+ * by handheld scanners and BarcodeDetector) and in plain text to type in.
+ * The old full-width Code-128 of the 32-character status token is gone: it
+ * was too dense to scan and the browser QR reader could not read it.
  *
  * Clean, minimal A6 job-sheet layout inspired by simple invoice layouts.
  * Flat sections, no heavy fills or oversized text. Thin lines, small type.
@@ -27,6 +36,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import arabicReshaper from 'arabic-reshaper';
+import { query } from './database.js';
+import { customerStatusUrl } from './customer-link.js';
+import { markPointInFrame, DAMAGE_CODES } from './inspection-marks.js';
 const { convertArabic } = arabicReshaper;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -100,7 +112,7 @@ async function loadLogo(logoUrl) {
 async function generateBarcodePNG(text) {
   try {
     return await bwipjs.toBuffer({
-      bcid: 'code128', text, scale: 2, height: 8,
+      bcid: 'code128', text, scale: 2, height: 7,
       includetext: true, textxalign: 'center', textsize: 7,
       paddingwidth: 0, paddingheight: 1,
     });
@@ -139,6 +151,43 @@ function mergeTemplate(t) { return t ? { ...DEFAULT_TEMPLATE, ...t } : { ...DEFA
 function getLabelSize(k) {
   return ({ 'A6': [297.64, 419.53], 'A5': [419.53, 595.28], '4x6': [288, 432] })[k] || [297.64, 419.53];
 }
+
+/**
+ * The routes pass a bare work_orders row (SELECT o.*), which has no vehicle
+ * or job card columns — the sheet used to print no vehicle at all. Fill in
+ * vehicle_make / _model / _year / _plate / _vin and job_card_number (the
+ * main card) here, so every caller gets them. Values the caller already
+ * set win. Never throws: a sheet without them still prints.
+ */
+async function withJobDetails(order) {
+  const out = { ...order };
+  try {
+    if (order.vehicle_id && !order.vehicle_plate) {
+      const [v] = await query('SELECT make, model, year, plate_number, vin FROM vehicles WHERE id = ?', [order.vehicle_id]);
+      if (v) {
+        out.vehicle_make ??= v.make;
+        out.vehicle_model ??= v.model;
+        out.vehicle_year ??= v.year;
+        out.vehicle_plate = v.plate_number;
+        out.vehicle_vin ??= v.vin;
+      }
+    }
+    if (!order.job_card_number && order.id) {
+      const [jc] = await query(
+        `SELECT job_card_number FROM job_cards
+          WHERE work_order_id = ? AND workshop_id = ? AND parent_job_card_id IS NULL
+          ORDER BY status = 'cancelled', id LIMIT 1`,
+        [order.id, order.workshop_id]
+      );
+      if (jc) out.job_card_number = jc.job_card_number;
+    }
+  } catch (e) {
+    console.error('[JobSheet] Job details lookup failed:', e.message);
+  }
+  return out;
+}
+
+const humanize = v => String(v || '').replace(/_/g, ' ').trim();
 
 // ═══════════════════════════════════════════════════════════════
 // MAIN — Simple / Invoice-style layout
@@ -193,14 +242,11 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
   const WHITE     = '#ffffff';
   const CASH_COLOR = template.cod_badge_color || '#dc2626';
 
-  const baseUrl     = process.env.BACKEND_URL || process.env.BASE_URL || (process.env.NODE_ENV === 'production' ? 'https://delivery.pioneercarservice.com' : `http://localhost:${process.env.PORT || 4001}`);
-  const frontendUrl = process.env.FRONTEND_URL || baseUrl.replace(':4001', ':5173');
-
   // ── Helpers ─────────────────────────────────────────────────
   const hline = (y) => { doc.moveTo(M, y).lineTo(RIGHT, y).strokeColor(LINE).lineWidth(0.5).stroke(); };
 
   for (let idx = 0; idx < orders.length; idx++) {
-    const order = orders[idx];
+    const order = await withJobDetails(orders[idx]);
     if (idx > 0) doc.addPage({ margin: 0, size: [W, H] });
 
     doc.rect(0, 0, W, H).fill(WHITE);
@@ -208,7 +254,7 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
     // Detect Arabic text → use Amiri font instead of Helvetica
     const _txt = [order.sender_name, order.sender_address, order.customer_name,
       order.customer_address, order.customer_area, order.customer_emirate,
-      order.service_bay_name, order.special_instructions, tenant?.name].filter(Boolean).join('');
+      order.service_bay_name, order.special_instructions, order.description, tenant?.name].filter(Boolean).join('');
     const FR = hasArabic(_txt) ? 'Amiri' : 'Helvetica';
     const FB = hasArabic(_txt) ? 'Amiri-Bold' : 'Helvetica-Bold';
 
@@ -255,30 +301,55 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
     y += 6;
 
     // ─────────────────────────────────────────────────────────
-    // 2. BARCODE — centered, compact (encodes work order number)
+    // 2. SCAN BLOCK — QR of the customer status link on the left; the job
+    //    card number (Code-128 + text) and work order number on the right
     // ─────────────────────────────────────────────────────────
-    const barcodeValue = order._package_barcode || order.service_status_token || order.work_order_number;
-    if (template.show_barcode && barcodeValue) {
-      const barcodePng = await generateBarcodePNG(barcodeValue);
-      if (barcodePng) {
-        const bW = CW * 0.65;
-        const bX = M + (CW - bW) / 2;
-        try { doc.image(barcodePng, bX, y, { width: bW, height: 26 }); } catch (_) {}
+    const statusLink = template.show_qr ? customerStatusUrl(order) : null;
+    const jcNumber = order.job_card_number || null;
+    const codeValue = jcNumber || order.work_order_number;
+    const showCode = template.show_barcode && !!codeValue;
+    if (statusLink || showCode || jcNumber) {
+      const QR = 62;
+      const top = y;
+      let textX = M;
+      if (statusLink) {
+        const qrPng = await generateQRPNG(statusLink, 240);
+        if (qrPng) {
+          try { doc.image(qrPng, M, top, { width: QR, height: QR }); } catch (_) {}
+        }
+        doc.fillColor(LIGHT).fontSize(4).font(FR)
+           .text('SCAN FOR JOB STATUS', M, top + QR + 2, { width: QR, align: 'center' });
+        textX = M + QR + 10;
       }
-      y += 30;
+      const textW = RIGHT - textX;
+      let ty = top;
+      if (jcNumber) {
+        doc.fillColor(GRAY).fontSize(5).font(FB).text('JOB CARD', textX, ty);
+        ty += 7;
+        doc.fillColor(INK).fontSize(10).font(FB).text(jcNumber, textX, ty, { width: textW, lineBreak: false, ellipsis: true });
+        ty += 14;
+      }
+      doc.fillColor(GRAY).fontSize(5).font(FB).text('WO NO.', textX, ty);
+      ty += 7;
+      doc.fillColor(INK).fontSize(7).font(FB).text(order.work_order_number || '—', textX, ty, { width: textW, lineBreak: false, ellipsis: true });
+      ty += 11;
+      if (showCode) {
+        const barcodePng = await generateBarcodePNG(codeValue);
+        if (barcodePng) {
+          try { doc.image(barcodePng, textX, ty, { width: Math.min(textW, 150), height: 20 }); } catch (_) {}
+        }
+        ty += 22;
+      }
+      y = Math.max(ty, statusLink ? top + QR + 8 : ty) + 3;
       hline(y);
       y += 5;
     }
 
     // ─────────────────────────────────────────────────────────
-    // 3. WORK ORDER META — single row: type badge + ref + part count
+    // 3. WORK ORDER META — job type and kind of work
     // ─────────────────────────────────────────────────────────
-    const metaParts = [];
-    if (order.order_type) metaParts.push((order.order_type || '').replace(/_/g, ' ').toUpperCase());
-    if (template.show_awb && order.awb_number) metaParts.push(order.awb_number);
-    if (order._package_sequence && order._total_packages) {
-      metaParts.push(`PART ${order._package_sequence}/${order._total_packages}`);
-    }
+    const metaParts = [order.work_order_type || order.order_type, order.service_category]
+      .filter(v => v && v !== 'other').map(v => humanize(v).toUpperCase());
     if (metaParts.length > 0) {
       doc.fillColor(GRAY).fontSize(5).font(FR)
          .text(metaParts.join('   ·   '), M, y, { width: CW, align: 'left' });
@@ -293,13 +364,15 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
          .text('WORKSHOP', M, y);
       y += 8;
       const senderName = order.sender_name || tenant?.name || '—';
-      const senderPhone = order.sender_phone ? `  ·  ${order.sender_phone}` : '';
+      const phone = order.sender_phone || tenant?.phone;
+      const senderPhone = phone ? `  ·  ${phone}` : '';
       doc.fillColor(INK).fontSize(6).font(FB)
          .text(ar(senderName) + senderPhone, M, y, { width: CW });
       y += 8;
-      if (order.sender_address) {
+      const senderAddress = order.sender_address || [tenant?.address, tenant?.area, tenant?.city || tenant?.emirate].filter(Boolean).join(', ');
+      if (senderAddress) {
         doc.fillColor(GRAY).fontSize(5.5).font(FR)
-           .text(ar(order.sender_address), M, y, { width: CW });
+           .text(ar(senderAddress), M, y, { width: CW, lineBreak: false, ellipsis: true });
         y += 8;
       }
       y += 2;
@@ -358,8 +431,8 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
     }
 
     // ─────────────────────────────────────────────────────────
-    // 6. VEHICLE DETAILS — make/model/plate inline text
-    //    (was: package weight/dimensions/item count)
+    // 6. VEHICLE & REPORTED ISSUE — make/model/plate, VIN and odometer,
+    //    then the customer's complaint (was: package weight/dimensions)
     // ─────────────────────────────────────────────────────────
     if (template.show_order_info) {
       const details = [];
@@ -369,20 +442,43 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
       if (order.vehicle_plate) details.push(`Plate: ${order.vehicle_plate}`);
       if (order.vehicle_year) details.push(String(order.vehicle_year));
       if (details.length > 0) {
-        doc.fillColor(GRAY).fontSize(5.5).font(FR)
+        doc.fillColor(INK).fontSize(6.5).font(FB)
            .text(details.join('   ·   '), M, y, { width: CW });
         y += 10;
+      }
+      const ids = [];
+      if (order.vehicle_vin) ids.push(`VIN: ${String(order.vehicle_vin).trim()}`);
+      if (order.odometer_in != null) ids.push(`Odometer: ${Number(order.odometer_in).toLocaleString('en-US')} km`);
+      if (ids.length > 0) {
+        doc.fillColor(GRAY).fontSize(5.5).font(FR)
+           .text(ids.join('   ·   '), M, y, { width: CW });
+        y += 9;
+      }
+      const issue = String(order.description || '').replace(/\s+/g, ' ').trim();
+      if (issue) {
+        const issueText = issue.length > 180 ? issue.substring(0, 177) + '...' : issue;
+        doc.fillColor(GRAY).fontSize(5).font(FB)
+           .text('REPORTED ISSUE:', M, y, { continued: true })
+           .font(FR)
+           .text(` ${ar(issueText)}`, { width: CW });
+        y += doc.heightOfString(`REPORTED ISSUE: ${issueText}`, { width: CW }) + 3;
+      }
+      if (details.length || ids.length || issue) {
+        hline(y);
+        y += 5;
       }
     }
 
     // ─────────────────────────────────────────────────────────
-    // 7. CASH PAYMENT — simple line (was: COD / PAYMENT)
+    // 7. PAYMENT — simple line (was: COD / PAYMENT). The amount is the job
+    //    total incl. VAT (cash_amount is the old pre-VAT COD figure).
     // ─────────────────────────────────────────────────────────
-    if (template.show_cod_badge && order.payment_method === 'cash' && parseFloat(order.cash_amount) > 0) {
-      const cashAmount = `${order.currency || 'AED'} ${parseFloat(order.cash_amount).toFixed(2)}`;
+    const cashDue = parseFloat(order.total_amount) > 0 ? parseFloat(order.total_amount) : parseFloat(order.cash_amount);
+    if (template.show_cod_badge && order.payment_method === 'cash' && cashDue > 0) {
+      const cashAmount = `${order.currency || tenant?.currency || 'AED'} ${cashDue.toFixed(2)}`;
 
       doc.fillColor(GRAY).fontSize(5).font(FR)
-         .text('PAY AT PICKUP', M, y);
+         .text('PAY AT COLLECTION', M, y);
       y += 7;
 
       doc.fillColor(CASH_COLOR).fontSize(9).font(FB)
@@ -391,9 +487,9 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
       hline(y);
       y += 6;
     } else if (order.payment_method && order.payment_method !== 'cash') {
-      const pmText = (order.payment_method || '').toUpperCase();
+      const pmText = order.payment_method === 'credit' ? 'BILLED TO ACCOUNT' : `PREPAID — ${humanize(order.payment_method).toUpperCase()}`;
       doc.fillColor(INK).fontSize(5.5).font(FB)
-         .text(`PREPAID — ${pmText}`, M, y, { width: CW });
+         .text(pmText, M, y, { width: CW });
       y += 10;
       hline(y);
       y += 6;
@@ -411,23 +507,6 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
          .font(FR)
          .text(` ${ar(instrText)}`, { width: CW });
       y += 10;
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // 9. QR CODE — bottom-right, small (links to service status page)
-    // ─────────────────────────────────────────────────────────
-    if (template.show_qr && order.service_status_token) {
-      const qrSize = 30;
-      const qrX = RIGHT - qrSize;
-      const qrY = H - M - qrSize - 12;
-
-      const trackUrl = `${frontendUrl}/track/${order.service_status_token}`;
-      const qrPng = await generateQRPNG(trackUrl, 200);
-      if (qrPng) {
-        try { doc.image(qrPng, qrX, qrY, { width: qrSize, height: qrSize }); } catch (_) {}
-      }
-      doc.fillColor(LIGHT).fontSize(4).font(FR)
-         .text('STATUS', qrX, qrY + qrSize + 1, { width: qrSize, align: 'center' });
     }
 
     // ─────────────────────────────────────────────────────────
@@ -471,18 +550,13 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
 const INSPECTION_DIR = path.join(__dirname, '../../assets/inspection');
 const INSPECTION_VIEWS = [
   { key: 'top',   label: 'TOP / ROOF',        file: 'top-roof.png' },
-  { key: 'left',  label: 'DRIVER SIDE',       file: 'driver-side.png' },
-  { key: 'right', label: 'PASSENGER SIDE',    file: 'passenger-side.png' },
+  { key: 'left',  label: 'DRIVER SIDE (LEFT)',     file: 'driver-side.png' },
+  { key: 'right', label: 'PASSENGER SIDE (RIGHT)', file: 'passenger-side.png' },
   { key: 'front', label: 'FRONT',             file: 'front.png' },
   { key: 'rear',  label: 'REAR',              file: 'rear.png' },
 ];
-const DAMAGE_LEGEND = {
-  SH: 'Shattered', WS: 'Windshield', OX: 'Oxidized',   CF: 'Cracked/Faded',
-  DS: 'Deep Scratch', BD: 'Bent',    RP: 'Repainted',  UD: 'Unpainted Damage',
-  PT: 'Paint Transfer', PC: 'Paint Chip', GS: 'Glass Scratch', GC: 'Glass Crack',
-  DD: 'Dents/Dings', SS: 'Surface Scratch', CR: 'Crack', WD: 'Water Damage',
-  GO: 'Gouge', LM: 'Loose Molding',
-};
+// Legend names: DAMAGE_CODES (lib/inspection-marks.js), the same table as
+// the inspection form on screen. Colours match components/CarDamageDiagram.jsx.
 const DAMAGE_COLORS = {
   SH: '#6757e8', WS: '#4f87f7', OX: '#17b890', CF: '#ff8a4c',
   DS: '#ef476f', BD: '#8f62d6', RP: '#26b9d5', UD: '#f3b63f',
@@ -551,12 +625,13 @@ function renderInspectionPage(doc, order, tenant) {
         doc.image(imgPath, x + 4, cy + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
       } catch (_) {}
     }
-    // Overlay marks for this view
+    // Overlay marks for this view. The frame is the one doc.image fits the
+    // picture into: a picture mark (coord 'img') lands on its spot of the
+    // car, as on the form; an older mark sits against the frame, as before.
     const viewMarks = marks.filter(m => m.view === view.key);
     for (const m of viewMarks) {
       if (typeof m.x !== 'number' || typeof m.y !== 'number') continue;
-      const mx = x + 4 + (cellW - 8) * m.x;
-      const my = cy + 4 + (cellH - 8) * m.y;
+      const { x: mx, y: my } = markPointInFrame(m, { x: x + 4, y: cy + 4, w: cellW - 8, h: cellH - 8 });
       const color = DAMAGE_COLORS[m.code] || '#dc2626';
       doc.circle(mx, my, 5).fill(color);
       doc.fillColor('#ffffff').fontSize(6).font(FB)
@@ -582,7 +657,7 @@ function renderInspectionPage(doc, order, tenant) {
       const cy = y + Math.floor(i / 4) * 18;
       doc.circle(cx + 6, cy + 5, 4).fill(DAMAGE_COLORS[code] || '#dc2626');
       doc.fillColor('#111827').fontSize(8.5).font(FB).text(code, cx + 14, cy + 1, { width: 22, lineBreak: false });
-      doc.fillColor('#4b5563').fontSize(8).font(FR).text(DAMAGE_LEGEND[code] || code, cx + 36, cy + 1, { width: chipW - 40, lineBreak: false });
+      doc.fillColor('#4b5563').fontSize(8).font(FR).text(DAMAGE_CODES[code] || code, cx + 36, cy + 1, { width: chipW - 40, lineBreak: false });
     });
     y += Math.ceil(usedCodes.length / 4) * 18 + 4;
   }

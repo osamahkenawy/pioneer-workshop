@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@stripe/stripe-js": "^4.10.0",
-    "@zxing/browser": "^0.1.5",
+    "@zxing/browser": "0.1.5",
+    "@zxing/library": "0.21.3",
     "apexcharts": "^3.54.1",
     "arabic-reshaper": "^1.1.0",
     "chart.js": "^4.4.7",

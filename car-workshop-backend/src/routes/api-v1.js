@@ -12,6 +12,9 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { requireApiPermission } from '../middleware/api-key-auth.js';
 import { serviceStatusToken } from '../lib/tokens.js';
+import { syncJobCardBilling } from '../lib/job-card-billing.js';
+import { ensureMainJobCard } from '../lib/workflow.js';
+import { onEnquiryCreated } from '../lib/crm-cycle.js';
 import { stripMarkup, clampText } from '../lib/sanitize.js';
 
 const router = express.Router();
@@ -191,6 +194,9 @@ router.post('/enquiries', requireApiPermission('enquiries:write'), async (req, r
       'SELECT id, enquiry_number, external_reference, status, source_channel, source_detail, enquiry_type, created_at FROM enquiries WHERE id = ?',
       [result.insertId]
     );
+    // Follow up: the lead lands as a call-back task.
+    const [full] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
+    await onEnquiryCreated(full);
 
     return res.status(201).json({
       success: true,
@@ -278,36 +284,41 @@ router.get('/enquiries/:reference', requireApiPermission('enquiries:read'), asyn
   }
 });
 
+// These endpoints were written for the delivery product and read/wrote
+// columns this database does not have (sender_*, customer_address, weight_kg,
+// picked_up_at, delivered_at, barcode, …), so every call failed with a 500.
+// They now use the workshop job card schema.
+const WO_FIELDS = `o.id, o.work_order_number, o.service_status_token, o.status, o.work_order_type, o.service_category,
+              o.customer_id, o.customer_name, o.customer_phone, o.customer_email,
+              o.vehicle_id, v.plate_number AS vehicle_plate, v.make AS vehicle_make, v.model AS vehicle_model, v.vin AS vehicle_vin,
+              o.odometer_in, o.description, o.special_instructions, o.payment_method, o.payment_status,
+              o.service_fee, o.discount, o.vat_amount, o.total_amount, o.billing_basis,
+              o.scheduled_at, o.started_at, o.completed_at, o.cancelled_at, o.created_at, o.updated_at`;
+
 /**
  * GET /api/v1/work_orders
- * List work orders with pagination and optional filters.
+ * List work orders. Filters: status, from, to, service_status_token; page/limit.
  * Requires: work_orders:read
  */
 router.get('/work_orders', requireApiPermission('work_orders:read'), async (req, res) => {
   try {
-    const { page = 1, limit = 50, status, from, to, service_status_token } = req.query;
-    const offset = (Math.max(1, +page) - 1) * Math.min(200, Math.max(1, +limit));
-    const lim = Math.min(200, Math.max(1, +limit));
+    const { page = 1, status, from, to, service_status_token } = req.query;
+    const lim = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const pg = Math.max(1, parseInt(page, 10) || 1);
+    const offset = (pg - 1) * lim;
 
     let where = 'o.workshop_id = ?';
     const params = [req.workshopId];
+    if (status) { where += ' AND o.status = ?'; params.push(String(status)); }
+    if (from)   { where += ' AND o.created_at >= ?'; params.push(String(from)); }
+    if (to)     { where += ' AND o.created_at <= ?'; params.push(String(to)); }
+    if (service_status_token) { where += ' AND o.service_status_token = ?'; params.push(String(service_status_token)); }
 
-    if (status) { where += ' AND o.status = ?'; params.push(status); }
-    if (from)   { where += ' AND o.created_at >= ?'; params.push(from); }
-    if (to)     { where += ' AND o.created_at <= ?'; params.push(to); }
-    if (service_status_token) { where += ' AND o.service_status_token = ?'; params.push(service_status_token); }
-
-    const [[{ total }]] = [await query(`SELECT COUNT(*) as total FROM work_orders o WHERE ${where}`, params)];
-
+    const [{ total }] = await query(`SELECT COUNT(*) AS total FROM work_orders o WHERE ${where}`, params);
     const rows = await query(
-      `SELECT o.id, o.service_status_token, o.barcode, o.status, o.order_type, o.category,
-              o.sender_name, o.sender_phone, o.sender_address,
-              o.customer_name, o.customer_phone, o.customer_address, o.customer_area, o.customer_emirate,
-              o.weight_kg, o.description, o.special_instructions,
-              o.payment_method, o.cash_amount, o.service_fee, o.total_amount,
-              o.scheduled_at, o.picked_up_at, o.delivered_at,
-              o.created_at, o.updated_at
+      `SELECT ${WO_FIELDS}
        FROM work_orders o
+       LEFT JOIN vehicles v ON v.id = o.vehicle_id
        WHERE ${where}
        ORDER BY o.created_at DESC
        LIMIT ? OFFSET ?`,
@@ -317,7 +328,7 @@ router.get('/work_orders', requireApiPermission('work_orders:read'), async (req,
     return res.json({
       success: true,
       data: rows,
-      pagination: { page: +page, limit: lim, total, pages: Math.ceil(total / lim) },
+      pagination: { page: pg, limit: lim, total, pages: Math.ceil(total / lim) },
     });
   } catch (err) {
     console.error('[api/v1/work_orders GET]', err.message);
@@ -325,35 +336,33 @@ router.get('/work_orders', requireApiPermission('work_orders:read'), async (req,
   }
 });
 
+async function loadWorkOrder(workshopId, identifier) {
+  const isNumeric = /^\d+$/.test(identifier);
+  const [workOrder] = await query(
+    `SELECT ${WO_FIELDS}
+     FROM work_orders o
+     LEFT JOIN vehicles v ON v.id = o.vehicle_id
+     WHERE o.workshop_id = ? AND ${isNumeric ? 'o.id = ?' : 'o.service_status_token = ?'}`,
+    [workshopId, String(identifier)]
+  );
+  if (!workOrder) return null;
+  const [items, history] = await Promise.all([
+    query('SELECT name, item_type, quantity, unit_price, notes FROM work_order_items WHERE work_order_id = ? ORDER BY id', [workOrder.id]),
+    query('SELECT status, note, created_at FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC, id ASC', [workOrder.id]),
+  ]);
+  return { ...workOrder, items, status_history: history };
+}
+
 /**
  * GET /api/v1/work_orders/:id
- * Get single work order by ID or service_status_token.
+ * Single work order by numeric ID or service_status_token, with its lines and status history.
  * Requires: work_orders:read
  */
 router.get('/work_orders/:id', requireApiPermission('work_orders:read'), async (req, res) => {
   try {
-    const identifier = req.params.id;
-    // Support both numeric ID and service_status_token
-    const isNumeric = /^\d+$/.test(identifier);
-    const [workOrder] = await query(
-      `SELECT o.*, c.company_name as customer_company, c.full_name as customer_full_name
-       FROM work_orders o
-       LEFT JOIN customers c ON o.customer_id = c.id
-       WHERE o.workshop_id = ? AND ${isNumeric ? 'o.id = ?' : 'o.service_status_token = ?'}`,
-      [req.workshopId, identifier]
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    // Load status history
-    const history = await query(
-      'SELECT status, note, changed_by, created_at FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC',
-      [workOrder.id]
-    );
-
-    return res.json({ success: true, data: { ...workOrder, status_history: history } });
+    const data = await loadWorkOrder(req.workshopId, req.params.id);
+    if (!data) return res.status(404).json({ success: false, message: 'Work order not found' });
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[api/v1/work_orders/:id GET]', err.message);
     return res.status(500).json({ success: false, message: 'Failed to fetch work order' });
@@ -362,99 +371,86 @@ router.get('/work_orders/:id', requireApiPermission('work_orders:read'), async (
 
 /**
  * POST /api/v1/work_orders
- * Create a new work order via API key.
+ * Create a job card. Required: customer_name, customer_phone, description.
+ * Optional: customer_id, vehicle_id (must belong to this workshop), customer_email,
+ * odometer_in, scheduled_at, special_instructions, payment_method, service_fee,
+ * items [{ name, quantity, unit_price, notes }]. Totals and VAT are computed
+ * by the server from service_fee + items.
  * Requires: work_orders:write
  */
 router.post('/work_orders', requireApiPermission('work_orders:write'), async (req, res) => {
   try {
-    const {
-      customer_id, order_type = 'standard', category = 'maintenance',
-      sender_name, sender_phone, sender_address,
-      customer_name, customer_phone, customer_address, customer_area,
-      customer_emirate = 'Dubai',
-      weight_kg, description, special_instructions,
-      payment_method = 'cash', cash_amount = 0, service_fee = 0,
-      scheduled_at, items = [], notes, reference_id,
-    } = req.body;
-
-    if (!customer_name || !customer_phone || !customer_address) {
-      return res.status(400).json({ success: false, message: 'customer_name, customer_phone, and customer_address are required' });
+    const b = req.body || {};
+    const customer_name = (stripMarkup(String(b.customer_name || ''), 255) || '').trim();
+    const customer_phone = String(b.customer_phone || '').trim().slice(0, 50);
+    const description = (clampText(String(b.description || ''), 5000) || '').trim();
+    if (!customer_name || !customer_phone || !description) {
+      return res.status(400).json({ success: false, message: 'customer_name, customer_phone and description are required' });
     }
+    if (b.customer_id) {
+      const [c] = await query('SELECT id FROM customers WHERE id = ? AND workshop_id = ?', [b.customer_id, req.workshopId]);
+      if (!c) return res.status(400).json({ success: false, message: 'customer_id not found' });
+    }
+    if (b.vehicle_id) {
+      const [v] = await query('SELECT id FROM vehicles WHERE id = ? AND workshop_id = ?', [b.vehicle_id, req.workshopId]);
+      if (!v) return res.status(400).json({ success: false, message: 'vehicle_id not found' });
+    }
+    const PAYMENT_METHODS = ['cash', 'prepaid', 'credit', 'wallet']; // work_orders.payment_method enum
+    const payment_method = PAYMENT_METHODS.includes(b.payment_method) ? b.payment_method : 'cash';
+    const items = Array.isArray(b.items) ? b.items.filter(it => it && String(it.name || '').trim()) : [];
 
-    // Generate service status token and work order number
-    const crypto = await import('crypto');
-    const service_status_token = serviceStatusToken(); // SR-08 — was 48-bit 'TR'+randomBytes(6)
-    const barcode = service_status_token; // same as service status token for simplicity
-    const work_order_number = 'WO-' + Date.now().toString(36).toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase();
-
-    const total_amount = parseFloat(service_fee) + parseFloat(cash_amount);
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    const work_order_number = `WO-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
+    const service_status_token = serviceStatusToken();
 
     const result = await execute(
       `INSERT INTO work_orders (
-        workshop_id, work_order_number, customer_id, service_status_token, barcode, order_type, category, status,
-        sender_name, sender_phone, sender_address,
-        customer_name, customer_phone, customer_address, customer_area, customer_emirate,
-        weight_kg, description, special_instructions,
-        payment_method, cash_amount, service_fee, total_amount,
-        scheduled_at, notes, reference_id, created_via
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending',
-        ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, 'api')`,
+         workshop_id, work_order_number, customer_id, vehicle_id, intake_channel, service_status_token, status,
+         customer_name, customer_phone, customer_email, odometer_in, description, special_instructions,
+         payment_method, service_fee, billing_basis, scheduled_at, notes
+       ) VALUES (?, ?, ?, ?, 'api', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 'itemised', ?, ?)`,
       [
-        req.workshopId, work_order_number, customer_id || null, service_status_token, barcode, order_type, category,
-        sender_name || null, sender_phone || null, sender_address || null,
-        customer_name, customer_phone, customer_address, customer_area || null, customer_emirate,
-        weight_kg || null, description || null, special_instructions || null,
-        payment_method, cash_amount, service_fee, total_amount,
-        scheduled_at || null, notes || null, reference_id || null,
+        req.workshopId, work_order_number, b.customer_id || null, b.vehicle_id || null, service_status_token,
+        customer_name, customer_phone, b.customer_email ? String(b.customer_email).slice(0, 255) : null,
+        Number.isFinite(+b.odometer_in) && +b.odometer_in > 0 ? Math.round(+b.odometer_in) : null,
+        description, b.special_instructions ? clampText(String(b.special_instructions), 2000) : null,
+        payment_method, Math.max(0, parseFloat(b.service_fee) || 0), b.scheduled_at || null,
+        `Created via API key "${req.apiKeyName || req.apiKeyId}"`,
       ]
     );
+    const id = result.insertId;
 
-    // Insert status log
+    for (const it of items) {
+      const qty = parseFloat(it.quantity);
+      await execute(
+        'INSERT INTO work_order_items (work_order_id, name, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?)',
+        [id, stripMarkup(String(it.name).trim(), 255), Number.isFinite(qty) && qty > 0 ? qty : 1,
+         Math.max(0, parseFloat(it.unit_price) || 0), it.notes ? clampText(String(it.notes), 500) : null]
+      );
+    }
+    await syncJobCardBilling(id, req.workshopId);
+    await ensureMainJobCard({ workOrderId: id, workshopId: req.workshopId })
+      .catch(e => console.error('[api/v1] main job card:', e.message));
+    // changed_by is a user id; API calls have none.
     await execute(
-      `INSERT INTO work_order_status_logs (work_order_id, status, note, changed_by)
-       VALUES (?, 'pending', 'Work order created via API', ?)`,
-      [result.insertId, req.apiKeyName || 'API']
+      `INSERT INTO work_order_status_logs (work_order_id, status, note, changed_by) VALUES (?, 'pending', ?, NULL)`,
+      [id, `Created via API key "${req.apiKeyName || req.apiKeyId}"`]
     );
 
-    // Insert work order items if provided
-    if (items.length > 0) {
-      for (const item of items) {
-        await execute(
-          `INSERT INTO work_order_items (work_order_id, name, quantity, weight_kg, unit_price)
-           VALUES (?, ?, ?, ?, ?)`,
-          [result.insertId, item.name, item.quantity || 1, item.weight_kg || 0, item.unit_price || 0]
-        );
-      }
-    }
-
-    const [created] = await query('SELECT * FROM work_orders WHERE id = ?', [result.insertId]);
-
-    return res.status(201).json({
-      success: true,
-      data: {
-        id: result.insertId,
-        service_status_token,
-        barcode,
-        status: 'pending',
-        ...created,
-      },
-      message: 'Work order created successfully',
-    });
+    return res.status(201).json({ success: true, data: await loadWorkOrder(req.workshopId, String(id)), message: 'Work order created' });
   } catch (err) {
     console.error('[api/v1/work_orders POST]', err.message);
-    return res.status(500).json({ success: false, message: 'Failed to create work order', error: err.message });
+    return res.status(500).json({ success: false, message: 'Failed to create work order' });
   }
 });
 
 /**
  * PATCH /api/v1/work_orders/:id/cancel
- * Cancel a work order (only if status allows).
+ * Cancel a work order before work starts. Body: { reason }.
  * Requires: work_orders:write
  */
+const API_CANCELLABLE = ['pending', 'confirmed', 'assigned', 'estimate_approved'];
 router.patch('/work_orders/:id/cancel', requireApiPermission('work_orders:write'), async (req, res) => {
   try {
     const [workOrder] = await query(
@@ -463,21 +459,21 @@ router.patch('/work_orders/:id/cancel', requireApiPermission('work_orders:write'
     );
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
 
-    const cancellable = ['pending', 'confirmed', 'processing'];
-    if (!cancellable.includes(workOrder.status)) {
-      return res.status(400).json({
+    if (!API_CANCELLABLE.includes(workOrder.status)) {
+      return res.status(409).json({
         success: false,
-        message: `Cannot cancel work order in '${workOrder.status}' status. Cancellable statuses: ${cancellable.join(', ')}`,
+        message: `Cannot cancel a work order in '${workOrder.status}' status. Cancellable statuses: ${API_CANCELLABLE.join(', ')}`,
       });
     }
-
-    await execute('UPDATE work_orders SET status = "cancelled", updated_at = NOW() WHERE id = ?', [workOrder.id]);
+    const reason = clampText(String(req.body?.reason || 'Cancelled via API'), 500);
     await execute(
-      `INSERT INTO work_order_status_logs (work_order_id, status, note, changed_by)
-       VALUES (?, 'cancelled', ?, ?)`,
-      [workOrder.id, req.body.reason || 'Cancelled via API', req.apiKeyName || 'API']
+      "UPDATE work_orders SET status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ?, updated_at = NOW() WHERE id = ?",
+      [reason, workOrder.id]
     );
-
+    await execute(
+      `INSERT INTO work_order_status_logs (work_order_id, status, note, changed_by) VALUES (?, 'cancelled', ?, NULL)`,
+      [workOrder.id, reason]
+    );
     return res.json({ success: true, message: 'Work order cancelled' });
   } catch (err) {
     console.error('[api/v1/work_orders/:id/cancel]', err.message);
@@ -491,33 +487,14 @@ router.patch('/work_orders/:id/cancel', requireApiPermission('work_orders:write'
 
 /**
  * GET /api/v1/service-status/:token
- * Public-style service status lookup by token (scoped to workshop via API key).
+ * Service status by customer-facing token (scoped to the API key's workshop).
  * Requires: service_status:read
  */
 router.get('/service-status/:token', requireApiPermission('service_status:read'), async (req, res) => {
   try {
-    const [workOrder] = await query(
-      `SELECT o.id, o.service_status_token, o.barcode, o.status, o.order_type,
-              o.sender_name, o.sender_address,
-              o.customer_name, o.customer_phone, o.customer_address, o.customer_area, o.customer_emirate,
-              o.payment_method, o.cash_amount, o.service_fee, o.total_amount,
-              o.scheduled_at, o.picked_up_at, o.delivered_at,
-              o.created_at
-       FROM work_orders o
-       WHERE o.service_status_token = ? AND o.workshop_id = ?`,
-      [req.params.token, req.workshopId]
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    const history = await query(
-      'SELECT status, note, changed_by, created_at FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC',
-      [workOrder.id]
-    );
-
-    return res.json({ success: true, data: { ...workOrder, status_history: history } });
+    const data = await loadWorkOrder(req.workshopId, String(req.params.token).replace(/^\d+$/, '_'));
+    if (!data) return res.status(404).json({ success: false, message: 'Work order not found' });
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[api/v1/service-status/:token]', err.message);
     return res.status(500).json({ success: false, message: 'Failed to fetch service status' });

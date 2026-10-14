@@ -1,17 +1,17 @@
 import { useState, useEffect, useContext, useRef, useMemo } from 'react';
 import {
-  User, Phone, Mail, MapPin, Star, Package, DeliveryTruck, Check, Xmark,
+  User, Phone, Mail, MapPin, Star, Package, Wrench, Check, Xmark,
   Plus, Search, EditPencil, Eye, EyeClosed, Refresh, NavArrowLeft, NavArrowRight,
-  StatsReport, Medal, Timer, TruckLength, Clock, Calendar, Bicycle, XmarkCircle,
-  MoreHoriz, Prohibition, Gps, DollarCircle, ArrowRight, Copy,
-  Motorcycle, Car, Truck, Bus, Key as KeyIcon, InfoCircle,
+  StatsReport, Medal, Timer, Clock, Calendar, XmarkCircle,
+  MoreHoriz, Prohibition, DollarCircle, ArrowRight, Copy,
+  Key as KeyIcon, InfoCircle,
 } from 'iconoir-react';
 import { AuthContext } from '../context/AuthContext';
 import api from '../lib/api';
 import usePlanUsage from '../hooks/usePlanUsage';
 import { dispatchPlanUpdate } from '../hooks/usePlanUsage';
 import UpgradeModal from '../components/dashboard/UpgradeModal';
-import MapView from '../components/MapView';
+import { woLabel, woTone } from '../lib/statusLabels';
 import './CRMPages.css';
 import PhoneInput, { PHONE_CODES } from '../components/PhoneInput';
 import { fmtCurrency } from '../utils/currency';
@@ -39,18 +39,12 @@ const STATUS_META = {
   offline:   { label: 'Offline',   bg: '#f1f5f9', color: '#94a3b8', pulse: false },
 };
 
-const VEHICLE_META = {
-  motorcycle: { label: 'Motorcycle', Icon: Motorcycle, color: '#f97316' },
-  car:        { label: 'Car',        Icon: Car,        color: '#3b82f6' },
-  van:        { label: 'Van',        Icon: Bus,        color: '#8b5cf6' },
-  truck:      { label: 'Truck',      Icon: Truck,      color: '#ef4444' },
-  bicycle:    { label: 'Bicycle',    Icon: Bicycle,    color: '#10b981' },
-};
-
+// A technician works in a bay: no rider vehicle (type, plate, model, colour)
+// and no GPS. The mechanics table has no vehicle columns, so those inputs
+// were silently dropped by the API anyway.
 const EMPTY_FORM = {
   full_name: '', phone: '', phone_code: '+971', email: '', national_id: '',
-  vehicle_type: 'motorcycle', vehicle_plate: '', vehicle_model: '',
-  vehicle_color: '', license_number: '', service_bay_id: '', password: '',
+  license_number: '', service_bay_id: '', password: '',
   joined_at: '', notes: '', status: 'available',
 };
 
@@ -58,15 +52,6 @@ const EMPTY_FORM = {
 const fmtDate  = d => d ? new Date(d).toLocaleDateString('en-AE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 const fmtPct   = (a, b) => b > 0 ? `${Math.round((a / b) * 100)}%` : '—';
 const fmtSpecialty = s => s ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
-const fmtPing  = d => {
-  if (!d) return 'Never';
-  const mins = Math.floor((Date.now() - new Date(d)) / 60000);
-  if (mins < 1)  return 'Just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24)  return `${hrs}h ago`;
-  return fmtDate(d);
-};
 
 /* F10 — grapheme-safe initial extraction (handles emoji + combined CJK chars). */
 const initialOf = (name) => {
@@ -157,21 +142,20 @@ function parseSrcNotes(raw) {
   }
 }
 
-/* ─── WorkOrder status mini badge ── */
-const miniStatus = {
-  delivered:  { bg: '#dcfce7', color: '#16a34a' },
-  in_transit: { bg: '#e0f2fe', color: '#0369a1' },
-  failed:     { bg: '#fee2e2', color: '#dc2626' },
-  cancelled:  { bg: '#f1f5f9', color: '#64748b' },
-  pending:    { bg: '#fef3c7', color: '#d97706' },
-};
-
 /* ═══════════════════════════════════════════════════════════════
    MAIN COMPONENT
    ═══════════════════════════════════════════════════════════════ */
+// Job counts as the API sends them (total_/completed_work_orders,
+// work_orders_today); the delivery-era names are a fallback only.
+const jobsTotal = d => parseInt(d?.total_work_orders ?? d?.total_orders ?? d?.total_deliveries) || 0;
+const jobsDone  = d => parseInt(d?.completed_work_orders ?? d?.delivered_orders) || 0;
+const jobsToday = d => parseInt(d?.work_orders_today ?? d?.orders_today) || 0;
+const jobsActive = d => parseInt(d?.active_work_orders ?? d?.active_orders) || 0;
+// The API sends the default bay as service_bay_name (zone_name is courier-era).
+const bayName   = d => d?.service_bay_name || d?.zone_name || '';
+
 export default function Mechanics() {
-  const { t, i18n } = useTranslation();
-  const isRTL = i18n.language === 'ar';
+  const { t } = useTranslation();
   const { user, workshop } = useContext(AuthContext);
   const cur = workshop?.currency || 'AED';
   const fmtAED = v => fmtCurrency(v, cur);
@@ -190,7 +174,7 @@ export default function Mechanics() {
   const [service_bays,      setServiceBays]      = useState([]);
   const [saving,     setSaving]     = useState(false);
   const [error,      setError]      = useState('');
-  const [filters,    setFilters]    = useState({ search: '', status: '', vehicle_type: '', is_active: '', sort: 'status' });
+  const [filters,    setFilters]    = useState({ search: '', status: '', is_active: '', sort: 'status' });
   const [selectedIds, setSelectedIds] = useState([]); /* F5 — multi-select for bulk actions */
   const [slowNetwork, setSlowNetwork] = useState(false); /* F11 */
   const [confirmStatus, setConfirmStatus] = useState(null); /* F1 — { mechanic, newStatus } */
@@ -206,14 +190,25 @@ export default function Mechanics() {
     // F11 — show "slow network" badge if request takes > 3 s
     const slowTimer = setTimeout(() => setSlowNetwork(true), 3000);
     try {
-      const params = new URLSearchParams({ limit: 100 });
+      const params = new URLSearchParams({ limit: 200 });
       if (filters.status)       params.append('status',       filters.status);
-      if (filters.vehicle_type) params.append('vehicle_type', filters.vehicle_type);
       if (filters.search)       params.append('search',       filters.search);
       if (filters.is_active !== '')   params.append('is_active', filters.is_active);
       if (filters.sort)         params.append('sort',         filters.sort);
-      const res = await api.get(`/mechanics?${params}`);
-      if (res.success) setMechanics(res.data || []);
+      // Every page, not just the first: a workshop with 278 technicians only
+      // ever saw 100 of them here.
+      let all = [], page = 1, res;
+      do {
+        params.set('page', String(page));
+        res = await api.get(`/mechanics?${params}`);
+        if (!res.success) break;
+        all = all.concat(res.data || []);
+        page += 1;
+      } while (all.length < (res.pagination?.total || 0) && page <= 10);
+      if (res?.success || all.length) {
+        setMechanics(all);
+        setServerCounts({ total: res?.pagination?.total ?? all.length, ...(res?.status_counts || {}) });
+      }
     } catch (e) { console.error(e); }
     finally { clearTimeout(slowTimer); setSlowNetwork(false); setLoading(false); }
   };
@@ -239,7 +234,7 @@ export default function Mechanics() {
     return () => clearTimeout(debounceRef.current);
   }, [filters.search]);
 
-  useEffect(() => { fetchMechanics(); }, [filters.status, filters.vehicle_type, filters.is_active, filters.sort]);
+  useEffect(() => { fetchMechanics(); }, [filters.status, filters.is_active, filters.sort]);
 
   /* F8 — global keyboard shortcuts: '/' focuses search, 'n' opens new mechanic, 'Esc' closes drawer/modal. */
   useEffect(() => {
@@ -263,18 +258,17 @@ export default function Mechanics() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showForm, viewMechanic, confirmStatus]);
 
-  /* Filtered list (customer-side vehicle_type since backend may not filter it) */
-  const visibleMechanics = useMemo(() => {
-    if (!filters.vehicle_type) return mechanics;
-    return mechanics.filter(d => d.vehicle_type === filters.vehicle_type);
-  }, [mechanics, filters.vehicle_type]);
+  const visibleMechanics = mechanics;
+
+  const [serverCounts, setServerCounts] = useState(null);
 
   /* Stats */
   const stats = useMemo(() => {
     const s = { total: mechanics.length, available: 0, busy: 0, on_break: 0, offline: 0 };
     mechanics.forEach(d => { if (s[d.status] !== undefined) s[d.status]++; });
-    return s;
-  }, [mechanics]);
+    // Prefer the server's workshop-wide counts when the list is unfiltered
+    return serverCounts && !filters.status && !filters.search ? { ...s, ...serverCounts } : s;
+  }, [mechanics, serverCounts, filters.status, filters.search]);
 
   /* Open a mechanic in the view drawer */
   const openView = (mechanic) => {
@@ -287,7 +281,7 @@ export default function Mechanics() {
   const handleStatusChange = async (mechanicId, status) => {
     // F1 — guard rails: confirm before flipping a busy mechanic to offline mid-shift.
     const mechanic = mechanics.find(d => d.id === mechanicId);
-    const dangerous = (status === 'offline') && mechanic && (mechanic.active_orders > 0 || mechanic.status === 'busy');
+    const dangerous = (status === 'offline') && mechanic && (jobsActive(mechanic) > 0 || mechanic.status === 'busy');
     if (dangerous) {
       setConfirmStatus({ mechanic, newStatus: status });
       return;
@@ -345,10 +339,6 @@ export default function Mechanics() {
       phone_code:     parsed.code,
       email:          mechanic.email          || '',
       national_id:    mechanic.national_id    || '',
-      vehicle_type:   mechanic.vehicle_type   || 'motorcycle',
-      vehicle_plate:  mechanic.vehicle_plate  || '',
-      vehicle_model:  mechanic.vehicle_model  || '',
-      vehicle_color:  mechanic.vehicle_color  || '',
       license_number: mechanic.license_number || '',
       service_bay_id:        mechanic.service_bay_id        || '',
       password:       '',
@@ -386,14 +376,16 @@ export default function Mechanics() {
         closeForm();
         setShowUpgradeModal(true);
       } else {
-        setError(res.message || 'Failed to save mechanic');
+        setError(res.message || t('mechanics.save_failed', 'Failed to save the technician'));
       }
     } catch { setError('Network error. Please try again.'); }
     finally { setSaving(false); }
   };
 
-  const clearFilters = () => setFilters({ search: '', status: '', vehicle_type: '', is_active: '', sort: 'status' });
-  const hasFilters   = filters.search || filters.status || filters.vehicle_type || filters.is_active;
+  const clearFilters = () => setFilters({ search: '', status: '', is_active: '', sort: 'status' });
+  const hasFilters   = filters.search || filters.status || filters.is_active;
+  // The API sends recent_work_orders; recent_orders is the courier-era name.
+  const recentJobs   = viewDetail?.recent_work_orders || viewDetail?.recent_orders || [];
 
   /* ══════════════════════════════════════════════════════════
      RENDER
@@ -404,7 +396,7 @@ export default function Mechanics() {
       {/* ── Header ── */}
       <div className="module-hero">
         <div className="module-hero-left">
-          <h2 className="module-hero-title">{t('mechanics.title')}</h2>
+          <h2 className="module-hero-title">{t('common.technicians', 'Technicians')}</h2>
           <p className="module-hero-sub">{t('mechanics.registered_mechanics', { count: stats.total })}</p>
         </div>
         <div className="module-hero-actions">
@@ -434,7 +426,7 @@ export default function Mechanics() {
                 User limit reached ({usage.active_users}/{usage.users_limit})
               </div>
               <div style={{ fontSize: 12, color: '#b91c1c' }}>
-                Mechanics count as users. Upgrade your plan to add more mechanics or users.
+                {t('mechanics.limit_hint', 'Technicians count as users. Upgrade your plan to add more technicians or users.')}
               </div>
             </div>
           </div>
@@ -467,7 +459,7 @@ export default function Mechanics() {
             onClick={() => setFilters(f => ({ ...f, status: f.status === key ? '' : key }))}>
             <div className="ord-stat-icon" style={{ background: m.bg, color: m.color }}>
               {key === 'available' ? <Check width={18} height={18} /> :
-               key === 'busy'      ? <DeliveryTruck width={18} height={18} /> :
+               key === 'busy'      ? <Wrench width={18} height={18} /> :
                key === 'on_break'  ? <Clock width={18} height={18} /> :
                <Prohibition width={18} height={18} />}
             </div>
@@ -494,14 +486,6 @@ export default function Mechanics() {
             </button>
           )}
         </div>
-        <select className="filter-select"
-          value={filters.vehicle_type}
-          onChange={e => setFilters(f => ({ ...f, vehicle_type: e.target.value }))}>
-          <option value="">{t("mechanics.all_vehicles")}</option>
-          {Object.entries(VEHICLE_META).map(([k, v]) => (
-          <option key={k} value={k}>{t(`mechanics.vehicle.${k}`, { defaultValue: v.label })}</option>
-          ))}
-        </select>
         {/* F6 — active/inactive filter */}
         <select className="filter-select"
           value={filters.is_active}
@@ -519,9 +503,8 @@ export default function Mechanics() {
           <option value="status">{t('mechanics.sort_status', { defaultValue: 'Sort: Status' })}</option>
           <option value="name">{t('mechanics.sort_name', { defaultValue: 'Sort: Name' })}</option>
           <option value="rating">{t('mechanics.sort_rating', { defaultValue: 'Sort: Rating' })}</option>
-          <option value="deliveries">{t('mechanics.sort_deliveries', { defaultValue: 'Sort: Deliveries' })}</option>
+          <option value="jobs_completed">{t('mechanics.sort_jobs_completed', 'Sort: Jobs completed')}</option>
           <option value="joined">{t('mechanics.sort_joined', { defaultValue: 'Sort: Joined' })}</option>
-          <option value="last_ping">{t('mechanics.sort_last_ping', { defaultValue: 'Sort: Last ping' })}</option>
         </select>
         {hasFilters && (
           <button className="module-btn module-btn-outline" onClick={clearFilters}>
@@ -576,10 +559,8 @@ export default function Mechanics() {
         <div className="drv-grid">
           {visibleMechanics.map(mechanic => {
             const sm  = STATUS_META[mechanic.status]  || STATUS_META.offline;
-            // No motorcycle fallback — a car-workshop mechanic doesn't have a delivery vehicle.
-            const vm  = VEHICLE_META[mechanic.vehicle_type];
-            const pct = mechanic.total_orders > 0
-              ? Math.round((mechanic.delivered_orders / mechanic.total_orders) * 100)
+            const pct = jobsTotal(mechanic) > 0
+              ? Math.round((jobsDone(mechanic) / jobsTotal(mechanic)) * 100)
               : null;
             const isInactive = mechanic.is_active === 0 || mechanic.is_active === false;
             return (
@@ -623,23 +604,16 @@ export default function Mechanics() {
                   </select>
                 </div>
 
-                {/* Specialty (car workshop) + ServiceBay. Vehicle badge only
-                    renders for mechanics that actually have a delivery vehicle
-                    recorded — avoids the "Motorcycle" fallback on every card. */}
+                {/* Trade (specialty) + default service bay. */}
                 <div className="drv-card-tags">
-                  {mechanic.specialty ? (
+                  {mechanic.specialty && (
                     <span className="drv-tag vehicle" style={{ background: '#eef2ff', color: '#4338ca' }}>
-                      {t(`mechanics.specialty.${mechanic.specialty}`, { defaultValue: fmtSpecialty(mechanic.specialty) })}
+                      <Wrench width={12} height={12} /> {t(`mechanics.specialty.${mechanic.specialty}`, { defaultValue: fmtSpecialty(mechanic.specialty) })}
                     </span>
-                  ) : vm ? (
-                    <span className="drv-tag vehicle" style={{ background: vm.color + '15', color: vm.color }}>
-                      {vm.Icon && <vm.Icon width={13} height={13} />} {t(`mechanics.vehicle.${mechanic.vehicle_type}`, { defaultValue: vm.label })}
-                      {mechanic.vehicle_plate && <> · {mechanic.vehicle_plate}</>}
-                    </span>
-                  ) : null}
-                  {mechanic.zone_name && (
+                  )}
+                  {bayName(mechanic) && (
                     <span className="drv-tag bay">
-                      <MapPin width={11} height={11} /> {mechanic.zone_name}
+                      <MapPin width={11} height={11} /> {bayName(mechanic)}
                     </span>
                   )}
                   {isInactive && <span className="drv-tag inactive">{t('mechanics.inactive')}</span>}
@@ -648,10 +622,10 @@ export default function Mechanics() {
                 {/* Rating + Active orders */}
                 <div className="drv-card-mid">
                   <StarRating value={mechanic.rating} />
-                  {mechanic.active_orders > 0 && (
+                  {jobsActive(mechanic) > 0 && (
                     <span className="drv-active-badge">
-                      <DeliveryTruck width={12} height={12} />
-                      {t('mechanics.active_orders', { count: mechanic.active_orders })}
+                      <Wrench width={12} height={12} />
+                      {t('mechanics.active_orders', { count: jobsActive(mechanic) })}
                     </span>
                   )}
                 </div>
@@ -659,11 +633,11 @@ export default function Mechanics() {
                 {/* Metrics */}
                 <div className="drv-metrics">
                   <div className="drv-metric">
-                    <div className="drv-metric-val">{mechanic.total_deliveries || mechanic.total_orders || 0}</div>
+                    <div className="drv-metric-val">{jobsTotal(mechanic).toLocaleString('en-AE')}</div>
                     <div className="drv-metric-lbl">{t('mechanics.metric_total')}</div>
                   </div>
                   <div className="drv-metric">
-                    <div className="drv-metric-val" style={{ color: '#0369a1' }}>{mechanic.orders_today || 0}</div>
+                    <div className="drv-metric-val" style={{ color: '#0369a1' }}>{jobsToday(mechanic)}</div>
                     <div className="drv-metric-lbl">{t('mechanics.metric_today')}</div>
                   </div>
                   <div className="drv-metric">
@@ -717,12 +691,9 @@ export default function Mechanics() {
                 <h3>{viewMechanic.full_name}</h3>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
                   <StatusBadge status={viewMechanic.status} size="sm" />
-                  {viewMechanic.vehicle_type && (
-                    <span className="drv-tag vehicle" style={{
-                      background: (VEHICLE_META[viewMechanic.vehicle_type]?.color || '#666') + '18',
-                      color: VEHICLE_META[viewMechanic.vehicle_type]?.color || '#666', fontSize: 12
-                    }}>
-                      {(() => { const VIcon = VEHICLE_META[viewMechanic.vehicle_type]?.Icon; return VIcon ? <VIcon width={13} height={13} /> : null; })()} {t(`mechanics.vehicle.${viewMechanic.vehicle_type}`, { defaultValue: VEHICLE_META[viewMechanic.vehicle_type]?.label })}
+                  {viewMechanic.specialty && (
+                    <span className="drv-tag vehicle" style={{ background: '#eef2ff', color: '#4338ca', fontSize: 12 }}>
+                      <Wrench width={12} height={12} /> {t(`mechanics.specialty.${viewMechanic.specialty}`, { defaultValue: fmtSpecialty(viewMechanic.specialty) })}
                     </span>
                   )}
                 </div>
@@ -742,8 +713,8 @@ export default function Mechanics() {
                 onClick={() => setActiveTab('orders')}>
                 <Package width={14} height={14} />
                 {t('mechanics.tab_orders')}
-                {viewDetail?.recent_orders?.length > 0 && (
-                  <span className="drv-tab-badge">{viewDetail.recent_orders.length}</span>
+                {recentJobs.length > 0 && (
+                  <span className="drv-tab-badge">{recentJobs.length}</span>
                 )}
               </button>
             </div>
@@ -762,16 +733,16 @@ export default function Mechanics() {
                   <div className="ord-view-section">
                     <div className="drv-perf-row">
                       <div className="drv-perf-card" style={{ '--accent': '#1e3a6b' }}>
-                        <div className="drv-perf-val">{viewDetail?.total_deliveries || viewDetail?.total_orders || 0}</div>
-                        <div className="drv-perf-lbl">{t('mechanics.total_deliveries')}</div>
+                        <div className="drv-perf-val">{jobsDone(viewDetail)}</div>
+                        <div className="drv-perf-lbl">{t('mechanics.jobs_completed', 'Jobs completed')}</div>
                       </div>
                       <div className="drv-perf-card" style={{ '--accent': '#0369a1' }}>
-                        <div className="drv-perf-val">{viewDetail?.orders_today || 0}</div>
+                        <div className="drv-perf-val">{jobsToday(viewDetail)}</div>
                         <div className="drv-perf-lbl">{t('mechanics.metric_today')}</div>
                       </div>
                       <div className="drv-perf-card" style={{ '--accent': '#16a34a' }}>
                         <div className="drv-perf-val">
-                          {fmtPct(viewDetail?.delivered_orders, viewDetail?.total_orders)}
+                          {fmtPct(jobsDone(viewDetail), jobsTotal(viewDetail))}
                         </div>
                         <div className="drv-perf-lbl">{t('mechanics.metric_success_rate')}</div>
                       </div>
@@ -782,11 +753,6 @@ export default function Mechanics() {
                     </div>
                     <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
                       <StarRating value={viewDetail?.rating} />
-                      {viewDetail?.last_ping && (
-                        <span className="drv-ping-chip">
-                          <Gps width={12} height={12} /> {fmtPing(viewDetail.last_ping)}
-                        </span>
-                      )}
                     </div>
                   </div>
 
@@ -825,96 +791,17 @@ export default function Mechanics() {
                     </div>
                   </div>
 
-                  {/* Vehicle — only render if the mechanic actually has vehicle data
-                      (imported/legacy records don't and would otherwise render as
-                      "License #: <employee code>" / "Type: mechanics.vehicle.undefined"). */}
-                  {(viewMechanic.vehicle_type || viewMechanic.vehicle_plate || viewMechanic.vehicle_model || viewMechanic.license_number) && (
+                  {/* Workshop: the technician's default bay. No GPS map or
+                      "last ping" — a technician works in a bay. */}
+                  {bayName(viewDetail || viewMechanic) && (
                     <div className="ord-view-section">
-                    <div className="ord-view-section-title">
-                      {(() => { const VIcon = VEHICLE_META[viewMechanic.vehicle_type]?.Icon || Car; return <VIcon width={14} height={14} />; })()} {t('mechanics.vehicle_section')}
-                    </div>
-                    <div className="ord-view-card">
-                      {viewMechanic.vehicle_type && (
+                      <div className="ord-view-section-title"><Wrench width={14} height={14} /> {t('mechanics.workshop_section', 'Workshop')}</div>
+                      <div className="ord-view-card">
                         <div className="ord-view-row">
-                          <span className="ord-view-label">{t('mechanics.type')}</span>
-                          <span className="ord-view-value bold">{t(`mechanics.vehicle.${viewMechanic.vehicle_type}`, { defaultValue: VEHICLE_META[viewMechanic.vehicle_type]?.label || viewMechanic.vehicle_type })}</span>
+                          <span className="ord-view-label">{t("mechanics.assigned_zone")}</span>
+                          <span className="ord-view-value bold">{bayName(viewDetail || viewMechanic)}</span>
                         </div>
-                      )}
-                      {viewMechanic.vehicle_plate && (
-                        <div className="ord-view-row">
-                          <span className="ord-view-label">{t('mechanics.plate')}</span>
-                          <span className="ord-view-value drv-plate">{viewMechanic.vehicle_plate}</span>
-                        </div>
-                      )}
-                      {viewMechanic.vehicle_model && (
-                        <div className="ord-view-row">
-                          <span className="ord-view-label">{t('mechanics.vehicle_model')}</span>
-                          <span className="ord-view-value">{viewMechanic.vehicle_model}</span>
-                        </div>
-                      )}
-                      {viewMechanic.vehicle_color && (
-                        <div className="ord-view-row">
-                          <span className="ord-view-label">{t('mechanics.vehicle_color')}</span>
-                          <span className="ord-view-value">{viewMechanic.vehicle_color}</span>
-                        </div>
-                      )}
-                      {viewMechanic.license_number && (
-                        <div className="ord-view-row">
-                          <span className="ord-view-label">{t('mechanics.license_hash')}</span>
-                          <span className="ord-view-value">{viewMechanic.license_number}</span>
-                        </div>
-                      )}
-                    </div>
-                    </div>
-                  )}
-
-                  {/* ServiceBay + Last Location */}
-                  {(viewMechanic.zone_name || viewDetail?.last_lat) && (
-                    <div className="ord-view-section">
-                      <div className="ord-view-section-title"><MapPin width={14} height={14} /> Location</div>
-                      {viewMechanic.zone_name && (
-                        <div className="ord-view-card" style={{ marginBottom: 8 }}>
-                          <div className="ord-view-row">
-                            <span className="ord-view-label">{t("mechanics.assigned_zone")}</span>
-                            <span className="ord-view-value bold">{viewMechanic.zone_name}</span>
-                          </div>
-                        </div>
-                      )}
-                      {viewDetail?.last_lat && viewDetail?.last_lng && (
-                        <div className="ord-view-map">
-                          <MapView
-                            markers={[{
-                              lat: parseFloat(viewDetail.last_lat),
-                              lng: parseFloat(viewDetail.last_lng),
-                              type: 'mechanic',
-                              label: viewMechanic.full_name,
-                              popup: (
-                                <div style={{ minWidth: 180, fontFamily: 'Inter, system-ui, sans-serif', fontSize: '0.82rem' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', fontWeight: 700, fontSize: '0.9rem' }}>
-                                    <span style={{ width: 28, height: 28, borderRadius: '50%', background: '#16a34a', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '0.75rem' }}>
-                                      {viewMechanic.full_name?.charAt(0)}
-                                    </span>
-                                    {viewMechanic.full_name}
-                                  </div>
-                                  {viewMechanic.vehicle_type && (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#374151', marginTop: 4 }}>
-                                      <DeliveryTruck width={14} height={14} style={{ flexShrink: 0 }} />
-                                      <span style={{ textTransform: 'capitalize' }}>{viewMechanic.vehicle_type}</span>
-                                      <span style={{ color: '#9ca3af' }}>•</span>
-                                      <span style={{ fontFamily: 'monospace', fontWeight: 600, background: '#f3f4f6', padding: '1px 6px', borderRadius: 4 }}>{viewMechanic.vehicle_plate || '—'}</span>
-                                    </div>
-                                  )}
-                                  {viewDetail.last_ping && (
-                                    <div style={{ marginTop: 6, color: '#6b7280', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                      <MapPin width={11} height={11} /> Last ping: {fmtPing(viewDetail.last_ping)}
-                                    </div>
-                                  )}
-                                </div>
-                              )
-                            }]}
-                            height={160} zoom={14} />
-                        </div>
-                      )}
+                      </div>
                     </div>
                   )}
 
@@ -960,23 +847,23 @@ export default function Mechanics() {
               ) : (
                 /* ── WorkOrders Tab ── */
                 <div className="ord-view-section">
-                  {!viewDetail?.recent_orders?.length ? (
+                  {!recentJobs.length ? (
                     <div style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
                       <Package width={36} height={36} style={{ marginBottom: 8 }} />
                       <p>{t("mechanics.no_orders_yet")}</p>
                     </div>
                   ) : (
                     <div className="drv-orders-list">
-                      {viewDetail.recent_orders.map(o => {
-                        const ms = miniStatus[o.status] || miniStatus.pending;
+                      {recentJobs.map(o => {
+                        const ms = woTone(o);
+                        const car = [o.vehicle_plate_number, [o.vehicle_make, o.vehicle_model].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
                         return (
                           <div key={o.id} className="drv-order-row">
                             <div className="drv-order-num">{o.work_order_number}</div>
-                            <div className="drv-order-recipient">{o.recipient_name}</div>
-                            <div className="drv-order-emirate">{o.recipient_emirate}</div>
+                            <div className="drv-order-recipient">{car || o.customer_name || '—'}</div>
                             <span className="drv-mini-badge"
-                              style={{ background: ms.bg, color: ms.color }}>
-                              {o.status.replace(/_/g, ' ')}
+                              style={{ background: ms.bg, color: ms.color, textTransform: 'none' }}>
+                              {woLabel(t, o, 'short')}
                             </span>
                             <div className="drv-order-fee">{fmtAED(o.service_fee)}</div>
                             <div className="drv-order-date">
@@ -1048,7 +935,7 @@ export default function Mechanics() {
                 {/* Personal */}
                 <div className="drv-form-section">
                 <div className="form-section-title">
-                  <User width={15} height={15} style={{ verticalAlign: 'middle', [isRTL?'marginLeft':'marginRight']: 6 }} />
+                  <User width={15} height={15} style={{ verticalAlign: 'middle', marginInlineEnd: 6 }} />
                   {t('mechanics.personal_info')}
                 </div>
                 <div className="form-grid-2">
@@ -1073,7 +960,7 @@ export default function Mechanics() {
                     <label>{t('common.email')}</label>
                     <input type="email" value={form.email}
                       onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                      placeholder="mechanic@example.com" />
+                      placeholder="technician@example.com" />
                   </div>
                   <div className="form-field">
                     <label>{t("mechanics.national_id")}</label>
@@ -1110,46 +997,21 @@ export default function Mechanics() {
                         </button>
                       </div>
                       <span className="drv-field-hint">
-                        <InfoCircle width={11} height={11} /> {t('mechanics.password_hint', { defaultValue: 'Min 6 characters — mechanic will use this to log in.' })}
+                        <InfoCircle width={11} height={11} /> {t('mechanics.password_hint', { defaultValue: 'Min 6 characters — the technician will use this to sign in.' })}
                       </span>
                     </div>
                   )}
                 </div>
                 </div>
 
-                {/* Vehicle */}
+                {/* Work details — licence, default bay and notes. The rider
+                    vehicle fields (type, plate, model, colour) are gone. */}
                 <div className="drv-form-section">
                 <div className="form-section-title">
-                  <Car width={15} height={15} style={{ verticalAlign: 'middle', [isRTL?'marginLeft':'marginRight']: 6 }} />
-                  {t('mechanics.vehicle_info')}
+                  <Wrench width={15} height={15} style={{ verticalAlign: 'middle', marginInlineEnd: 6 }} />
+                  {t('mechanics.work_details', 'Work details')}
                 </div>
                 <div className="form-grid-2">
-                  <div className="form-field">
-                    <label>{t('mechanics.vehicle_type')}</label>
-                    <select value={form.vehicle_type} onChange={e => setForm(f => ({ ...f, vehicle_type: e.target.value }))}>
-                      {Object.entries(VEHICLE_META).map(([k, v]) => (
-                        <option key={k} value={k}>{t(`mechanics.vehicle.${k}`, { defaultValue: v.label })}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="form-field">
-                    <label>{t('mechanics.plate_number')}</label>
-                    <input type="text" value={form.vehicle_plate}
-                      onChange={e => setForm(f => ({ ...f, vehicle_plate: e.target.value }))}
-                      placeholder="e.g. A 12345 Dubai" />
-                  </div>
-                  <div className="form-field">
-                    <label>{t('mechanics.vehicle_model_label')}</label>
-                    <input type="text" value={form.vehicle_model}
-                      onChange={e => setForm(f => ({ ...f, vehicle_model: e.target.value }))}
-                      placeholder="e.g. Honda CB150" />
-                  </div>
-                  <div className="form-field">
-                    <label>{t('mechanics.vehicle_color_label')}</label>
-                    <input type="text" value={form.vehicle_color}
-                      onChange={e => setForm(f => ({ ...f, vehicle_color: e.target.value }))}
-                      placeholder="e.g. Red" />
-                  </div>
                   <div className="form-field">
                     <label>{t("mechanics.license_number")}</label>
                     <input type="text" value={form.license_number}
@@ -1161,7 +1023,7 @@ export default function Mechanics() {
                     <select value={form.service_bay_id} onChange={e => setForm(f => ({ ...f, service_bay_id: e.target.value }))}>
                       <option value="">{t("mechanics.no_zone_assigned")}</option>
                       {service_bays.map(z => (
-                        <option key={z.id} value={z.id}>{z.name} — {z.emirate}</option>
+                        <option key={z.id} value={z.id}>{[z.name, z.emirate].filter(Boolean).join(' — ')}</option>
                       ))}
                     </select>
                   </div>
@@ -1233,7 +1095,7 @@ export default function Mechanics() {
               <div style={{ position:'absolute', top:-40, right:-40, width:160, height:160, borderRadius:'50%', background:'rgba(34,197,94,0.12)', pointerEvents:'none' }} />
               <div style={{ position:'absolute', bottom:-30, left:-30, width:120, height:120, borderRadius:'50%', background:'rgba(36,64,102,0.25)', pointerEvents:'none' }} />
 
-              {/* Truck + check icon combo */}
+              {/* Wrench + check icon combo */}
               <div style={{ position:'relative', display:'inline-flex', alignItems:'center', justifyContent:'center', marginBottom:16 }}>
                 {/* Pulsing ring */}
                 <div style={{
@@ -1257,7 +1119,7 @@ export default function Mechanics() {
                 }}>
                   <Check width={28} height={28} color="#fff" strokeWidth={2.5} />
                 </div>
-                {/* Mini truck badge */}
+                {/* Mini wrench badge */}
                 <div style={{
                   position:'absolute', bottom:-2, right:-4,
                   width:24, height:24, borderRadius:'50%',
@@ -1267,7 +1129,7 @@ export default function Mechanics() {
                   boxShadow:'0 2px 8px rgba(249,115,22,0.5)',
                   zIndex:2,
                 }}>
-                  <DeliveryTruck width={12} height={12} color="#fff" />
+                  <Wrench width={12} height={12} color="#fff" />
                 </div>
               </div>
 
@@ -1402,7 +1264,7 @@ export default function Mechanics() {
       {showUpgradeModal && (
         <UpgradeModal
           onClose={() => setShowUpgradeModal(false)}
-          triggerReason="User limit reached. Mechanics count as users. Please upgrade your plan to add more."
+          triggerReason={t('mechanics.limit_reason', 'User limit reached. Technicians count as users. Please upgrade your plan to add more.')}
         />
       )}
 
@@ -1422,10 +1284,10 @@ export default function Mechanics() {
                 <strong>{confirmStatus.mechanic.full_name}</strong>
                 {' '}{t('mechanics.confirm_status_currently', { defaultValue: 'is currently' })}{' '}
                 <strong>{t(`mechanics.status.${confirmStatus.mechanic.status}`, { defaultValue: confirmStatus.mechanic.status })}</strong>
-                {confirmStatus.mechanic.active_orders > 0 && (
+                {jobsActive(confirmStatus.mechanic) > 0 && (
                   <> {t('mechanics.confirm_status_with_orders', {
-                    count: confirmStatus.mechanic.active_orders,
-                    defaultValue: `with ${confirmStatus.mechanic.active_orders} active order(s)`,
+                    count: jobsActive(confirmStatus.mechanic),
+                    defaultValue: `with ${jobsActive(confirmStatus.mechanic)} active job(s)`,
                   })}</>
                 )}.
               </p>

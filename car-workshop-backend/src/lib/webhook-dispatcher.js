@@ -8,7 +8,7 @@
  *
  *  Usage:
  *    import { dispatchWebhook } from '../lib/webhook-dispatcher.js';
- *    dispatchWebhook({ workshopId, event: 'order.delivered', data: order });
+ *    dispatchWebhook({ tenantId: workshopId, event: workOrderStatusToEvent(status), data: order });
  *
  *  Non-blocking — all failures are logged, never thrown.
  * ═══════════════════════════════════════════════════════════════════
@@ -25,7 +25,9 @@ import { deliverWebhook } from '../routes/webhooks.js';
  *
  * @param {object} opts
  * @param {number} opts.workshopId
- * @param {string} opts.event    — e.g. 'order.delivered'
+ * @param {string} opts.event    — e.g. 'work_order.ready_for_collection'. An
+ *                                 endpoint still subscribed to an older name of
+ *                                 the event (EVENT_ALIASES) gets it under that name.
  * @param {object} opts.data     — payload data (order, mechanic, etc.)
  */
 
@@ -37,26 +39,27 @@ export async function dispatchWebhook({ tenantId, event, data }) {
   if (!workshopId || !event) return;
 
   try {
+    const names = [event, ...(EVENT_ALIASES[event] || [])];
+    // workshop_id — this read tenant_id, which does not exist, so no webhook ever fired.
     const endpoints = await query(
-      `SELECT id, url, secret, headers
+      `SELECT id, url, secret, headers, events
        FROM webhook_endpoints
-       WHERE tenant_id = ? AND is_active = 1
-         AND JSON_CONTAINS(events, JSON_QUOTE(?))`,
-      [workshopId, event]
+       WHERE workshop_id = ? AND is_active = 1
+         AND (${names.map(() => 'JSON_CONTAINS(events, JSON_QUOTE(?))').join(' OR ')})`,
+      [workshopId, ...names]
     );
 
     if (!endpoints?.length) return;
 
-    const payload = {
-      event,
-      timestamp: new Date().toISOString(),
-      tenant_id: workshopId,
-      data,
-    };
+    const timestamp = new Date().toISOString();
 
     // Fire each endpoint independently (non-blocking); each manages its own retries
     for (const ep of endpoints) {
-      _deliverWithRetry({ endpoint: ep, event, payload, workshopId, attempt: 1 })
+      let subscribed = [];
+      try { subscribed = typeof ep.events === 'string' ? JSON.parse(ep.events) : (ep.events || []); } catch { /* none */ }
+      const name = names.find(n => subscribed.includes(n)) || event;
+      const payload = { event: name, timestamp, tenant_id: workshopId, data };
+      _deliverWithRetry({ endpoint: ep, event: name, payload, workshopId, attempt: 1 })
         .catch(e => console.error(`[Webhook] unhandled error for ${ep.url}:`, e.message));
     }
   } catch (err) {
@@ -97,19 +100,43 @@ async function _deliverWithRetry({ endpoint, event, payload, workshopId, attempt
 
 // ── Event name helpers ────────────────────────────────────────
 
+/**
+ * Work order status → webhook event, in the workshop's words (Steps 1–7).
+ * Every stored status is mapped; the courier events (picked_up, in_transit,
+ * delivered, failed, returned) are gone — no status ever produced them.
+ */
+const WORK_ORDER_EVENTS = {
+  pending:           'work_order.received',
+  confirmed:         'work_order.inspected',
+  estimate_approved: 'work_order.approved',
+  auto_assign:       'work_order.approved',
+  assigned:          'work_order.assigned',
+  accepted:          'work_order.assigned',
+  in_progress:       'work_order.in_progress',
+  inspection:        'work_order.quality_check',
+  ready_for_pickup:  'work_order.ready_for_collection',
+  completed:         'work_order.closed',
+  cancelled:         'work_order.cancelled',
+};
+
+/**
+ * Older names of an event that endpoints may still be subscribed to — the
+ * names routes/webhooks.js used to offer, and the order.* names this file
+ * used to send (and Settings → Integrations still offers). Such an endpoint
+ * receives the event under its old name.
+ */
+export const EVENT_ALIASES = Object.freeze({
+  'work_order.received':             ['work_order.created', 'order.created'],
+  'work_order.inspected':            ['work_order.confirmed', 'order.confirmed'],
+  'work_order.assigned':             ['work_order.accepted', 'order.assigned'],
+  'work_order.ready_for_collection': ['work_order.ready_for_pickup'],
+  'work_order.closed':               ['work_order.completed', 'order.delivered'],
+  'work_order.cancelled':            ['order.cancelled'],
+});
+
 /** Map a work order status to its webhook event name */
 export function workOrderStatusToEvent(status) {
-  const map = {
-    confirmed:  'order.confirmed',
-    assigned:   'order.assigned',
-    picked_up:  'order.picked_up',
-    in_transit: 'order.in_transit',
-    delivered:  'order.delivered',
-    failed:     'order.failed',
-    returned:   'order.returned',
-    cancelled:  'order.cancelled',
-  };
-  return map[status] || null;
+  return WORK_ORDER_EVENTS[status] || null;
 }
 
 /** Map a warranty claim status to its webhook event name */

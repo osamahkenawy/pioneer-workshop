@@ -1,32 +1,41 @@
 /**
- * Customer Portal — Work Order & Account Routes
+ * Customer Portal — the workshop customer's own jobs, inspections, estimates,
+ * invoices and vehicles.
  *
- * All endpoints scoped to the authenticated customer. Uses workshop middleware +
- * `requireRole('customer')` via the mounting in index.js, then this router adds
- * its own customer-ID scoping from `req.user → customers.user_id`.
+ * Every endpoint is scoped to the signed-in customer: authMiddleware (a
+ * role 'customer' token, lib/access.js) and then req.customer from
+ * customers.user_id. Nothing here takes a customer id from the request.
  *
  * Sections:
- *   ── Work Orders (C.2)     — CRUD, invoice/job-sheet, service status
- *   ── Dashboard Stats (C.4)     — KPI cards
- *   ── Financial (C.5)           — invoices, wallet, cash payment summary
- *   ── My Vehicles (NEW)         — customer's own vehicles (list/add)
- *   ── Profile                   — update customer profile, saved addresses
+ *   ── Home                — "Action needed" (sign the inspection, approve the
+ *                            estimate, ready for collection) and open jobs
+ *   ── Job cards           — status in the customer's stages (lib/customer-status.js),
+ *                            one job's detail, the job sheet PDF
+ *   ── Inspections         — the customer's copy of the walk-around, and the
+ *                            sign-off from inside the portal (once only)
+ *   ── Invoices & payments — invoices with paid / balance, PDF
+ *   ── My vehicles
+ *   ── Profile
+ *   ── Retired             — the delivery product's create-order, addresses,
+ *                            wallet / COD and cash summary (410)
  */
 
 import express from 'express';
-import crypto from 'crypto';
-import multer from 'multer';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { getFinancialConfig, computeWorkOrderFinancials } from '../lib/financial.js';
+import { getFinancialConfig } from '../lib/financial.js';
 import { generateInvoicePDF } from './invoices.js';
-import { serviceStatusToken } from '../lib/tokens.js';
+import { createInAppNotification } from '../lib/notify.js';
+import { notifyGroups } from '../lib/workflow.js';
+import { woLabel } from '../lib/status-labels.js';
+import { customerView } from '../lib/customer-status.js';
+import { saveBase64Signature } from './uploads.js';
+import { readDocs, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
+import { publicView as inspectionView } from './public-inspections.js';
+import { preferBearerToken } from '../lib/portal-access.js';
 
 const router = express.Router();
-router.use(authMiddleware);
-
-// Multer for CSV upload
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+router.use(preferBearerToken, authMiddleware);
 
 /* ──────────────────────────────────────────────────────────────
  * Helper — resolve the customer record for the authenticated user
@@ -41,12 +50,19 @@ async function getCustomerForUser(userId, workshopId) {
 
 /* ──────────────────────────────────────────────────────────────
  * Middleware — inject req.customer on every request
+ * A staff login is never a customer, whatever a customers row says.
  * ────────────────────────────────────────────────────────────── */
 router.use(async (req, res, next) => {
   try {
+    if (req.user?.role !== 'customer') {
+      return res.status(403).json({ success: false, message: 'This is the customer portal. Sign in with a customer account.' });
+    }
     const customer = await getCustomerForUser(req.user.id, req.workshopId);
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer profile not found' });
+    }
+    if (!customer.is_active) {
+      return res.status(403).json({ success: false, message: 'Your account is deactivated. Contact the workshop.' });
     }
     req.customer = customer;
     next();
@@ -56,317 +72,445 @@ router.use(async (req, res, next) => {
   }
 });
 
-/* ─────────────────────────────────────────────────────────────────────────────
- * helper: generate a work order number like TRS-2506-XXXX
- * ───────────────────────────────────────────────────────────────────────────── */
-function genWorkOrderNumber() {
-  const d = new Date();
-  const yy = String(d.getFullYear()).slice(-2);
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `TRS-${yy}${mm}-${rand}`;
+/** The customer's own work order (the visit / job card), or null. */
+async function ownWorkOrder(req, id) {
+  const [wo] = await query(
+    'SELECT id, work_order_number, status, service_status_token, vehicle_id FROM work_orders WHERE id = ? AND customer_id = ? AND workshop_id = ?',
+    [id, req.customer.id, req.workshopId]
+  );
+  return wo || null;
+}
+
+const money = n => Math.round((Number(n) || 0) * 100) / 100;
+const OPEN_LIMIT = 20;
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ═══  INSPECTIONS — the customer's copy, and their sign-off  ════════════════
+ * Same shape as the public inspection link (public-inspections.js publicView),
+ * reached through the customer's own login instead of the link's token.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+// The walk-arounds done with the customer; 'qc' is the workshop's own check.
+const CUSTOMER_FACING = ['intake', 'joint'];
+
+const INSPECTION_SELECT = `
+  SELECT vi.*, wo.work_order_number, wo.status AS wo_status,
+         w.name AS workshop_name, w.phone AS workshop_phone, w.logo_url AS workshop_logo, w.settings AS workshop_settings
+    FROM vehicle_inspections vi
+    JOIN work_orders wo ON wo.id = vi.work_order_id AND wo.workshop_id = vi.workshop_id
+    JOIN workshops w ON w.id = vi.workshop_id`;
+
+/** Completed customer-facing inspections of this customer's jobs (cancelled jobs' are closed, as on the link). */
+async function ownInspections(req, { id = null, workOrderId = null } = {}) {
+  const params = [req.customer.id, req.workshopId];
+  let where = `WHERE wo.customer_id = ? AND vi.workshop_id = ? AND vi.status = 'completed'
+                 AND vi.inspection_type IN ('intake','joint') AND wo.status <> 'cancelled'`;
+  if (id) { where += ' AND vi.id = ?'; params.push(id); }
+  if (workOrderId) { where += ' AND vi.work_order_id = ?'; params.push(workOrderId); }
+  return query(`${INSPECTION_SELECT} ${where} ORDER BY vi.completed_at DESC, vi.id DESC LIMIT 50`, params);
+}
+
+/** The portal's view of one inspection: the link's view plus what the portal links by. */
+function portalInspection(row) {
+  const { workshop, inspection } = inspectionView(row);
+  return {
+    id: row.id,
+    work_order_id: row.work_order_id,
+    workshop,
+    ...inspection,
+    // To sign in the portal: drawn on screen, completed, not yet signed, job not closed.
+    needs_signature: inspection.can_sign,
+  };
+}
+
+/* ── GET /inspections — the customer's inspections (?work_order_id=) ── */
+router.get('/inspections', async (req, res) => {
+  try {
+    const rows = await ownInspections(req, { workOrderId: req.query.work_order_id || null });
+    return res.json({ success: true, data: rows.map(portalInspection) });
+  } catch (err) {
+    console.error('[CustomerPortal] Inspections error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load inspections' });
+  }
+});
+
+/* ── GET /inspections/:id — one inspection ── */
+router.get('/inspections/:id', async (req, res) => {
+  try {
+    const [row] = await ownInspections(req, { id: req.params.id });
+    if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
+    return res.json({ success: true, data: portalInspection(row) });
+  } catch (err) {
+    console.error('[CustomerPortal] Inspection error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load the inspection' });
+  }
+});
+
+/* ── GET /inspections/:id/documents/:docId — a page of the paper form ── */
+router.get('/inspections/:id/documents/:docId', async (req, res) => {
+  try {
+    const [row] = await ownInspections(req, { id: req.params.id });
+    const docs = row && row.entry_mode === 'document' ? readDocs(row) : [];
+    return sendDocument(res, docs.find(d => d.id === req.params.docId));
+  } catch (err) {
+    console.error('[CustomerPortal] Inspection document error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load the document' });
+  }
+});
+
+/**
+ * POST /inspections/:id/sign — the customer signs the inspection in the portal.
+ * Body: { signature: "data:image/png;base64,...", name: "Full name", confirmed: true }
+ *
+ * Their own job only (inspection → work order → this customer). Once only,
+ * with the same one-time conditional update as the link
+ * (public-inspections.js): whoever signs first — at the car, from the link
+ * or here — wins, and a signed inspection is never re-signed. Recorded with
+ * signed_via 'portal': signed by the customer under their own login, so a
+ * staff "new link" (share/reset), which clears 'link' signatures, keeps it.
+ */
+router.post('/inspections/:id/sign', async (req, res) => {
+  try {
+    const [row] = await query(
+      `${INSPECTION_SELECT} WHERE vi.id = ? AND vi.workshop_id = ? AND wo.customer_id = ?`,
+      [req.params.id, req.workshopId, req.customer.id]
+    );
+    if (!row || !CUSTOMER_FACING.includes(row.inspection_type)) {
+      return res.status(404).json({ success: false, message: 'Inspection not found' });
+    }
+    if (row.wo_status === 'cancelled') {
+      return res.status(410).json({ success: false, code: 'CANCELLED', message: 'This job was cancelled, so the inspection can no longer be signed. Please contact the workshop.' });
+    }
+    const signature = inspectionView(row).inspection.signature;
+    if (row.signature_url) {
+      return res.status(409).json({ success: false, code: 'ALREADY_SIGNED', message: 'This inspection has already been signed.', signature });
+    }
+    if (row.entry_mode === 'document') {
+      return res.status(409).json({ success: false, code: 'PAPER_FORM', message: 'This inspection was signed on the paper form at the workshop.' });
+    }
+    if (row.status !== 'completed') {
+      return res.status(409).json({ success: false, code: 'NOT_COMPLETED', message: 'The inspection is still being done. You can sign it once the workshop has finished it.' });
+    }
+    if (row.wo_status === 'completed') {
+      return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: 'This job is closed, so the inspection can no longer be signed here. Please contact the workshop.' });
+    }
+
+    const name = cleanName(req.body?.name);
+    if (!name) return res.status(400).json({ success: false, code: 'NAME_REQUIRED', message: 'Please type your name.' });
+    if (name.length > 150) return res.status(400).json({ success: false, message: 'Your name can be up to 150 characters.' });
+    if (req.body?.confirmed !== true) {
+      return res.status(400).json({ success: false, code: 'CONFIRM_REQUIRED', message: 'Please confirm that this is the condition of your vehicle.' });
+    }
+    const bad = signatureError(req.body?.signature);
+    if (bad) return res.status(400).json({ success: false, message: bad });
+
+    const url = await saveBase64Signature(req.body.signature, `insp${row.id}`);
+    // Staff may be capturing it at the car at the same moment — first one wins.
+    const result = await execute(
+      `UPDATE vehicle_inspections
+          SET signature_url = ?, signed_at = NOW(), signed_via = 'portal', signed_by_name = ?
+        WHERE id = ? AND workshop_id = ? AND signature_url IS NULL AND status = 'completed' AND entry_mode = 'form'`,
+      [url, name, row.id, req.workshopId]
+    );
+    if (!result.affectedRows) {
+      return res.status(409).json({ success: false, code: 'ALREADY_SIGNED', message: 'This inspection has already been signed.' });
+    }
+
+    await notifySigned(row, name);
+    const [signed] = await ownInspections(req, { id: row.id });
+    return res.json({ success: true, data: signed ? portalInspection(signed) : null, signature: signed ? portalInspection(signed).signature : null });
+  } catch (err) {
+    console.error('[CustomerPortal] Inspection sign error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save your signature' });
+  }
+});
+
+/** As the link's sign-off (public-inspections.js): whoever did the walk-around
+ *  and the job's estimate advisor hear it, the Service Advisors as a group
+ *  when neither is known. */
+async function notifySigned(row, name) {
+  try {
+    const handover = row.inspection_type === 'joint';
+    const payload = {
+      title: `Inspection signed by the customer: ${row.work_order_number}`,
+      body: `${name} signed the ${handover ? 'handover' : 'intake'} inspection in the customer portal.`,
+      link: `/work-orders/${row.work_order_id}/inspection${handover ? '?type=joint' : ''}`,
+      orderId: row.work_order_id, type: 'inspection_signed', icon: '✍️',
+    };
+    const advisors = await query(
+      `SELECT DISTINCT advisor_id FROM service_estimates
+        WHERE workshop_id = ? AND advisor_id IS NOT NULL AND (work_order_id = ? OR intake_work_order_id = ?)`,
+      [row.workshop_id, row.work_order_id, row.work_order_id]
+    );
+    const recipients = new Set([row.inspected_by, ...advisors.map(a => a.advisor_id)].filter(Boolean));
+    if (!recipients.size) { await notifyGroups(row.workshop_id, ['service_advisor'], payload); return; }
+    for (const userId of recipients) {
+      await createInAppNotification({ workshopId: row.workshop_id, userId, ...payload });
+    }
+  } catch (err) {
+    console.error('[CustomerPortal] signed notification failed:', err.message);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * ═══  C.2 — WORK ORDER ENDPOINTS  ═══════════════════════════════════════════
+ * ═══  ESTIMATES — sent to the customer and waiting for their decision  ══════
+ * The decision itself is made on the existing approval page
+ * (/estimate-approval/:token, routes/estimates.js publicEstimateRouter): the
+ * customer is signed in and the estimate is theirs, so the portal hands them
+ * its link.
  * ══════════════════════════════════════════════════════════════════════════════ */
 
-/* ── GET /work-orders — list this customer's work orders ─────── */
+/** Estimates of this customer (by customer, or raised on one of their jobs). */
+async function ownEstimates(req, { workOrderId = null, awaitingOnly = false } = {}) {
+  const params = [req.workshopId, req.customer.id, req.customer.id];
+  let where = `WHERE se.workshop_id = ? AND se.sent_to_customer_at IS NOT NULL
+                 AND (se.customer_id = ? OR wo.customer_id = ?)`;
+  if (workOrderId) { where += ' AND (se.intake_work_order_id = ? OR se.work_order_id = ?)'; params.push(workOrderId, workOrderId); }
+  const rows = await query(
+    `SELECT se.id, se.estimate_number, se.status, se.total_amount, se.sent_to_customer_at, se.customer_approved_at,
+            se.valid_until, se.vehicle_plate, se.intake_work_order_id, se.work_order_id,
+            se.approval_token, se.approval_token_expires_at,
+            wo.work_order_number, wo.status AS wo_status,
+            (SELECT COUNT(*) FROM estimate_lines l
+              WHERE l.estimate_id = se.id AND l.line_type <> 'discount' AND l.customer_status = 'pending') AS pending_lines
+       FROM service_estimates se
+       LEFT JOIN work_orders wo ON wo.id = COALESCE(se.intake_work_order_id, se.work_order_id) AND wo.workshop_id = se.workshop_id
+       ${where}
+      ORDER BY se.sent_to_customer_at DESC, se.id DESC
+      LIMIT 50`,
+    params
+  );
+  const out = rows.map(e => {
+    const linkLive = !!e.approval_token && (!e.approval_token_expires_at || new Date(e.approval_token_expires_at) > new Date());
+    // Decisions close once the estimate became work (work_order_id set) or expired.
+    const awaiting = linkLive && ['sent_to_customer', 'partially_approved'].includes(e.status) && !e.work_order_id
+      && Number(e.pending_lines) > 0 && e.wo_status !== 'cancelled';
+    return {
+      id: e.id,
+      estimate_number: e.estimate_number,
+      status: e.status,
+      total: money(e.total_amount),
+      sent_at: e.sent_to_customer_at,
+      decided_at: e.customer_approved_at,
+      valid_until: e.valid_until,
+      work_order_id: e.intake_work_order_id || e.work_order_id || null,
+      work_order_number: e.work_order_number || null,
+      vehicle_plate: e.vehicle_plate || null,
+      awaiting_decision: awaiting,
+      pending_lines: Number(e.pending_lines) || 0,
+      approval_path: linkLive ? `/estimate-approval/${e.approval_token}` : null,
+    };
+  });
+  return awaitingOnly ? out.filter(e => e.awaiting_decision) : out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ═══  INVOICES & PAYMENTS  ══════════════════════════════════════════════════
+ * Draft invoices are the workshop's work in progress; void and cancelled ones
+ * are not owed. Neither is shown.
+ * A job's invoice is raised (status 'sent') when the Team Leader assigns the
+ * work, so the staff payment and gate-pass steps have it ready; the customer
+ * sees it once the car is ready for collection (or closed), or once they
+ * have paid something towards it — not while the repair is still going on.
+ * Self-contained, so ownInvoices and the PDF route share it.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const INVOICE_VISIBLE = "i.status NOT IN ('draft','void','cancelled') AND (i.work_order_id IS NULL OR i.amount_paid > 0 OR EXISTS ("
+  + "SELECT 1 FROM work_orders w2 WHERE w2.id = i.work_order_id AND w2.status IN ('ready_for_pickup','completed')))";
+
+async function ownInvoices(req, { workOrderId = null } = {}) {
+  const params = [req.customer.id, req.workshopId];
+  let where = `WHERE i.customer_id = ? AND i.workshop_id = ? AND ${INVOICE_VISIBLE}`;
+  if (workOrderId) { where += ' AND i.work_order_id = ?'; params.push(workOrderId); }
+  const rows = await query(
+    `SELECT i.id, i.invoice_number, i.work_order_id, i.subtotal, i.tax_amount, i.total_amount, i.amount_paid,
+            i.status, i.due_date, i.paid_at, i.created_at, i.currency,
+            wo.work_order_number, v.plate_number, v.make, v.model
+       FROM invoices i
+       LEFT JOIN work_orders wo ON wo.id = i.work_order_id
+       LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+       ${where}
+      ORDER BY i.created_at DESC, i.id DESC`,
+    params
+  );
+  return rows.map(i => ({
+    id: i.id,
+    invoice_number: i.invoice_number,
+    work_order_id: i.work_order_id,
+    work_order_number: i.work_order_number || null,
+    vehicle: { plate: i.plate_number || null, make: i.make || null, model: i.model || null },
+    subtotal: money(i.subtotal),
+    tax_amount: money(i.tax_amount),
+    total_amount: money(i.total_amount),
+    amount_paid: money(i.amount_paid),
+    balance: Math.max(0, money(Number(i.total_amount) - Number(i.amount_paid))),
+    status: i.status,
+    due_date: i.due_date,
+    paid_at: i.paid_at,
+    created_at: i.created_at,
+    currency: i.currency || null,
+  }));
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ═══  HOME — action needed first  ═══════════════════════════════════════════
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+async function openJobViews(req) {
+  const open = await query(
+    `SELECT id FROM work_orders
+      WHERE customer_id = ? AND workshop_id = ? AND status NOT IN ('completed','cancelled')
+      ORDER BY created_at DESC LIMIT ${OPEN_LIMIT}`,
+    [req.customer.id, req.workshopId]
+  );
+  return (await Promise.all(open.map(o => customerView(o.id, req.workshopId)))).filter(Boolean);
+}
+
+/**
+ * GET /home — what needs the customer, then their open jobs.
+ *   actions.sign     — inspections to sign (in the portal)
+ *   actions.approve  — estimates waiting for their decision (the approval page)
+ *   actions.ready    — cars ready for collection, with the amount due
+ */
+router.get('/home', async (req, res) => {
+  try {
+    const [jobs, inspections, estimates] = await Promise.all([
+      openJobViews(req),
+      ownInspections(req),
+      ownEstimates(req, { awaitingOnly: true }),
+    ]);
+    const toSign = inspections.map(portalInspection).filter(i => i.needs_signature).map(i => ({
+      id: i.id, work_order_id: i.work_order_id, work_order_number: i.work_order_number,
+      type: i.type, completed_at: i.completed_at, vehicle: i.vehicle,
+    }));
+    const ready = jobs.filter(j => j.stage.key === 'ready').map(j => ({
+      work_order_id: j.work_order_id, vehicle: j.vehicle, job: j.job, invoice: j.invoice, since: j.stage.since,
+    }));
+    return res.json({
+      success: true,
+      data: {
+        customer: { name: req.customer.full_name || req.customer.company_name || null },
+        actions: { sign: toSign, approve: estimates, ready },
+        jobs,
+      },
+    });
+  } catch (err) {
+    console.error('[CustomerPortal] Home error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load your portal' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ═══  JOB CARDS  ════════════════════════════════════════════════════════════
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /service-status?days=30 — the customer's jobs in their stages:
+ *   data   — open jobs, the full status (lib/customer-status.js)
+ *   closed — jobs closed in the last `days` (1–90), a short line each
+ */
+router.get('/service-status', async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const [open, closedRows] = await Promise.all([
+      openJobViews(req),
+      query(
+        `SELECT wo.id, wo.work_order_number, wo.status, wo.completed_at, wo.cancelled_at, wo.updated_at, wo.created_at,
+                v.plate_number, v.make, v.model,
+                (SELECT se.status FROM service_estimates se
+                  WHERE se.workshop_id = wo.workshop_id AND (se.intake_work_order_id = wo.id OR se.work_order_id = wo.id)
+                  ORDER BY se.id DESC LIMIT 1) AS estimate_status,
+                (SELECT jc.job_card_number FROM job_cards jc
+                  WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL ORDER BY jc.id LIMIT 1) AS job_card_number
+           FROM work_orders wo
+           LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+          WHERE wo.customer_id = ? AND wo.workshop_id = ? AND wo.status IN ('completed','cancelled')
+            AND COALESCE(wo.completed_at, wo.cancelled_at, wo.updated_at) >= DATE_SUB(NOW(), INTERVAL ? DAY)
+          ORDER BY COALESCE(wo.completed_at, wo.cancelled_at, wo.updated_at) DESC
+          LIMIT 20`,
+        [req.customer.id, req.workshopId, days]
+      ),
+    ]);
+    const invoices = closedRows.length ? await ownInvoices(req) : [];
+    const closed = closedRows.map(r => {
+      const inv = invoices.find(i => i.work_order_id === r.id);
+      const special = r.status === 'cancelled' ? (r.estimate_status === 'rejected' ? 'declined' : 'cancelled') : null;
+      return {
+        work_order_id: r.id,
+        vehicle: { plate: r.plate_number || null, make: r.make || null, model: r.model || null },
+        job: { work_order_number: r.work_order_number, job_card_number: r.job_card_number || null, opened_at: r.created_at },
+        stage: { key: special || 'collected', since: r.completed_at || r.cancelled_at || r.updated_at },
+        special,
+        invoice: inv ? { number: inv.invoice_number, total: inv.total_amount, paid: inv.amount_paid, balance: inv.balance, status: inv.status } : null,
+      };
+    });
+    return res.json({ success: true, data: open, closed, days });
+  } catch (err) {
+    console.error('[CustomerPortal] Service status error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load your job cards' });
+  }
+});
+
+/* ── GET /work-orders — this customer's job cards, newest first (no prices, no staff) ── */
 router.get('/work-orders', async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 20, sort = 'created_at', order = 'desc' } = req.query;
+    const { status, page = 1, limit = 20 } = req.query;
     const pg = Math.max(1, parseInt(page) || 1);
     const lim = Math.min(100, Math.max(1, parseInt(limit) || 20));
     const offset = (pg - 1) * lim;
 
     let where = 'WHERE o.workshop_id = ? AND o.customer_id = ?';
     const params = [req.workshopId, req.customer.id];
-
     if (status) { where += ' AND o.status = ?'; params.push(status); }
-    if (search) {
-      where += ' AND (o.work_order_number LIKE ? OR o.customer_name LIKE ? OR o.service_status_token LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
-    }
-
-    const allowedSorts = ['created_at', 'status', 'work_order_number', 'total_amount'];
-    const sortCol = allowedSorts.includes(sort) ? sort : 'created_at';
-    const sortDir = order?.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     const [{ total }] = await query(`SELECT COUNT(*) as total FROM work_orders o ${where}`, params);
-
-    const workOrders = await query(
-      `SELECT o.id, o.work_order_number, o.status, o.work_order_type, o.service_category,
-              o.customer_name, o.customer_phone, o.dropoff_address,
-              o.payment_method, o.cash_amount, o.service_fee, o.discount, o.total_amount,
-              o.service_status_token, o.vehicle_id, o.created_at, o.scheduled_at, o.completed_at,
-              v.make as vehicle_make, v.model as vehicle_model, v.plate_number as vehicle_plate,
-              m.full_name as mechanic_name
+    const rows = await query(
+      `SELECT o.id, o.work_order_number, o.status, o.customer_approved_at, o.created_at, o.completed_at,
+              v.make as vehicle_make, v.model as vehicle_model, v.plate_number as vehicle_plate
        FROM work_orders o
-       LEFT JOIN mechanics m ON o.mechanic_id = m.id
        LEFT JOIN vehicles v ON o.vehicle_id = v.id
        ${where}
-       ORDER BY o.${sortCol} ${sortDir}
+       ORDER BY o.created_at DESC
        LIMIT ${lim} OFFSET ${offset}`,
       params
     );
-
     return res.json({
       success: true,
-      data: workOrders,
+      data: rows.map(r => ({ ...r, status_label: woLabel(r, 'customer') })),
       pagination: { total, page: pg, limit: lim, pages: Math.ceil(total / lim) },
     });
   } catch (err) {
     console.error('[CustomerPortal] List work orders error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch work orders' });
+    return res.status(500).json({ success: false, message: 'Failed to fetch your job cards' });
   }
 });
 
-/* ── GET /work-orders/:id — single work order detail ─────────── */
+/**
+ * GET /work-orders/:id — one job card for the customer: where it stands
+ * (stages), its inspections (view + sign), the estimates sent, invoices.
+ * Whitelisted like the public status page: no staff, notes or costs.
+ */
 router.get('/work-orders/:id', async (req, res) => {
   try {
-    const [order] = await query(
-      `SELECT o.*, m.full_name as mechanic_name, m.phone as mechanic_phone,
-              b.name as service_bay_name
-       FROM work_orders o
-       LEFT JOIN mechanics m ON o.mechanic_id = m.id
-       LEFT JOIN service_bays b ON o.service_bay_id = b.id
-       WHERE o.id = ? AND o.customer_id = ? AND o.workshop_id = ?`,
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    // Status timeline
-    const timeline = await query(
-      'SELECT * FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC',
-      [order.id]
-    );
-
-    // Items (parts/labor used on this work order)
-    const items = await query('SELECT * FROM work_order_items WHERE work_order_id = ?', [order.id]);
-
-    // Parts (inventory parts consumed)
-    let parts = [];
-    try {
-      parts = await query(
-        'SELECT * FROM parts WHERE work_order_id = ? AND workshop_id = ? ORDER BY id ASC',
-        [order.id, req.workshopId]
-      );
-    } catch (_) {}
-
-    // Vehicle for this work order
-    let vehicle = null;
-    if (order.vehicle_id) {
-      try {
-        const [v] = await query(
-          'SELECT * FROM vehicles WHERE id = ? AND customer_id = ?',
-          [order.vehicle_id, req.customer.id]
-        );
-        vehicle = v || null;
-      } catch (_) {}
-    }
-
-    return res.json({ success: true, data: { ...order, timeline, items, parts, vehicle } });
+    const wo = await ownWorkOrder(req, req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Job card not found' });
+    const [status, inspections, estimates, invoices] = await Promise.all([
+      customerView(wo.id, req.workshopId),
+      ownInspections(req, { workOrderId: wo.id }),
+      ownEstimates(req, { workOrderId: wo.id }),
+      ownInvoices(req, { workOrderId: wo.id }),
+    ]);
+    return res.json({
+      success: true,
+      data: { work_order_id: wo.id, status, inspections: inspections.map(portalInspection), estimates, invoices },
+    });
   } catch (err) {
     console.error('[CustomerPortal] Work order detail error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch work order' });
+    return res.status(500).json({ success: false, message: 'Failed to fetch the job card' });
   }
 });
 
-/* ── POST /work-orders — create new work order ────────────────── */
-router.post('/work-orders', async (req, res) => {
-  try {
-    const {
-      service_bay_id, work_order_type = 'standard', service_category = 'general_maintenance',
-      vehicle_id,
-      customer_name, customer_phone, customer_email, dropoff_address,
-      description, special_instructions, scheduled_at,
-      payment_method = 'cash', cash_amount = 0, service_fee = 0,
-      discount = 0, items = [], notes,
-      pregenerated_token
-    } = req.body;
-
-    // Auto-fill contact info from customer profile if not provided
-    const _customer_name = customer_name || req.customer.full_name || req.customer.company_name;
-    const _customer_phone = customer_phone || req.customer.phone;
-    const _customer_email = customer_email || req.customer.email || null;
-
-    if (!_customer_name || !_customer_phone) {
-      return res.status(400).json({ success: false, message: 'Customer name and phone required' });
-    }
-
-    // Validate ENUM fields (must match car_workshop.sql work_orders enums)
-    const VALID_WORK_ORDER_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
-    const VALID_SERVICE_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service', 'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
-    const VALID_PAY_METHODS = ['cash', 'prepaid', 'credit', 'wallet'];
-
-    const _work_order_type = VALID_WORK_ORDER_TYPES.includes(work_order_type) ? work_order_type : 'standard';
-    const _service_category = VALID_SERVICE_CATEGORIES.includes(service_category) ? service_category : 'general_maintenance';
-    const _payment_method = VALID_PAY_METHODS.includes(payment_method) ? payment_method : 'cash';
-
-    // Coerce numeric fields
-    const _cash_amount = parseFloat(cash_amount) || 0;
-    const _service_fee = parseFloat(service_fee) || 0;
-    const _discount = parseFloat(discount) || 0;
-
-    // Verify the vehicle (if provided) belongs to this customer
-    let _vehicle_id = null;
-    if (vehicle_id) {
-      try {
-        const [v] = await query('SELECT id FROM vehicles WHERE id = ? AND customer_id = ?', [vehicle_id, req.customer.id]);
-        if (v) _vehicle_id = v.id;
-      } catch (_) {}
-    }
-
-    // Financial engine
-    let finConfig;
-    try { finConfig = await getFinancialConfig(req.workshopId); } catch { finConfig = { commissionPercent: 0, vatEnabled: false, vatRate: 0 }; }
-    const fin = computeWorkOrderFinancials({
-      serviceFee: _service_fee,
-      discount: _discount,
-      cashAmount: _cash_amount,
-      config: finConfig,
-    });
-
-    const work_order_number = genWorkOrderNumber();
-
-    // Handle pre-generated service status token
-    let service_status_token;
-    let pregeneratedTokenId = null;
-    if (pregenerated_token) {
-      const tokenVal = pregenerated_token.trim().toUpperCase();
-      const [pt] = await query(
-        'SELECT id, service_status_token, is_used, expires_at FROM pregenerated_tokens WHERE service_status_token = ? AND workshop_id = ?',
-        [tokenVal, req.workshopId]
-      );
-      if (!pt) return res.status(400).json({ success: false, message: 'Pre-generated token not found' });
-      if (pt.is_used) return res.status(400).json({ success: false, message: 'This token is already linked to a work order' });
-      if (pt.expires_at && new Date(pt.expires_at) <= new Date()) return res.status(400).json({ success: false, message: 'This token has expired' });
-      service_status_token = pt.service_status_token;
-      pregeneratedTokenId = pt.id;
-    } else {
-      service_status_token = serviceStatusToken(); // SR-08 — was 48-bit
-    }
-
-    const result = await execute(
-      `INSERT INTO work_orders (workshop_id, work_order_number, customer_id, service_bay_id, vehicle_id, work_order_type, service_category,
-        customer_name, customer_phone, customer_email, dropoff_address, description, special_instructions,
-        scheduled_at, payment_method, cash_amount, service_fee, discount, total_amount,
-        commission_rate, commission_amount, vat_rate, vat_amount, platform_fee, net_payable,
-        status, service_status_token, pregenerated_token_id, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-      [req.workshopId, work_order_number, req.customer.id, service_bay_id || null, _vehicle_id, _work_order_type, _service_category,
-       _customer_name, _customer_phone, _customer_email, dropoff_address || null,
-       description || null, special_instructions || null, scheduled_at || null,
-       _payment_method, _cash_amount, _service_fee, _discount, fin.totalAmount,
-       fin.commissionRate, fin.commissionAmount, fin.vatRate, fin.vatAmount, fin.platformFee, fin.netPayable,
-       service_status_token, pregeneratedTokenId, notes || null]
-    );
-    const orderId = result.insertId;
-
-    // Mark pre-generated token as used
-    if (pregeneratedTokenId) {
-      await execute('UPDATE pregenerated_tokens SET is_used = 1, work_order_id = ?, used_at = NOW() WHERE id = ?',
-        [orderId, pregeneratedTokenId]);
-    }
-
-    // Insert items (labor/parts line items)
-    if (Array.isArray(items)) {
-      for (const item of items) {
-        if (!item.name) continue;
-        await execute(
-          'INSERT INTO work_order_items (work_order_id, name, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?)',
-          [orderId, item.name, item.quantity || 1, item.unit_price || 0, item.notes || null]
-        );
-      }
-    }
-
-    // Status log (changed_by is a users.id FK — null for a customer-initiated action)
-    await execute(
-      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [orderId, 'pending', null, `Work order created by customer #${req.customer.id}`]
-    );
-
-    const [newOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [orderId]);
-
-    return res.status(201).json({ success: true, data: newOrder });
-  } catch (err) {
-    console.error('[CustomerPortal] Create work order error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to create work order' });
-  }
-});
-
-/* ── PUT /work-orders/:id — edit work order (only pending/confirmed) ── */
-router.put('/work-orders/:id', async (req, res) => {
-  try {
-    const [existing] = await query(
-      'SELECT * FROM work_orders WHERE id = ? AND customer_id = ? AND workshop_id = ?',
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!existing) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    if (!['pending', 'confirmed'].includes(existing.status)) {
-      return res.status(400).json({ success: false, message: `Cannot edit work order with status "${existing.status}"` });
-    }
-
-    const {
-      customer_name = existing.customer_name,
-      customer_phone = existing.customer_phone,
-      customer_email = existing.customer_email,
-      dropoff_address = existing.dropoff_address,
-      description = existing.description,
-      special_instructions = existing.special_instructions,
-      payment_method = existing.payment_method,
-      cash_amount = existing.cash_amount,
-      notes = existing.notes,
-    } = req.body;
-
-    await execute(
-      `UPDATE work_orders SET
-        customer_name=?, customer_phone=?, customer_email=?, dropoff_address=?,
-        description=?, special_instructions=?, payment_method=?, cash_amount=?, notes=?,
-        updated_at=NOW()
-       WHERE id = ? AND customer_id = ? AND workshop_id = ?`,
-      [customer_name, customer_phone, customer_email, dropoff_address,
-       description, special_instructions, payment_method, parseFloat(cash_amount) || 0, notes,
-       req.params.id, req.customer.id, req.workshopId]
-    );
-
-    const [updated] = await query('SELECT * FROM work_orders WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: updated });
-  } catch (err) {
-    console.error('[CustomerPortal] Update work order error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to update work order' });
-  }
-});
-
-/* ── DELETE /work-orders/:id — cancel work order (only pending/confirmed) ── */
-router.delete('/work-orders/:id', async (req, res) => {
-  try {
-    const [order] = await query(
-      'SELECT id, status FROM work_orders WHERE id = ? AND customer_id = ? AND workshop_id = ?',
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    if (!['pending', 'confirmed'].includes(order.status)) {
-      return res.status(400).json({ success: false, message: `Cannot cancel work order with status "${order.status}"` });
-    }
-
-    await execute('UPDATE work_orders SET status = "cancelled", updated_at = NOW() WHERE id = ?', [order.id]);
-    await execute(
-      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [order.id, 'cancelled', `customer:${req.customer.id}`, 'Cancelled by customer']
-    );
-
-    return res.json({ success: true, message: 'Work order cancelled' });
-  } catch (err) {
-    console.error('[CustomerPortal] Cancel work order error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to cancel work order' });
-  }
-});
-
-/* ── GET /work-orders/:id/invoice — download invoice/job-sheet PDF ──
-   (was: shipping label PDF — repurposed as job sheet / invoice document) ── */
+/* ── GET /work-orders/:id/invoice — the job sheet PDF (the printed job card) ── */
 router.get('/work-orders/:id/invoice', async (req, res) => {
   try {
     const [order] = await query(
@@ -402,165 +546,38 @@ router.get('/work-orders/:id/invoice', async (req, res) => {
   }
 });
 
-/* ── GET /work-orders/:id/service-status — live service status info ── */
-router.get('/work-orders/:id/service-status', async (req, res) => {
+/* ── GET /estimates — estimates sent to the customer (?awaiting=1 for those waiting on them) ── */
+router.get('/estimates', async (req, res) => {
   try {
-    const [order] = await query(
-      `SELECT o.id, o.work_order_number, o.status, o.service_status_token,
-              o.customer_name, o.dropoff_address,
-              o.scheduled_at, o.completed_at,
-              m.full_name as mechanic_name, m.phone as mechanic_phone
-       FROM work_orders o
-       LEFT JOIN mechanics m ON o.mechanic_id = m.id
-       WHERE o.id = ? AND o.customer_id = ? AND o.workshop_id = ?`,
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    const timeline = await query(
-      'SELECT status, note, created_at FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC',
-      [order.id]
-    );
-
-    return res.json({ success: true, data: { ...order, timeline } });
+    const awaitingOnly = req.query.awaiting === '1' || req.query.awaiting === 'true';
+    return res.json({ success: true, data: await ownEstimates(req, { awaitingOnly }) });
   } catch (err) {
-    console.error('[CustomerPortal] Service status error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch service status' });
-  }
-});
-
-/* ── GET /service-status/:query — search by work order number or service status token ── */
-router.get('/service-status/:query', async (req, res) => {
-  try {
-    const q = req.params.query.trim();
-    const [order] = await query(
-      `SELECT o.id, o.work_order_number, o.status, o.service_status_token,
-              o.customer_name, o.customer_phone, o.dropoff_address,
-              o.payment_method, o.cash_amount, o.service_fee, o.total_amount,
-              o.description, o.special_instructions,
-              o.scheduled_at, o.completed_at, o.created_at,
-              m.full_name as mechanic_name, m.phone as mechanic_phone
-       FROM work_orders o
-       LEFT JOIN mechanics m ON o.mechanic_id = m.id
-       WHERE (o.work_order_number = ? OR o.service_status_token = ?) AND o.customer_id = ? AND o.workshop_id = ?`,
-      [q, q, req.customer.id, req.workshopId]
-    );
-
-    if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    const timeline = await query(
-      'SELECT status, note, created_at FROM work_order_status_logs WHERE work_order_id = ? ORDER BY created_at ASC',
-      [order.id]
-    );
-
-    return res.json({ success: true, data: { ...order, timeline } });
-  } catch (err) {
-    console.error('[CustomerPortal] Service status search error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch service status info' });
+    console.error('[CustomerPortal] Estimates error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load estimates' });
   }
 });
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * ═══  C.2B — PARTS ENDPOINTS (parts used on a work order)  ══════════════════
- * ══════════════════════════════════════════════════════════════════════════════ */
-
-/* ── GET /work-orders/:id/parts — list parts used on a work order ── */
-router.get('/work-orders/:id/parts', async (req, res) => {
-  try {
-    const [order] = await query(
-      'SELECT id, work_order_number, service_status_token FROM work_orders WHERE id = ? AND customer_id = ? AND workshop_id = ?',
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!order) return res.status(404).json({ success: false, message: 'Work order not found' });
-
-    let parts = [];
-    try {
-      parts = await query(
-        'SELECT * FROM parts WHERE work_order_id = ? AND workshop_id = ? ORDER BY id ASC',
-        [req.params.id, req.workshopId]
-      );
-    } catch (_) {}
-
-    return res.json({
-      success: true,
-      data: {
-        order,
-        parts,
-        summary: {
-          total: parts.length,
-          total_cost: parts.reduce((sum, p) => sum + (parseFloat(p.total_cost) || 0), 0),
-        },
-      },
-    });
-  } catch (err) {
-    console.error('[CustomerPortal] Parts error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch parts' });
-  }
-});
-
-/* ══════════════════════════════════════════════════════════════════════════════
- * ═══  C.4 — DASHBOARD STATS  ════════════════════════════════════════════════
+ * ═══  STATS  ════════════════════════════════════════════════════════════════
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 router.get('/stats', async (req, res) => {
   try {
-    const cid = req.customer.id;
-    const wid = req.workshopId;
-
-    // Overall stats
-    const [overall] = await query(
-      `SELECT
-         COUNT(*) as total_work_orders,
-         SUM(status = 'pending')          as pending,
-         SUM(status = 'confirmed')        as confirmed,
-         SUM(status = 'assigned')         as assigned,
-         SUM(status = 'accepted')         as accepted,
-         SUM(status = 'in_progress')      as in_progress,
-         SUM(status = 'ready_for_pickup') as ready_for_pickup,
-         SUM(status = 'completed')        as completed,
-         SUM(status = 'cancelled')        as cancelled,
-         COALESCE(SUM(service_fee), 0)                        as total_service_fees,
-         COALESCE(SUM(CASE WHEN payment_method='cash' THEN cash_amount ELSE 0 END), 0) as total_cash,
-         COALESCE(SUM(total_amount), 0) as total_spend
-       FROM work_orders WHERE customer_id = ? AND workshop_id = ?`,
-      [cid, wid]
+    const [counts] = await query(
+      `SELECT COUNT(*) AS total_work_orders,
+              COALESCE(SUM(status NOT IN ('completed','cancelled')), 0) AS open_jobs,
+              COALESCE(SUM(status = 'ready_for_pickup'), 0)            AS ready_for_collection,
+              COALESCE(SUM(status = 'completed'), 0)                   AS completed,
+              COALESCE(SUM(status = 'cancelled'), 0)                   AS cancelled
+         FROM work_orders WHERE customer_id = ? AND workshop_id = ?`,
+      [req.customer.id, req.workshopId]
     );
-
-    // Today's stats
-    const [today] = await query(
-      `SELECT
-         COUNT(*) as orders_today,
-         SUM(status = 'completed') as completed_today,
-         SUM(status IN ('in_progress','ready_for_pickup','assigned','accepted')) as in_progress_today
-       FROM work_orders WHERE customer_id = ? AND workshop_id = ? AND DATE(created_at) = CURDATE()`,
-      [cid, wid]
-    );
-
-    // This month
-    const [month] = await query(
-      `SELECT
-         COUNT(*) as orders_this_month,
-         COALESCE(SUM(total_amount), 0) as spend_this_month
-       FROM work_orders WHERE customer_id = ? AND workshop_id = ?
-         AND YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())`,
-      [cid, wid]
-    );
-
-    // Recent 7 days daily breakdown
-    const dailyBreakdown = await query(
-      `SELECT DATE(created_at) as date, COUNT(*) as count, SUM(status='completed') as completed
-       FROM work_orders WHERE customer_id = ? AND workshop_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-       GROUP BY DATE(created_at) ORDER BY date ASC`,
-      [cid, wid]
-    );
-
+    const invoices = await ownInvoices(req);
     return res.json({
       success: true,
       data: {
-        ...overall,
-        ...today,
-        ...month,
-        daily_breakdown: dailyBreakdown,
+        ...Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, Number(v) || 0])),
+        balance_due: money(invoices.reduce((s, i) => s + i.balance, 0)),
       },
     });
   } catch (err) {
@@ -570,22 +587,19 @@ router.get('/stats', async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * ═══  C.5 — FINANCIAL ENDPOINTS  ════════════════════════════════════════════
+ * ═══  INVOICES & PAYMENTS  ══════════════════════════════════════════════════
  * ══════════════════════════════════════════════════════════════════════════════ */
 
-/* ── GET /invoices — customer's invoices ─────────────────────── */
+/* ── GET /invoices — customer's invoices, with paid and balance ── */
 router.get('/invoices', async (req, res) => {
   try {
-    const invoices = await query(
-      `SELECT id, invoice_number, customer_id, work_order_id,
-              subtotal, tax_amount, total_amount, status, due_date, created_at
-       FROM invoices
-       WHERE customer_id = ? AND workshop_id = ?
-       ORDER BY created_at DESC`,
-      [req.customer.id, req.workshopId]
-    );
-    return res.json({ success: true, data: invoices });
+    const invoices = await ownInvoices(req);
+    const totals = invoices.reduce((t, i) => ({
+      billed: t.billed + i.total_amount, paid: t.paid + i.amount_paid, balance: t.balance + i.balance,
+    }), { billed: 0, paid: 0, balance: 0 });
+    return res.json({ success: true, data: invoices, totals: { billed: money(totals.billed), paid: money(totals.paid), balance: money(totals.balance) } });
   } catch (err) {
+    console.error('[CustomerPortal] Invoices error:', err);
     return res.status(500).json({ success: false, message: 'Failed to fetch invoices' });
   }
 });
@@ -594,7 +608,7 @@ router.get('/invoices', async (req, res) => {
 router.get('/invoices/:id/pdf', async (req, res) => {
   try {
     const [invoice] = await query(
-      'SELECT * FROM invoices WHERE id = ? AND customer_id = ? AND workshop_id = ?',
+      `SELECT * FROM invoices i WHERE i.id = ? AND i.customer_id = ? AND i.workshop_id = ? AND ${INVOICE_VISIBLE}`,
       [req.params.id, req.customer.id, req.workshopId]
     );
     if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
@@ -618,93 +632,29 @@ router.get('/invoices/:id/pdf', async (req, res) => {
   }
 });
 
-/* ── GET /wallet — customer wallet balance ───────────────────── */
-router.get('/wallet', async (req, res) => {
-  try {
-    // Find wallet transactions related to this customer
-    const [wallet] = await query(
-      'SELECT * FROM wallets WHERE workshop_id = ?',
-      [req.workshopId]
-    );
-
-    const transactions = await query(
-      `SELECT wt.* FROM wallet_transactions wt
-       WHERE wt.workshop_id = ? AND wt.work_order_id IN (
-         SELECT id FROM work_orders WHERE customer_id = ?
-       )
-       ORDER BY wt.created_at DESC LIMIT 50`,
-      [req.workshopId, req.customer.id]
-    );
-
-    // Customer cash balance (completed work orders cash - already settled)
-    const [cashBalance] = await query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN status='completed' AND payment_method='cash' THEN cash_amount ELSE 0 END), 0) as total_cash_collected,
-         COALESCE(SUM(CASE WHEN status='completed' AND payment_method='cash' AND cash_collected > 0 THEN cash_amount ELSE 0 END), 0) as cash_settled
-       FROM work_orders WHERE customer_id = ? AND workshop_id = ?`,
-      [req.customer.id, req.workshopId]
-    );
-
-    return res.json({
-      success: true,
-      data: {
-        wallet_balance: wallet?.balance || 0,
-        transactions,
-        cash_balance: cashBalance,
-      },
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch wallet info' });
-  }
-});
-
-/* ── GET /cash-summary — cash payment collection status ──────── */
-router.get('/cash-summary', async (req, res) => {
-  try {
-    const [summary] = await query(
-      `SELECT
-         COUNT(*) as total_cash_orders,
-         SUM(status='completed') as completed,
-         SUM(status IN ('in_progress','assigned','accepted','ready_for_pickup')) as in_progress,
-         SUM(status IN ('pending','confirmed')) as pending_pickup,
-         COALESCE(SUM(CASE WHEN payment_method='cash' THEN cash_amount ELSE 0 END), 0) as total_cash_amount,
-         COALESCE(SUM(CASE WHEN payment_method='cash' AND status='completed' THEN cash_amount ELSE 0 END), 0) as collected,
-         COALESCE(SUM(CASE WHEN payment_method='cash' AND status!='completed' AND status!='cancelled' THEN cash_amount ELSE 0 END), 0) as outstanding
-       FROM work_orders
-       WHERE customer_id = ? AND workshop_id = ? AND payment_method = 'cash'`,
-      [req.customer.id, req.workshopId]
-    );
-
-    // Recent cash-payment work orders
-    const recentCash = await query(
-      `SELECT id, work_order_number, status, cash_amount, customer_name, created_at
-       FROM work_orders
-       WHERE customer_id = ? AND workshop_id = ? AND payment_method = 'cash'
-       ORDER BY created_at DESC LIMIT 20`,
-      [req.customer.id, req.workshopId]
-    );
-
-    return res.json({ success: true, data: { ...summary, recent_orders: recentCash } });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch cash summary' });
-  }
-});
-
 /* ══════════════════════════════════════════════════════════════════════════════
- * ═══  MY VEHICLES (NEW)  ═════════════════════════════════════════════════════
- * Customers can list/add their own vehicles from the portal. Full admin CRUD
- * (edit/delete, cross-customer listing) lives in the dedicated routes/vehicles.js;
- * this is a simple portal-scoped view following the same "my X" pattern as
- * /pre-generated and /saved-addresses below.
+ * ═══  MY VEHICLES  ══════════════════════════════════════════════════════════
+ * The customer's own vehicles (the `vehicles` table routes/vehicles.js also
+ * manages), with their last visit and the job open on them, if any. Staff
+ * notes on the vehicle are not shown.
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 /* ── GET /vehicles — list this customer's vehicles ────────────── */
-// Uses the real `vehicles` table from car_workshop.sql (also used by the
-// dedicated admin routes/vehicles.js) — do not create a competing schema here.
 router.get('/vehicles', async (req, res) => {
   try {
     const vehicles = await query(
-      'SELECT * FROM vehicles WHERE customer_id = ? AND workshop_id = ? AND is_active = TRUE ORDER BY created_at DESC',
+      `SELECT v.id, v.make, v.model, v.year, v.plate_number, v.plate_code, v.plate_emirate, v.vin, v.color,
+              v.mileage, v.fuel_type, v.transmission, v.created_at,
+              (SELECT MAX(o.completed_at) FROM work_orders o
+                WHERE o.vehicle_id = v.id AND o.customer_id = v.customer_id AND o.status = 'completed') AS last_visit_at,
+              (SELECT COUNT(*) FROM work_orders o
+                WHERE o.vehicle_id = v.id AND o.customer_id = v.customer_id AND o.status = 'completed') AS visits,
+              (SELECT o.id FROM work_orders o
+                WHERE o.vehicle_id = v.id AND o.customer_id = v.customer_id AND o.status NOT IN ('completed','cancelled')
+                ORDER BY o.created_at DESC LIMIT 1) AS open_work_order_id
+         FROM vehicles v
+        WHERE v.customer_id = ? AND v.workshop_id = ? AND v.is_active = TRUE
+        ORDER BY v.created_at DESC`,
       [req.customer.id, req.workshopId]
     );
     return res.json({ success: true, data: vehicles });
@@ -729,7 +679,9 @@ router.post('/vehicles', async (req, res) => {
        color || null, parseInt(mileage) || null, fuel_type, transmission]
     );
 
-    const [vehicle] = await query('SELECT * FROM vehicles WHERE id = ?', [result.insertId]);
+    const [vehicle] = await query(
+      `SELECT id, make, model, year, plate_number, plate_code, plate_emirate, vin, color, mileage, fuel_type, transmission, created_at
+         FROM vehicles WHERE id = ?`, [result.insertId]);
     return res.status(201).json({ success: true, data: vehicle });
   } catch (err) {
     console.error('[CustomerPortal] Add vehicle error:', err);
@@ -741,10 +693,16 @@ router.post('/vehicles', async (req, res) => {
  * ═══  PROFILE & SETTINGS  ═══════════════════════════════════════════════════
  * ══════════════════════════════════════════════════════════════════════════════ */
 
+// What the customer sees of their own record: never the password hash, the
+// live reset / verification tokens, or the workshop's notes and credit terms.
+const PROFILE_FIELDS = ['id', 'full_name', 'company_name', 'email', 'phone', 'phone_alt',
+  'address_line1', 'address_line2', 'area', 'city', 'emirate', 'type', 'is_verified', 'created_at'];
+const profileOf = c => Object.fromEntries(PROFILE_FIELDS.map(k => [k, c?.[k] ?? null]));
+
 /* ── GET /profile — customer profile ─────────────────────────── */
 router.get('/profile', async (req, res) => {
   try {
-    return res.json({ success: true, data: req.customer });
+    return res.json({ success: true, data: profileOf(req.customer) });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch profile' });
   }
@@ -774,129 +732,33 @@ router.put('/profile', async (req, res) => {
     );
 
     const [updated] = await query('SELECT * FROM customers WHERE id = ?', [req.customer.id]);
-    return res.json({ success: true, data: updated });
+    return res.json({ success: true, data: profileOf(updated) });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to update profile' });
   }
 });
 
-/* ── Ensure customer_saved_addresses exists — called by every handler
-   below, not just GET, so POST/PUT/DELETE work even if GET was never
-   hit first in this process. ── */
-async function ensureSavedAddressesTable() {
-  await execute(`CREATE TABLE IF NOT EXISTS customer_saved_addresses (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    customer_id INT NOT NULL,
-    workshop_id INT NOT NULL,
-    label VARCHAR(100) NOT NULL,
-    contact_name VARCHAR(255),
-    contact_phone VARCHAR(50),
-    address_line1 VARCHAR(500) NOT NULL,
-    area VARCHAR(100),
-    city VARCHAR(100),
-    emirate VARCHAR(50) DEFAULT 'Dubai',
-    lat DECIMAL(10,7),
-    lng DECIMAL(10,7),
-    is_default TINYINT(1) DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (customer_id) REFERENCES customers(id)
-  )`).catch(() => { /* already exists */ });
-}
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ═══  RETIRED — the delivery product's merchant screens  ═════════════════════
+ * Creating, editing and cancelling orders, the saved-addresses book, the
+ * wallet / COD balance and the cash summary belonged to the courier product.
+ * A workshop job is opened at the counter (Steps 1–3) and cancelled by staff,
+ * so nothing calls these any more. The table customer_saved_addresses stays.
+ * Also gone: GET /work-orders/:id/service-status and GET /service-status/:query
+ * (replaced by GET /work-orders/:id and GET /service-status), and the parts
+ * list with its costs (GET /work-orders/:id/parts).
+ * ══════════════════════════════════════════════════════════════════════════════ */
 
-/* ── GET /saved-addresses — address book ─────────────────────── */
-router.get('/saved-addresses', async (req, res) => {
-  try {
-    await ensureSavedAddressesTable();
+const retired = message => (_req, res) => res.status(410).json({ success: false, code: 'MOVED', message });
+const BOOK_WITH_US = 'Jobs are opened by the workshop. Call or WhatsApp us to book your car in.';
 
-    const addresses = await query(
-      'SELECT * FROM customer_saved_addresses WHERE customer_id = ? AND workshop_id = ? ORDER BY is_default DESC, label ASC',
-      [req.customer.id, req.workshopId]
-    );
-    return res.json({ success: true, data: addresses });
-  } catch (err) {
-    console.error('[CustomerPortal] List addresses error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch addresses' });
-  }
-});
-
-/* ── POST /saved-addresses — add an address ──────────────────── */
-router.post('/saved-addresses', async (req, res) => {
-  try {
-    await ensureSavedAddressesTable();
-
-    const { label, contact_name, contact_phone, address_line1, area, city, emirate = 'Dubai', lat, lng, is_default } = req.body;
-    if (!label || !address_line1) {
-      return res.status(400).json({ success: false, message: 'Label and address required' });
-    }
-
-    if (is_default) {
-      await execute('UPDATE customer_saved_addresses SET is_default = 0 WHERE customer_id = ? AND workshop_id = ?',
-        [req.customer.id, req.workshopId]);
-    }
-
-    const result = await execute(
-      `INSERT INTO customer_saved_addresses (customer_id, workshop_id, label, contact_name, contact_phone, address_line1, area, city, emirate, lat, lng, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.customer.id, req.workshopId, label, contact_name || null, contact_phone || null,
-       address_line1, area || null, city || null, emirate, lat || null, lng || null, is_default ? 1 : 0]
-    );
-
-    const [addr] = await query('SELECT * FROM customer_saved_addresses WHERE id = ?', [result.insertId]);
-    return res.status(201).json({ success: true, data: addr });
-  } catch (err) {
-    console.error('[CustomerPortal] Save address error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to save address' });
-  }
-});
-
-/* ── PUT /saved-addresses/:id — update an address ─────────────── */
-router.put('/saved-addresses/:id', async (req, res) => {
-  try {
-    const [existing] = await query(
-      'SELECT * FROM customer_saved_addresses WHERE id = ? AND customer_id = ? AND workshop_id = ?',
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    if (!existing) return res.status(404).json({ success: false, message: 'Address not found' });
-
-    const { label, contact_name, contact_phone, address_line1, area, city, emirate, lat, lng, is_default } = req.body;
-    if (!label || !address_line1) {
-      return res.status(400).json({ success: false, message: 'Label and address required' });
-    }
-
-    if (is_default) {
-      await execute('UPDATE customer_saved_addresses SET is_default = 0 WHERE customer_id = ? AND workshop_id = ?',
-        [req.customer.id, req.workshopId]);
-    }
-
-    await execute(
-      `UPDATE customer_saved_addresses SET
-        label = ?, contact_name = ?, contact_phone = ?, address_line1 = ?,
-        area = ?, city = ?, emirate = ?, lat = ?, lng = ?, is_default = ?
-       WHERE id = ? AND customer_id = ? AND workshop_id = ?`,
-      [label, contact_name || null, contact_phone || null, address_line1,
-       area || null, city || null, emirate || 'Dubai', lat || null, lng || null,
-       is_default ? 1 : 0, req.params.id, req.customer.id, req.workshopId]
-    );
-
-    const [updated] = await query('SELECT * FROM customer_saved_addresses WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: updated });
-  } catch (err) {
-    console.error('[CustomerPortal] Update address error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to update address' });
-  }
-});
-
-/* ── DELETE /saved-addresses/:id ─────────────────────────────── */
-router.delete('/saved-addresses/:id', async (req, res) => {
-  try {
-    await execute(
-      'DELETE FROM customer_saved_addresses WHERE id = ? AND customer_id = ? AND workshop_id = ?',
-      [req.params.id, req.customer.id, req.workshopId]
-    );
-    return res.json({ success: true, message: 'Address deleted' });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to delete address' });
-  }
-});
+router.post('/work-orders', retired(BOOK_WITH_US));
+router.put('/work-orders/:id', retired(BOOK_WITH_US));
+router.delete('/work-orders/:id', retired('To cancel a job, please call or WhatsApp the workshop.'));
+router.get('/work-orders/:id/parts', retired('See the job card for what was done.'));
+router.get('/work-orders/:id/service-status', retired('Use GET /api/customer-portal/work-orders/:id.'));
+router.get('/wallet', retired('See Invoices & payments.'));
+router.get('/cash-summary', retired('See Invoices & payments.'));
+router.all(['/saved-addresses', '/saved-addresses/:id'], retired('Addresses are no longer kept in the portal.'));
 
 export default router;

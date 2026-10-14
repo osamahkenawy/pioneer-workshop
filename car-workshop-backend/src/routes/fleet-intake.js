@@ -31,7 +31,11 @@ import pool, { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { stripMarkupFields, clampTextFields } from '../lib/sanitize.js';
 import { logAudit } from '../lib/audit.js';
-import { notifyWorkOrderStatus } from '../lib/notify.js';
+import { notifyWorkOrderStatus, sendCustomNotification } from '../lib/notify.js';
+import { ensureMainJobCard, notifyGroups } from '../lib/workflow.js';
+import { requireCapability } from '../lib/roles.js';
+import { serviceStatusToken } from '../lib/tokens.js';
+import { payerTypeForClass, snapshotIntakeClass } from '../lib/crm-cycle.js';
 
 const IDENTITY = [
   'plate_number', 'plate_code', 'plate_emirate', 'make', 'model', 'color',
@@ -93,12 +97,18 @@ function validateSubmission(f) {
 /* Best-effort vehicle match, in confidence order. Never auto-assigns on a
  * weak match: an intake attached to the wrong car writes service history
  * onto a vehicle that was never here, and that is far more expensive to
- * unpick than asking an advisor to confirm. */
+ * unpick than asking an advisor to confirm.
+ *
+ * Every lookup — the VIN included — is limited to the link's own account.
+ * A VIN match across the whole workshop bound fleet requests to another
+ * customer's car (which then could never be converted) and told an
+ * anonymous link holder that car's plate, make and model. */
 async function findVehicleMatch(workshopId, customerId, f) {
   if (f.vin) {
     const [byVin] = await query(
-      'SELECT * FROM vehicles WHERE workshop_id = ? AND vin = ? AND is_active = 1 LIMIT 1',
-      [workshopId, f.vin]
+      `SELECT * FROM vehicles WHERE workshop_id = ? AND customer_id = ?
+         AND UPPER(REPLACE(vin, ' ', '')) = ? AND is_active = 1 LIMIT 1`,
+      [workshopId, customerId, String(f.vin).replace(/\s/g, '').toUpperCase()]
     );
     if (byVin) return { vehicle: byVin, matched_on: 'vin' };
   }
@@ -121,6 +131,65 @@ async function findVehicleMatch(workshopId, customerId, f) {
   return { vehicle: null, matched_on: null };
 }
 
+/* Staff only, never on the public side: the VIN is on file for a car of a
+ * DIFFERENT customer. Shown to the advisor as something to settle (the car
+ * changed hands, or one VIN was mistyped) — never stored as the match. */
+async function findVinConflict(workshopId, customerId, vin) {
+  if (!vin) return null;
+  const [other] = await query(
+    `SELECT v.id, v.plate_number, v.make, v.model, v.customer_id, c.full_name AS owner_name
+       FROM vehicles v LEFT JOIN customers c ON c.id = v.customer_id
+      WHERE v.workshop_id = ? AND v.customer_id <> ? AND v.is_active = 1
+        AND UPPER(REPLACE(v.vin, ' ', '')) = ? LIMIT 1`,
+    [workshopId, customerId, String(vin).replace(/\s/g, '').toUpperCase()]
+  );
+  return other || null;
+}
+
+/* Open job cards on a car — a fleet sending in a car that is already with us. */
+async function openWorkOrdersFor(workshopId, vehicleId, { days = null } = {}) {
+  if (!vehicleId) return [];
+  return query(
+    `SELECT id, work_order_number, status, created_at FROM work_orders
+      WHERE workshop_id = ? AND vehicle_id = ? AND status NOT IN ('completed', 'cancelled')
+        ${days ? 'AND created_at > DATE_SUB(NOW(), INTERVAL ? DAY)' : ''}
+      ORDER BY id DESC LIMIT 5`,
+    [workshopId, vehicleId, ...(days ? [days] : [])]
+  );
+}
+
+/* Coordinator links are for fleet accounts — the Fleet subcategory, internal
+ * or external (process Step 1). A walk-in, an insurer or a Pioneer asset
+ * account has no coordinator sending cars in. */
+const isFleetAccount = c => !!c && c.customer_subcategory === 'fleet';
+
+/* A link works while it is enabled, not expired, and its account is an
+ * active fleet account. A deactivated account's links stop with it. */
+function linkUsable(link) {
+  return !!link && !!link.is_active && !!link.customer_active && isFleetAccount(link)
+    && !(link.expires_at && new Date(link.expires_at) < new Date());
+}
+
+/* An expiry date entered as a day means the whole of that day: '2026-10-12'
+ * is stored as 2026-10-12 23:59:59, not midnight at its start. Returns
+ * { value } or { error } — an impossible date is a 400, not a 500. */
+function parseExpiry(raw) {
+  if (raw == null || String(raw).trim() === '') return { value: null };
+  const s = String(raw).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return { error: 'Enter the expiry as a date (YYYY-MM-DD).' };
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const cal = new Date(Date.UTC(y, mo - 1, d));
+  if (cal.getUTCFullYear() !== y || cal.getUTCMonth() !== mo - 1 || cal.getUTCDate() !== d) {
+    return { error: 'That expiry date does not exist.' };
+  }
+  const time = m[4] ? `${m[4]}:${m[5]}:${m[6] || '00'}` : '23:59:59';
+  if (m[4] && (Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6] || 0) > 59)) return { error: 'That expiry time does not exist.' };
+  const value = `${m[1]}-${m[2]}-${m[3]} ${time}`;
+  if (new Date(value.replace(' ', 'T')) < new Date()) return { error: 'The expiry date is in the past.' };
+  return { value };
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    PUBLIC ROUTER — no login. Mounted at /api/public/fleet-intake
    ═══════════════════════════════════════════════════════════════════════ */
@@ -130,7 +199,7 @@ async function loadLink(token) {
   if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
   const [link] = await query(
     `SELECT l.*, c.full_name AS customer_name, c.code AS customer_code,
-            c.customer_class, c.customer_subcategory,
+            c.customer_class, c.customer_subcategory, c.is_active AS customer_active,
             w.name AS workshop_name
        FROM fleet_intake_links l
        JOIN customers c ON c.id = l.customer_id
@@ -145,10 +214,10 @@ async function loadLink(token) {
 publicRouter.get('/:token', async (req, res) => {
   try {
     const link = await loadLink(req.params.token);
-    // One message for "no such link", "deactivated" and "expired". Telling
-    // an anonymous caller which of the three it is turns the endpoint into
-    // an oracle for probing valid tokens.
-    if (!link || !link.is_active || (link.expires_at && new Date(link.expires_at) < new Date())) {
+    // One message for "no such link", "deactivated", "expired" and "the
+    // account was closed". Telling an anonymous caller which it is turns
+    // the endpoint into an oracle for probing valid tokens.
+    if (!linkUsable(link)) {
       return res.status(404).json({ success: false, message: 'This link is no longer valid. Please ask your service contact for a new one.' });
     }
 
@@ -182,9 +251,10 @@ publicRouter.get('/:token', async (req, res) => {
 
 // POST /api/public/fleet-intake/:token — submit one vehicle
 publicRouter.post('/:token', async (req, res) => {
+  let conn;
   try {
     const link = await loadLink(req.params.token);
-    if (!link || !link.is_active || (link.expires_at && new Date(link.expires_at) < new Date())) {
+    if (!linkUsable(link)) {
       return res.status(404).json({ success: false, message: 'This link is no longer valid. Please ask your service contact for a new one.' });
     }
 
@@ -193,13 +263,40 @@ publicRouter.post('/:token', async (req, res) => {
     if (msg) return res.status(400).json({ success: false, message: msg });
 
     const { vehicle } = await findVehicleMatch(link.workshop_id, link.customer_id, f);
+    // A car we do not hold for this fleet is added as a new vehicle when the
+    // request is booked in, and a vehicle record needs its make and model —
+    // asked for here, where the coordinator knows them, rather than leaving
+    // the advisor with a request that cannot be booked in.
+    if (!vehicle && (!f.make || !f.model)) {
+      return res.status(400).json({ success: false, code: 'MAKE_MODEL_REQUIRED',
+        message: 'This vehicle is not on your fleet list yet — give its make and model too.' });
+    }
+
+    // Already with us: a car with an open job card from the last 30 days is
+    // in the workshop (older open cards are stale records, flagged to staff
+    // on the request instead of blocking the fleet).
+    const open = vehicle ? await openWorkOrdersFor(link.workshop_id, vehicle.id, { days: 30 }) : [];
+    if (open.length) {
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_BOOKED_IN',
+        message: `This vehicle is already booked in with us (job card ${open[0].work_order_number}). Call your service contact if this is a new problem.`,
+      });
+    }
+
+    // The duplicate check and the insert run under a lock on the link, so a
+    // double click — or two people in the same office sending the same
+    // breakdown at the same moment — gives one request, not two.
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    await conn.query('SELECT id FROM fleet_intake_links WHERE id = ? FOR UPDATE', [link.id]);
 
     // Guard against the same car being submitted twice — a coordinator
     // refreshing the page, or two people in the same office sending the same
     // breakdown. Matched on plate/VIN within the last 24 hours and still
     // unconverted, so a car that legitimately comes back next week is not
     // blocked.
-    const [recentDup] = await query(
+    const [[recentDup]] = await conn.query(
       `SELECT id, created_at FROM fleet_intake_requests
         WHERE workshop_id = ? AND customer_id = ?
           AND status IN ('submitted', 'accepted')
@@ -210,6 +307,7 @@ publicRouter.post('/:token', async (req, res) => {
       [link.workshop_id, link.customer_id, f.vin, f.plate_number]
     );
     if (recentDup) {
+      await conn.rollback();
       return res.status(409).json({
         success: false,
         code: 'ALREADY_SUBMITTED',
@@ -217,7 +315,7 @@ publicRouter.post('/:token', async (req, res) => {
       });
     }
 
-    const result = await execute(
+    const [result] = await conn.query(
       `INSERT INTO fleet_intake_requests
          (workshop_id, link_id, customer_id, vehicle_id,
           plate_number, plate_code, plate_emirate, make, model, year, color,
@@ -232,25 +330,41 @@ publicRouter.post('/:token', async (req, res) => {
        f.permit_id, f.submitted_by || link.contact_name, f.preferred_date]
     );
 
-    await execute(
+    await conn.query(
       'UPDATE fleet_intake_links SET last_used_at = NOW(), submission_count = submission_count + 1 WHERE id = ?',
       [link.id]
     );
+    await conn.commit();
+
+    const reference = `FI-${String(result.insertId).padStart(6, '0')}`;
+    // Step 2 → 3: the desk that books requests in is told one is waiting,
+    // instead of it sitting unseen until someone opens the Fleet Intake page.
+    // Fire and forget — a notification failure must not fail the fleet's submit.
+    notifyGroups(link.workshop_id, ['service_advisor', 'manager'], {
+      title: `Fleet request ${reference} · ${f.plate_number || f.fleet_code}`,
+      body: `${link.customer_name}: ${String(f.complaint).slice(0, 120)}`,
+      link: '/fleet-intake', icon: '🚚', type: 'fleet_intake_submitted',
+    }).catch(e => console.error('[FleetIntake] notify error:', e.message));
 
     // The reference is what the coordinator writes on their own paperwork,
     // so it has to come back on the response — not just a success tick.
+    // The match is always one of this fleet's own vehicles.
     return res.status(201).json({
       success: true,
       data: {
         id: result.insertId,
-        reference: `FI-${String(result.insertId).padStart(6, '0')}`,
-        matched_vehicle: vehicle ? { plate_number: vehicle.plate_number, make: vehicle.make, model: vehicle.model } : null,
+        reference,
+        matched_vehicle: vehicle && vehicle.customer_id === link.customer_id
+          ? { plate_number: vehicle.plate_number, make: vehicle.make, model: vehicle.model } : null,
       },
       message: 'Received. Our service team will confirm shortly.',
     });
   } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch { /* connection gone */ } }
     console.error('[FleetIntake] Public submit error:', err);
     return res.status(500).json({ success: false, message: 'Could not send this form. Please try again.' });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
@@ -259,6 +373,12 @@ publicRouter.post('/:token', async (req, res) => {
    ═══════════════════════════════════════════════════════════════════════ */
 const router = express.Router();
 router.use(authMiddleware);
+// Fleet intake is Step 2 desk work: issuing and disabling coordinator links,
+// reading their tokens, accepting, rejecting and booking requests in belong
+// to whoever opens job cards (Service Advisor, Supervisor, managers). A
+// Storekeeper or Team Leader switching off a fleet's channel, or copying a
+// coordinator's token, is not part of their job.
+router.use(requireCapability('job.open', 'Fleet intake is handled by the Service Advisor desk (or a manager).'));
 
 /* ── The queue ──────────────────────────────────────────────────────── */
 // GET /api/fleet-intake
@@ -343,7 +463,7 @@ router.get('/links', async (req, res) => {
   try {
     const rows = await query(
       `SELECT l.*, c.full_name AS customer_name, c.code AS customer_code,
-              c.customer_subcategory
+              c.customer_class, c.customer_subcategory, c.is_active AS customer_active
          FROM fleet_intake_links l
          JOIN customers c ON c.id = l.customer_id
         WHERE l.workshop_id = ?
@@ -351,9 +471,19 @@ router.get('/links', async (req, res) => {
       [req.workshopId]
     );
     const base = process.env.FRONTEND_URL || '';
+    // status says whether the coordinator can actually use it: an expired
+    // link, or one whose account was deactivated or is no longer a fleet
+    // account, no longer opens even though is_active is still 1.
+    const statusOf = r => (!r.is_active ? 'disabled'
+      : r.expires_at && new Date(r.expires_at) < new Date() ? 'expired'
+        : !r.customer_active ? 'account_inactive'
+          : !isFleetAccount(r) ? 'not_fleet' : 'active');
     return res.json({
       success: true,
-      data: rows.map(r => ({ ...r, url: `${base}/fleet-intake/${r.token}` })),
+      data: rows.map(r => ({
+        ...r, url: `${base}/fleet-intake/${r.token}`,
+        status: statusOf(r), is_expired: !!(r.expires_at && new Date(r.expires_at) < new Date()),
+      })),
     });
   } catch (err) {
     console.error('[FleetIntake] Links error:', err);
@@ -369,10 +499,19 @@ router.post('/links', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Choose the fleet account this link is for' });
     }
     const [customer] = await query(
-      'SELECT id, full_name, customer_class FROM customers WHERE id = ? AND workshop_id = ?',
+      'SELECT id, full_name, customer_class, customer_subcategory, is_active FROM customers WHERE id = ? AND workshop_id = ?',
       [customer_id, req.workshopId]
     );
     if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+    if (!isFleetAccount(customer)) {
+      return res.status(400).json({ success: false, code: 'NOT_FLEET_ACCOUNT',
+        message: `${customer.full_name} is not a fleet account. Coordinator links are for Fleet customers (internal or external).` });
+    }
+    if (!customer.is_active) {
+      return res.status(400).json({ success: false, code: 'CUSTOMER_INACTIVE', message: `${customer.full_name} is deactivated.` });
+    }
+    const expiry = parseExpiry(expires_at);
+    if (expiry.error) return res.status(400).json({ success: false, code: 'INVALID_EXPIRY', message: expiry.error });
 
     const token = crypto.randomBytes(24).toString('hex');
     const result = await execute(
@@ -383,7 +522,7 @@ router.post('/links', async (req, res) => {
        label ? String(label).slice(0, 150) : null,
        contact_name ? String(contact_name).slice(0, 150) : null,
        contact_phone ? String(contact_phone).slice(0, 50) : null,
-       /^\d{4}-\d{2}-\d{2}/.test(expires_at || '') ? expires_at : null,
+       expiry.value,
        req.user.id]
     );
 
@@ -396,7 +535,7 @@ router.post('/links', async (req, res) => {
     const base = process.env.FRONTEND_URL || '';
     return res.status(201).json({
       success: true,
-      data: { id: result.insertId, token, url: `${base}/fleet-intake/${token}` },
+      data: { id: result.insertId, token, url: `${base}/fleet-intake/${token}`, expires_at: expiry.value },
     });
   } catch (err) {
     console.error('[FleetIntake] Link create error:', err);
@@ -408,12 +547,17 @@ router.post('/links', async (req, res) => {
 router.patch('/links/:id', async (req, res) => {
   try {
     const [link] = await query(
-      'SELECT id FROM fleet_intake_links WHERE id = ? AND workshop_id = ?',
+      `SELECT l.id, c.full_name, c.customer_subcategory, c.is_active AS customer_active
+         FROM fleet_intake_links l JOIN customers c ON c.id = l.customer_id
+        WHERE l.id = ? AND l.workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
     if (!link) return res.status(404).json({ success: false, message: 'Link not found' });
 
     const isActive = req.body.is_active ? 1 : 0;
+    if (isActive && (!isFleetAccount(link) || !link.customer_active)) {
+      return res.status(400).json({ success: false, message: `${link.full_name} is ${link.customer_active ? 'not a fleet account' : 'deactivated'} — this link cannot be enabled.` });
+    }
     await execute('UPDATE fleet_intake_links SET is_active = ? WHERE id = ?', [isActive, link.id]);
     await logAudit({
       workshopId: req.workshopId, userId: req.user.id,
@@ -448,9 +592,25 @@ router.get('/:id', async (req, res) => {
     // Re-run the match at read time, not just at submit. A car whose VIN was
     // added to our records after the coordinator sent this in would otherwise
     // still show as unmatched, and the advisor would create a second vehicle.
-    const { vehicle, matched_on } = row.vehicle_id
-      ? { vehicle: (await query('SELECT * FROM vehicles WHERE id = ?', [row.vehicle_id]))[0] || null, matched_on: 'stored' }
-      : await findVehicleMatch(req.workshopId, row.customer_id, row);
+    // A stored match is reported on the basis it was made on (VIN, plate,
+    // unit code); 'stored' is left for a vehicle chosen by hand at booking-in.
+    // A stored vehicle that is not this account's (requests sent before the
+    // VIN match was scoped to the account) is not a match at all.
+    const fresh = await findVehicleMatch(req.workshopId, row.customer_id, row);
+    let vehicle = fresh.vehicle;
+    let matched_on = fresh.matched_on;
+    if (row.vehicle_id) {
+      const [stored] = await query('SELECT * FROM vehicles WHERE id = ? AND workshop_id = ?', [row.vehicle_id, req.workshopId]);
+      if (stored && stored.customer_id === row.customer_id) {
+        vehicle = stored;
+        matched_on = fresh.vehicle?.id === stored.id ? fresh.matched_on : 'stored';
+      }
+    }
+    // The VIN is on another customer's car: for the advisor to settle.
+    const vin_conflict = vehicle ? null : await findVinConflict(req.workshopId, row.customer_id, row.vin);
+    // The car is already with us on an open job card.
+    const open_work_orders = vehicle && row.status !== 'converted'
+      ? await openWorkOrdersFor(req.workshopId, vehicle.id) : [];
 
     // Where our record and their form disagree. This is the part an advisor
     // actually needs to look at: overwriting silently is how a fleet's own
@@ -472,7 +632,7 @@ router.get('/:id', async (req, res) => {
 
     return res.json({
       success: true,
-      data: { ...row, matched_vehicle: vehicle || null, matched_on, discrepancies },
+      data: { ...row, matched_vehicle: vehicle || null, matched_on: vehicle ? matched_on : null, discrepancies, vin_conflict, open_work_orders },
     });
   } catch (err) {
     console.error('[FleetIntake] Fetch error:', err);
@@ -514,7 +674,23 @@ router.post('/:id/review', async (req, res) => {
       newValue: { status: decision, plate_number: row.plate_number, vin: row.vin },
     });
 
-    return res.json({ success: true, message: decision === 'accepted' ? 'Accepted' : 'Rejected' });
+    // The reason goes back to the coordinator who sent it, quoting their
+    // reference — a rejection nobody at the fleet hears about fixes nothing.
+    let told = false;
+    if (decision === 'rejected' && row.link_id) {
+      const [link] = await query('SELECT contact_phone FROM fleet_intake_links WHERE id = ?', [row.link_id]);
+      const phone = link?.contact_phone && /\d{7,}/.test(String(link.contact_phone).replace(/\D/g, '')) ? link.contact_phone : null;
+      if (phone) {
+        const ref = `FI-${String(row.id).padStart(6, '0')}`;
+        sendCustomNotification({
+          channels: ['sms'], phone, tenantId: req.workshopId,
+          message: `Your request ${ref}${row.plate_number ? ` (${row.plate_number})` : ''} was not booked in: ${String(review_note).trim().slice(0, 300)}`,
+        }).catch(e => console.error('[FleetIntake] rejection notice:', e.message));
+        told = true;
+      }
+    }
+
+    return res.json({ success: true, message: decision === 'accepted' ? 'Accepted' : `Rejected${told ? ' — the coordinator has been sent the reason' : ''}`, coordinator_notified: told });
   } catch (err) {
     console.error('[FleetIntake] Review error:', err);
     return res.status(500).json({ success: false, message: 'Failed to record the decision' });
@@ -525,8 +701,11 @@ router.post('/:id/review', async (req, res) => {
  * POST /api/fleet-intake/:id/convert — turn a submission into a job card.
  *
  * Body (all optional):
- *   vehicle_id        — confirm the match, or pick a different vehicle
+ *   vehicle_id        — confirm the match, or pick a different vehicle of
+ *                       this fleet account
  *   create_vehicle    — true to add the submitted vehicle as a new record
+ *   make, model, year — for a new vehicle when the request has none (the
+ *                       coordinator left them blank); the request's own win
  *   update_vehicle    — true to write the submitted VIN/engine/unit code onto
  *                       the matched vehicle where ours is blank
  *   service_category, work_order_type, scheduled_at
@@ -536,7 +715,7 @@ router.post('/:id/review', async (req, res) => {
  * than a clean failure, because the queue then lies to whoever looks at it
  * next.
  */
-router.post('/:id/convert', async (req, res) => {
+router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
   // First transaction in the codebase — everything else runs statement by
   // statement through query()/execute(). A conversion writes to four tables
   // and must not be able to land partly, so it takes a connection of its own.
@@ -577,16 +756,29 @@ router.post('/:id/convert', async (req, res) => {
     } = req.body || {};
 
     const [[customer]] = await conn.query(
-      'SELECT id, full_name, phone, email FROM customers WHERE id = ? AND workshop_id = ?',
+      'SELECT id, full_name, phone, email, customer_class, customer_subcategory, is_active FROM customers WHERE id = ? AND workshop_id = ?',
       [row.customer_id, req.workshopId]
     );
     if (!customer) {
       await conn.rollback();
       return res.status(400).json({ success: false, message: 'The fleet account on this request no longer exists' });
     }
+    if (!customer.is_active) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, code: 'CUSTOMER_INACTIVE',
+        message: `${customer.full_name} is deactivated. Reactivate the account before booking its requests in.` });
+    }
 
-    /* ── Resolve the vehicle ── */
-    let vehId = vehicle_id || row.vehicle_id || null;
+    /* ── Resolve the vehicle ──
+     * A vehicle stored on the request that is not this account's (requests
+     * sent before the VIN match was scoped to the account) is ignored, not
+     * a dead end: the advisor matches or adds the car as for any other. */
+    let storedVeh = row.vehicle_id || null;
+    if (storedVeh && !vehicle_id) {
+      const [[own]] = await conn.query('SELECT id FROM vehicles WHERE id = ? AND customer_id = ?', [storedVeh, row.customer_id]);
+      if (!own) storedVeh = null;
+    }
+    let vehId = vehicle_id || storedVeh || null;
 
     if (vehId) {
       const [[veh]] = await conn.query(
@@ -598,9 +790,18 @@ router.post('/:id/convert', async (req, res) => {
         return res.status(400).json({ success: false, message: 'That vehicle does not belong to this fleet account' });
       }
     } else if (create_vehicle) {
+      // The request's make/model, else what the advisor enters at booking-in.
+      const clip = (v, n) => (v == null || String(v).trim() === '' ? null : String(v).trim().slice(0, n));
+      row.make = row.make || clip(req.body?.make, 100);
+      row.model = row.model || clip(req.body?.model, 100);
+      if (!row.year && req.body?.year) {
+        const y = parseInt(req.body.year, 10);
+        if (y >= 1900 && y <= 2100) row.year = y;
+      }
       if (!row.make || !row.model) {
         await conn.rollback();
-        return res.status(400).json({ success: false, message: 'Make and model are needed to add this vehicle. Edit the request or pick an existing vehicle.' });
+        return res.status(400).json({ success: false, code: 'MAKE_MODEL_REQUIRED',
+          message: 'Make and model are needed to add this vehicle. Enter them, or pick one of this fleet\'s vehicles instead.' });
       }
       // The VIN check is not repeated here: findVehicleMatch already looks up
       // by VIN first, so reaching this branch with a VIN we hold would mean
@@ -608,15 +809,22 @@ router.post('/:id/convert', async (req, res) => {
       // anyway, because an advisor can pass create_vehicle explicitly.
       if (row.vin) {
         const [[dup]] = await conn.query(
-          'SELECT id FROM vehicles WHERE workshop_id = ? AND vin = ? AND is_active = 1 LIMIT 1',
-          [req.workshopId, row.vin]
+          "SELECT id FROM vehicles WHERE workshop_id = ? AND UPPER(REPLACE(vin, ' ', '')) = ? AND is_active = 1 LIMIT 1",
+          [req.workshopId, String(row.vin).replace(/\s/g, '').toUpperCase()]
         );
         if (dup) {
           await conn.rollback();
+          // The VIN is on another customer's car (an own-fleet car would have
+          // matched). Not something to paper over with a second record: the
+          // car changed hands (move it to this account on the Vehicles page),
+          // or one of the two VINs is wrong.
+          const [[owner]] = await conn.query(
+            'SELECT v.plate_number, c.full_name FROM vehicles v LEFT JOIN customers c ON c.id = v.customer_id WHERE v.id = ?', [dup.id]);
           return res.status(409).json({
             success: false,
             code: 'VIN_DUPLICATE',
-            message: 'A vehicle with this VIN already exists. Match to it instead of creating a second record.',
+            message: `This VIN is already on file for ${owner?.plate_number || 'a vehicle'} (${owner?.full_name || 'another customer'}). ` +
+              'If the car now belongs to this fleet, move it to this account from the Vehicles page; otherwise correct the VIN with the fleet.',
             data: { vehicle_id: dup.id },
           });
         }
@@ -687,7 +895,6 @@ router.post('/:id/convert', async (req, res) => {
 
     const d = new Date();
     const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    const work_order_number = `WO-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
 
     // Their own reference is kept in the description, not just in a column:
     // it is the first thing the fleet quotes when they call to chase, and an
@@ -702,22 +909,45 @@ router.post('/:id/convert', async (req, res) => {
     if (row.submitted_by) notesParts.push(`Submitted by: ${row.submitted_by}`);
     notesParts.push(`Fleet intake FI-${String(row.id).padStart(6, '0')}`);
 
-    const [woIns] = await conn.query(
-      `INSERT INTO work_orders
-         (workshop_id, work_order_number, customer_id, vehicle_id, odometer_in,
-          intake_channel, fleet_intake_id, work_order_type, service_category,
-          customer_name, customer_phone, customer_email,
-          description, scheduled_at, status, service_status_token, notes)
-       VALUES (?, ?, ?, ?, ?, 'fleet_link', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-      [req.workshopId, work_order_number, row.customer_id, vehId, row.odometer,
-       row.id, _type, _cat,
-       customer.full_name, customer.phone, customer.email || null,
-       descParts.join(' '),
-       /^\d{4}-\d{2}-\d{2}/.test(scheduled_at || '') ? scheduled_at : (row.preferred_date || null),
-       crypto.randomBytes(16).toString('hex'),
-       notesParts.join(' | ')]
-    );
-    const workOrderId = woIns.insertId;
+    // Who hears about this job (the "order placed" message, the pickup call):
+    // the coordinator the link was issued to, else the account's own number
+    // when it has one (fleet accounts are often on file with '-'), else the
+    // driver the coordinator named.
+    const hasDigits = p => /\d{7,}/.test(String(p || '').replace(/\D/g, ''));
+    const [[link]] = row.link_id
+      ? await conn.query('SELECT contact_name, contact_phone FROM fleet_intake_links WHERE id = ?', [row.link_id]) : [[null]];
+    const contactPhone = [link?.contact_phone, customer.phone, row.driver_phone].find(hasDigits) || customer.phone || null;
+    if (link?.contact_name && hasDigits(link.contact_phone)) notesParts.push(`Coordinator: ${link.contact_name} (${link.contact_phone})`);
+
+    // Numbers are a random draw per day; a collision draws again.
+    let workOrderId = null; let work_order_number = null;
+    for (let attempt = 0; attempt < 6 && !workOrderId; attempt++) {
+      const number = `WO-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
+      try {
+        const [woIns] = await conn.query(
+          `INSERT INTO work_orders
+             (workshop_id, work_order_number, customer_id, vehicle_id, odometer_in,
+              intake_channel, fleet_intake_id, work_order_type, service_category,
+              customer_name, customer_phone, customer_email, payer_type,
+              description, scheduled_at, status, service_status_token, notes)
+           VALUES (?, ?, ?, ?, ?, 'fleet_link', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          [req.workshopId, number, row.customer_id, vehId, row.odometer,
+           row.id, _type, _cat,
+           customer.full_name, contactPhone, customer.email || null,
+           // A fleet account is billed on account (Step 1 classification).
+           payerTypeForClass(customer.customer_class, customer.customer_subcategory),
+           descParts.join(' '),
+           /^\d{4}-\d{2}-\d{2}/.test(scheduled_at || '') ? scheduled_at : (row.preferred_date || null),
+           serviceStatusToken(),
+           notesParts.join(' | ')]
+        );
+        workOrderId = woIns.insertId; work_order_number = number;
+      } catch (e) {
+        if (e.code !== 'ER_DUP_ENTRY' || !/work_order_number/.test(e.message)) throw e;
+      }
+    }
+    if (!workOrderId) throw new Error('Could not allocate a work order number');
+    await snapshotIntakeClass(workOrderId, { conn });
 
     await conn.query(
       'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
@@ -750,6 +980,8 @@ router.post('/:id/convert', async (req, res) => {
       newValue: { work_order_number, vehicle_id: vehId, odometer_in: row.odometer },
     }).catch(e => console.error('[FleetIntake] Audit error:', e.message));
 
+    await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id })
+      .catch(e => console.error('[FleetIntake] main job card:', e.message));
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
     notifyWorkOrderStatus({
       order: workOrder, status: 'pending', workshopId: req.workshopId, changedBy: req.user.id,

@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware, platformOwnerOnly, workshopOwnerOnly, generateToken } from '../middleware/auth.js';
+import { publicSignupGate } from '../lib/access.js';
 import crypto from 'crypto';
 
 const router = express.Router();
@@ -14,7 +15,7 @@ const router = express.Router();
  * Register a new workshop (Sign up)
  * Creates workshop, subscription, and admin user
  */
-router.post('/register', async (req, res) => {
+router.post('/register', publicSignupGate, async (req, res) => {
   try {
     const {
       company_name,
@@ -518,7 +519,7 @@ router.post('/licenses/validate', async (req, res) => {
 /**
  * Activate license for a workshop
  */
-router.post('/licenses/activate', async (req, res) => {
+router.post('/licenses/activate', publicSignupGate, async (req, res) => {
   try {
     const { license_key, company_name, email, password, full_name } = req.body;
 

@@ -1,167 +1,194 @@
 /* ══════════════════════════════════════════════════════════════
- * CustomerDashboard.jsx — Merchant Dashboard — Premium Modern
+ * CustomerDashboard.jsx — the portal's Home.
+ *
+ * "Action needed" first (GET /customer-portal/home):
+ *   1. Sign your vehicle inspection — a walk-around finished without the
+ *      customer at the car; signed in the portal, on the job card page.
+ *   2. Approve your estimate — the existing approval page
+ *      (/estimate-approval/:token); the customer is signed in and it is theirs.
+ *   3. Your car is ready for collection — with the amount due.
+ * Then their cars at the workshop, one ServiceStatusCard each.
  * ══════════════════════════════════════════════════════════════ */
-import { useState, useEffect, useContext } from 'react';
+import { useState, useEffect, useCallback, useContext } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { EditPencil, Page, Check, MapPin, Phone, WarningTriangle, Refresh, CheckCircle } from 'iconoir-react';
 import { CustomerAuthContext } from '../../context/CustomerAuthContext';
-import { Package, Wrench, CheckCircle, Clock, Plus, WarningTriangle, ArrowRight, Search, StatsUpSquare } from 'iconoir-react';
 import api from '../../lib/customerApi';
-import { StatCardSkeleton } from '../../components/Loader';
+import ServiceStatusCard, { fmtMoney, fmtWhen } from '../../components/service-status/ServiceStatusCard';
+import { PORTAL } from './portalPaths';
 import './CustomerPages.css';
 
+const vehicleText = v => [v?.plate, [v?.make, v?.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+
 export default function CustomerDashboard() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const { user, workshop } = useContext(CustomerAuthContext);
-  const cur = workshop?.currency || 'AED';
-  const [stats, setStats] = useState(null);
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await api.get('/customer-portal/stats');
-        if (res.success) setStats(res.data);
-        else setError('Failed to load dashboard data');
-      } catch { setError('Connection error'); }
-      setLoading(false);
-    })();
-  }, []);
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const res = await api.get('/customer-portal/home');
+      if (res.success) setData(res.data);
+      else setError(res.message || t('portal.load_failed', "We couldn't load your portal. Please try again."));
+    } catch {
+      setError(t('portal.network_error', 'Connection problem. Check your internet and try again.'));
+    }
+    setLoading(false);
+  }, [t]);
 
-  if (loading) {
-    return <div className="cp-page"><StatCardSkeleton count={4} /></div>;
-  }
+  useEffect(() => { load(); }, [load]);
 
-  const s = stats || {};
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const name = data?.customer?.name || user?.full_name || '';
+  const actions = data?.actions || { sign: [], approve: [], ready: [] };
+  const actionCount = actions.sign.length + actions.approve.length + actions.ready.length;
+  const jobs = data?.jobs || [];
+  const contact = jobs[0]?.workshop || (workshop?.phone ? { name: workshop.name, phone: workshop.phone } : null);
+  const cur = contact?.currency || workshop?.currency || 'AED';
 
   return (
     <div className="cp-page">
-      {error && <div className="ca-alert ca-alert-error" style={{ marginBottom: 16 }}><WarningTriangle width={16} height={16} /> {error}</div>}
-
-      {/* Welcome banner */}
-      <div className="cp-welcome-banner">
-        <div className="cp-welcome-content">
-          <p className="cp-welcome-greeting">{greeting},</p>
-          <h1 className="cp-welcome-title">{user?.full_name || 'Merchant'}</h1>
-          <p className="cp-welcome-sub">Here's your service overview for today</p>
-        </div>
-        <Link to="/merchant/create-order" className="cp-btn cp-btn-white">
-          <Plus width={18} height={18} /> New Work Order
-        </Link>
-      </div>
-
-      {/* KPI Cards */}
-      <div className="cp-kpi-grid">
-        <div className="cp-kpi-card cp-kpi-blue">
-          <div className="cp-kpi-icon"><Package width={26} height={26} /></div>
-          <div className="cp-kpi-data">
-            <span className="cp-kpi-value">{s.orders_today || 0}</span>
-            <span className="cp-kpi-label">Work Orders Today</span>
-          </div>
-        </div>
-        <div className="cp-kpi-card cp-kpi-orange">
-          <div className="cp-kpi-icon"><Wrench width={26} height={26} /></div>
-          <div className="cp-kpi-data">
-            <span className="cp-kpi-value">{s.in_progress || 0}</span>
-            <span className="cp-kpi-label">In Progress</span>
-          </div>
-        </div>
-        <div className="cp-kpi-card cp-kpi-green">
-          <div className="cp-kpi-icon"><CheckCircle width={26} height={26} /></div>
-          <div className="cp-kpi-data">
-            <span className="cp-kpi-value">{s.completed || 0}</span>
-            <span className="cp-kpi-label">Completed</span>
-          </div>
-        </div>
-        <div className="cp-kpi-card cp-kpi-red">
-          <div className="cp-kpi-icon"><WarningTriangle width={26} height={26} /></div>
-          <div className="cp-kpi-data">
-            <span className="cp-kpi-value">{s.cancelled || 0}</span>
-            <span className="cp-kpi-label">Cancelled</span>
-          </div>
+      <div className="cp-page-header">
+        <div>
+          <h1 className="cp-page-title">{name
+            ? t('portal.home.hello', 'Hello, {{name}}', { name })
+            : t('portal.home.hello_no_name', 'Hello')}</h1>
+          <p className="cp-page-sub">{t('portal.home.sub', 'Follow your car through the workshop.')}</p>
         </div>
       </div>
 
-      {/* Stats Row */}
-      <div className="cp-stats-row">
-        <div className="cp-stat-card">
-          <div className="cp-stat-card-header">
-            <h3 className="cp-stat-title">Work Order Summary</h3>
-            <Link to="/merchant/work-orders" className="cp-stat-link">View all <ArrowRight width={14} height={14} /></Link>
-          </div>
-          <div className="cp-stat-grid">
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.total_work_orders || 0}</span>
-              <span className="cp-stat-lbl">Total Work Orders</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.pending || 0}</span>
-              <span className="cp-stat-lbl">Pending</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.assigned || 0}</span>
-              <span className="cp-stat-lbl">Assigned</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.ready_for_pickup || 0}</span>
-              <span className="cp-stat-lbl">Ready for Pickup</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.cancelled || 0}</span>
-              <span className="cp-stat-lbl">Cancelled</span>
-            </div>
-          </div>
-        </div>
+      {loading && <div className="cp-loading" role="status"><span className="cp-spinner" aria-hidden="true" />{t('portal.loading', 'Loading…')}</div>}
 
-        <div className="cp-stat-card">
-          <div className="cp-stat-card-header">
-            <h3 className="cp-stat-title">Financial Overview</h3>
-            <Link to="/merchant/wallet" className="cp-stat-link">Wallet <ArrowRight width={14} height={14} /></Link>
-          </div>
-          <div className="cp-stat-grid">
-            <div className="cp-stat-item">
-              <span className="cp-stat-num cp-stat-currency">{cur} {Number(s.total_service_fees || 0).toLocaleString()}</span>
-              <span className="cp-stat-lbl">Total Service Fees</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num cp-stat-currency">{cur} {Number(s.total_cash || 0).toLocaleString()}</span>
-              <span className="cp-stat-lbl">Total Cash</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num cp-stat-currency">{cur} {Number(s.spend_this_month || 0).toLocaleString()}</span>
-              <span className="cp-stat-lbl">This Month</span>
-            </div>
-            <div className="cp-stat-item">
-              <span className="cp-stat-num">{s.orders_this_month || 0}</span>
-              <span className="cp-stat-lbl">Work Orders This Month</span>
-            </div>
+      {!loading && error && (
+        <div className="cp-alert cp-alert-error" role="alert">
+          <WarningTriangle width={18} height={18} aria-hidden="true" />
+          <div>
+            <p style={{ margin: 0 }}>{error}</p>
+            <button type="button" className="cp-btn cp-btn-outline" style={{ marginBlockStart: 8 }} onClick={load}>
+              <Refresh width={16} height={16} /> {t('portal.retry', 'Try again')}
+            </button>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Quick Actions */}
-      <div className="cp-quick-actions">
-        <h3 className="cp-section-title">Quick Actions</h3>
-        <div className="cp-action-grid">
-          <Link to="/merchant/create-order" className="cp-action-card">
-            <div className="cp-action-icon-wrap cp-action-orange"><Plus width={24} height={24} /></div>
-            <div>
-              <span className="cp-action-title">Book a Service</span>
-              <span className="cp-action-desc">New work order</span>
-            </div>
-          </Link>
-          <Link to="/merchant/service-status" className="cp-action-card">
-            <div className="cp-action-icon-wrap cp-action-green"><Search width={24} height={24} /></div>
-            <div>
-              <span className="cp-action-title">Track Service</span>
-              <span className="cp-action-desc">Real-time status</span>
-            </div>
-          </Link>
-        </div>
-      </div>
+      {!loading && data && (
+        <>
+          {/* ── Action needed ── */}
+          <section className="cp-section" aria-labelledby="cp-action-needed">
+            <h2 className="cp-section-title" id="cp-action-needed">
+              {t('portal.home.action_needed', 'Action needed')}
+              {actionCount > 0 && <span className="cp-count">{actionCount}</span>}
+            </h2>
+
+            {actionCount === 0 && (
+              <div className="cp-all-clear">
+                <CheckCircle width={20} height={20} aria-hidden="true" />
+                {t('portal.home.nothing_needed', 'Nothing needs you right now.')}
+              </div>
+            )}
+
+            {actions.sign.map(s => (
+              <div className="cp-action-item is-sign" key={`sign-${s.id}`}>
+                <span className="cp-action-icon"><EditPencil width={20} height={20} aria-hidden="true" /></span>
+                <div className="cp-action-body">
+                  <p className="cp-action-title">{t('portal.home.sign_title', 'Sign your vehicle inspection')}</p>
+                  <p className="cp-action-text">
+                    {s.type === 'joint'
+                      ? t('portal.home.sign_text_handover', 'The handover inspection of your {{vehicle}} (job card {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })
+                      : t('portal.home.sign_text_dropoff', 'The drop-off inspection of your {{vehicle}} (job card {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })}
+                  </p>
+                  <div className="cp-btn-row">
+                    <Link className="cp-btn cp-btn-primary" to={`${PORTAL.job(s.work_order_id)}?sign=${s.id}#inspection-${s.id}`}>
+                      <EditPencil width={16} height={16} /> {t('portal.home.sign_now', 'Check and sign')}
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {actions.approve.map(e => (
+              <div className="cp-action-item is-approve" key={`est-${e.id}`}>
+                <span className="cp-action-icon"><Page width={20} height={20} aria-hidden="true" /></span>
+                <div className="cp-action-body">
+                  <p className="cp-action-title">{t('portal.home.approve_title', 'Approve your estimate')}</p>
+                  <p className="cp-action-text">
+                    {t('portal.home.approve_text', 'Estimate {{number}} for {{amount}}, sent {{date}}{{plate}}. Choose which work to go ahead with.', {
+                      number: e.estimate_number, amount: fmtMoney(e.total, cur, lang), date: fmtWhen(e.sent_at, lang, { time: false }),
+                      plate: e.vehicle_plate ? ` · ${e.vehicle_plate}` : '',
+                    })}
+                  </p>
+                  <div className="cp-btn-row">
+                    {e.approval_path && (
+                      <a className="cp-btn cp-btn-primary" href={e.approval_path}>
+                        {t('portal.home.approve_now', 'Review & approve')}
+                      </a>
+                    )}
+                    {e.work_order_id && (
+                      <Link className="cp-btn cp-btn-outline" to={PORTAL.job(e.work_order_id)}>{t('portal.view_job', 'View job card')}</Link>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {actions.ready.map(r => (
+              <div className="cp-action-item is-ready" key={`ready-${r.work_order_id}`}>
+                <span className="cp-action-icon"><Check width={20} height={20} aria-hidden="true" /></span>
+                <div className="cp-action-body">
+                  <p className="cp-action-title">{t('portal.home.ready_title', 'Your car is ready for collection')}</p>
+                  <p className="cp-action-text">
+                    {vehicleText(r.vehicle)}
+                    {r.invoice && (r.invoice.on_account
+                      ? ` — ${t('portal.home.on_account', 'billed to your account')}`
+                      : r.invoice.balance > 0
+                        ? ` — ${t('portal.home.amount_due', 'amount due {{amount}}', { amount: fmtMoney(r.invoice.balance, cur, lang) })}`
+                        : ` — ${t('portal.home.paid', 'paid')}`)}
+                  </p>
+                  <div className="cp-btn-row">
+                    <Link className="cp-btn cp-btn-primary" to={PORTAL.job(r.work_order_id)}>{t('portal.view_job', 'View job card')}</Link>
+                    {contact?.map_url && (
+                      <a className="cp-btn cp-btn-outline" href={contact.map_url} target="_blank" rel="noopener noreferrer">
+                        <MapPin width={16} height={16} /> {t('serviceStatus.directions', 'Get directions')}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </section>
+
+          {/* ── Cars at the workshop ── */}
+          <section className="cp-section" aria-labelledby="cp-at-workshop">
+            <h2 className="cp-section-title" id="cp-at-workshop">{t('portal.home.at_workshop', 'Your cars at the workshop')}</h2>
+            {jobs.length === 0 ? (
+              <div className="cp-empty">
+                <p>{t('portal.home.no_open_jobs', "No open job cards. When your car is with us, you'll follow it here.")}</p>
+                <Link className="cp-btn cp-btn-outline" to={PORTAL.jobs}>{t('portal.home.past_jobs', 'See past job cards')}</Link>
+              </div>
+            ) : (
+              <div className="cp-list cp-list-2">
+                {jobs.map(j => <ServiceStatusCard key={j.work_order_id} status={j} variant="compact" to={PORTAL.job(j.work_order_id)} />)}
+              </div>
+            )}
+          </section>
+
+          {contact?.phone && (
+            <section className="cp-card">
+              <h2 className="cp-card-title">{t('serviceStatus.contact', 'Contact us')}</h2>
+              <p style={{ margin: 0, color: '#475569' }}>{contact.name}{contact.address ? ` · ${contact.address}` : ''}</p>
+              <div className="cp-btn-row">
+                <a className="cp-btn cp-btn-outline" href={`tel:${String(contact.phone).replace(/[^\d+]/g, '')}`}>
+                  <Phone width={16} height={16} /> <bdi dir="ltr">{contact.phone}</bdi>
+                </a>
+              </div>
+            </section>
+          )}
+        </>
+      )}
     </div>
   );
 }

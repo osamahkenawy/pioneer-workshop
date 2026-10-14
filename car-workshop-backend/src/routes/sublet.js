@@ -89,7 +89,7 @@ router.post('/', async (req, res) => {
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [req.workshopId, sublet_number, job_card_id, work_order_id || null,
        supplier_name, supplier_contact || null, description,
-       parseFloat(estimated_cost || 0), payer_direction, notes || null, req.userId]
+       parseFloat(estimated_cost || 0), payer_direction, notes || null, req.user?.id]
     );
 
     // Post estimated sublet cost to WIP
@@ -98,11 +98,11 @@ router.post('/', async (req, res) => {
         `INSERT INTO wip_ledger (workshop_id, job_card_id, work_order_id, entry_type, amount, description, posted_by)
          VALUES (?, ?, ?, 'sublet_charge', ?, ?, ?)`,
         [req.workshopId, job_card_id, work_order_id || null,
-         parseFloat(estimated_cost), `Sublet: ${supplier_name} - ${description}`, req.userId]
+         parseFloat(estimated_cost), `Sublet: ${supplier_name} - ${description}`, req.user?.id]
       );
     }
 
-    await logAudit(req.workshopId, req.userId, 'CREATE', 'sublet_orders', result.insertId, null, { sublet_number, supplier_name });
+    await logAudit(req.workshopId, req.user?.id, 'CREATE', 'sublet_orders', result.insertId, null, { sublet_number, supplier_name });
     res.status(201).json({ success: true, id: result.insertId, sublet_number });
   } catch (err) {
     console.error('POST /sublet error:', err);
@@ -146,12 +146,12 @@ router.patch('/:id/status', async (req, res) => {
           `INSERT INTO wip_ledger (workshop_id, job_card_id, work_order_id, entry_type, amount, description, posted_by)
            VALUES (?, ?, ?, 'sublet_charge', ?, ?, ?)`,
           [req.workshopId, sub.job_card_id, sub.work_order_id, diff,
-           `Sublet cost adjustment: ${sub.supplier_name}`, req.userId]
+           `Sublet cost adjustment: ${sub.supplier_name}`, req.user?.id]
         );
       }
     }
 
-    await logAudit(req.workshopId, req.userId, 'STATUS_CHANGE', 'sublet_orders', req.params.id, sub.status, { new_status: status });
+    await logAudit(req.workshopId, req.user?.id, 'STATUS_CHANGE', 'sublet_orders', req.params.id, sub.status, { new_status: status });
     res.json({ success: true, message: `Sublet ${status}` });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to update sublet status' });
@@ -228,7 +228,7 @@ proformaRouter.post('/', async (req, res) => {
        parseFloat(warranty_share || 0), parseFloat(goodwill_share || 0),
        insurance_company || null, insurance_claim_ref || null,
        parseFloat(insurance_approved_amount || 0), parseFloat(excess_amount || 0),
-       valid_until || null, notes || null, req.userId]
+       valid_until || null, notes || null, req.user?.id]
     );
 
     // Record VAT transaction (UAE FTA, req 95)
@@ -241,7 +241,7 @@ proformaRouter.post('/', async (req, res) => {
        customer_name || null, taxable, vatRate, vat_amt, total]
     );
 
-    await logAudit(req.workshopId, req.userId, 'CREATE', 'proforma_invoices', result.insertId, null, { proforma_number, total });
+    await logAudit(req.workshopId, req.user?.id, 'CREATE', 'proforma_invoices', result.insertId, null, { proforma_number, total });
     res.status(201).json({ success: true, id: result.insertId, proforma_number, total_amount: total });
   } catch (err) {
     console.error('POST /proforma error:', err);
@@ -269,7 +269,7 @@ proformaRouter.patch('/:id/payment', async (req, res) => {
       [newPaid, payment_method || null, payment_reference || null, newStatus, req.params.id, req.workshopId]
     );
 
-    await logAudit(req.workshopId, req.userId, 'PAYMENT', 'proforma_invoices', req.params.id, null, { amount_paid, newPaid });
+    await logAudit(req.workshopId, req.user?.id, 'PAYMENT', 'proforma_invoices', req.params.id, null, { amount_paid, newPaid });
     res.json({ success: true, message: 'Payment recorded', payment_status: newStatus, total_paid: newPaid });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to record payment' });
@@ -342,12 +342,23 @@ gatePassRouter.post('/', async (req, res) => {
 
     // Verify payment confirmed
     let payment_confirmed = 0;
+    // The document must belong to this workshop AND to this job: any paid
+    // proforma used to release any vehicle, and the invoice branch read
+    // invoices.payment_status, which does not exist (the column is status).
+    const [payJob] = await query('SELECT work_order_id FROM job_cards WHERE id = ? AND workshop_id = ?', [job_card_id, req.workshopId]);
+    const jobWorkOrderId = work_order_id || payJob?.work_order_id || null;
     if (proforma_id) {
-      const [pf] = await query('SELECT payment_status FROM proforma_invoices WHERE id = ?', [proforma_id]);
+      const [pf] = await query(
+        'SELECT payment_status FROM proforma_invoices WHERE id = ? AND workshop_id = ? AND (job_card_id = ? OR work_order_id = ?)',
+        [proforma_id, req.workshopId, job_card_id, jobWorkOrderId]
+      );
       payment_confirmed = pf?.payment_status === 'paid' ? 1 : 0;
     } else if (invoice_id) {
-      const [inv] = await query('SELECT payment_status FROM invoices WHERE id = ?', [invoice_id]);
-      payment_confirmed = ['paid','partial'].includes(inv?.payment_status) ? 1 : 0;
+      const [inv] = await query(
+        'SELECT status FROM invoices WHERE id = ? AND workshop_id = ? AND work_order_id = ?',
+        [invoice_id, req.workshopId, jobWorkOrderId]
+      );
+      payment_confirmed = ['paid', 'partially_paid'].includes(inv?.status) ? 1 : 0;
     }
 
     // Verify QC passed
@@ -365,7 +376,7 @@ gatePassRouter.post('/', async (req, res) => {
       [req.workshopId, gate_pass_number, job_card_id, work_order_id || null,
        invoice_id || null, proforma_id || null, customer_id || null, customer_name || null,
        vehicle_id || null, vehicle_plate || null, odometer_out || null,
-       payment_confirmed, qc_confirmed, req.userId,
+       payment_confirmed, qc_confirmed, req.user?.id,
        payment_confirmed, qc_confirmed, notes || null]
     );
 
@@ -379,7 +390,7 @@ gatePassRouter.post('/', async (req, res) => {
       );
     }
 
-    await logAudit(req.workshopId, req.userId, 'CREATE', 'gate_passes', result.insertId, null,
+    await logAudit(req.workshopId, req.user?.id, 'CREATE', 'gate_passes', result.insertId, null,
       { gate_pass_number, payment_confirmed, qc_confirmed, status });
 
     res.status(201).json({
@@ -424,10 +435,10 @@ gatePassRouter.patch('/:id/release', async (req, res) => {
       `UPDATE gate_passes SET status = 'released', released_at = NOW(), released_by = ?,
        customer_signature = COALESCE(?, customer_signature)
        WHERE id = ?`,
-      [req.userId, customer_signature || null, req.params.id]
+      [req.user?.id, customer_signature || null, req.params.id]
     );
 
-    await logAudit(req.workshopId, req.userId, 'RELEASE', 'gate_passes', req.params.id, 'pending', { status: 'released' });
+    await logAudit(req.workshopId, req.user?.id, 'RELEASE', 'gate_passes', req.params.id, 'pending', { status: 'released' });
     res.json({ success: true, message: 'Vehicle released via gate pass' });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to release gate pass' });

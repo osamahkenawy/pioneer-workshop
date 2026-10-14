@@ -10,10 +10,12 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { onEnquiryCreated, findCustomerByContact, enquiryContactMethods } from '../lib/crm-cycle.js';
 import { query, execute } from '../lib/database.js';
 import { sendEmail, buildEmailTemplate, getWorkshopBranding, getLogoCidAttachment } from '../lib/email.js';
 import { config } from '../config.js';
 import { provisioningLimiter, registrationLimiter, publicEnquiryLimiter } from '../lib/rate-limits.js';
+import { publicSignupGate } from '../lib/access.js';
 import { stripMarkup, clampText } from '../lib/sanitize.js';
 
 const router = Router();
@@ -150,7 +152,7 @@ router.post('/contact', provisioningLimiter, async (req, res) => {
    POST /start-trial — Free trial signup
    Auto-provisions: Workshop → Admin User → Subscription → Welcome Email
    ═══════════════════════════════════════════ */
-router.post('/start-trial', provisioningLimiter, async (req, res) => {
+router.post('/start-trial', publicSignupGate, provisioningLimiter, async (req, res) => {
   try {
     const { firstName, lastName, email, companyName, phone, planSlug, estimatedDeliveries, password } = req.body;
 
@@ -393,7 +395,7 @@ async function sendContactConfirmationEmail({ firstName, lastName, email, subjec
    Creates: Workshop → Admin User → Subscription → Verification Token
    Sends: Verification email only (welcome email sent after verification)
    ═══════════════════════════════════════════════════════════════ */
-router.post('/signup', registrationLimiter, async (req, res) => {
+router.post('/signup', publicSignupGate, registrationLimiter, async (req, res) => {
   try {
     const {
       // Step 1 — Company Info
@@ -593,7 +595,7 @@ router.get('/verify-email', async (req, res) => {
       `SELECT u.id, u.workshop_id, u.email, u.full_name, u.email_verified, u.email_verification_expires
        FROM users u
        WHERE u.email_verification_token = ? LIMIT 1`,
-      [token]
+      [String(token)]  // never an object: it would format into a match-anything condition
     );
 
     if (!users?.length) {
@@ -839,7 +841,7 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
 
     const d = new Date();
     const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    const enquiryNumber = `ENQ-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
+    let enquiryNumber = null;
 
     const vehicleDescription = [vehicle.make, vehicle.model, vehicle.year]
       .filter(v => !blank(v)).map(v => String(v).trim()).join(' ') || null;
@@ -847,44 +849,61 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     const cleanPhone = blank(phone) ? null : stripMarkup(String(phone).trim(), 32);
     const cleanEmail = blank(email) ? null : stripMarkup(String(email).trim(), 190);
 
-    // Attach to an existing customer when we recognise them.
-    let known = null;
-    if (cleanPhone) {
-      [known] = await query('SELECT id FROM customers WHERE workshop_id = ? AND phone = ? LIMIT 1', [workshopId, cleanPhone]);
-    }
-    if (!known && cleanEmail) {
-      [known] = await query('SELECT id FROM customers WHERE workshop_id = ? AND email = ? LIMIT 1', [workshopId, cleanEmail]);
-    }
+    // Attach to an existing customer when we recognise them: an active one,
+    // whatever format the number was typed in (050…, +97150…, spaces).
+    const knownId = await findCustomerByContact({ workshopId, phone: cleanPhone, email: cleanEmail, name });
+    const known = knownId ? { id: knownId } : null;
 
-    const result = await execute(
-      `INSERT INTO enquiries
-         (workshop_id, enquiry_number, external_reference, customer_id,
-          contact_name, contact_phone, contact_email,
-          vehicle_description, vehicle_plate,
-          enquiry_type, description,
-          source_channel, source_detail, contact_method,
-          branch, service_requested, preferred_date,
-          intake_origin, raw_payload, status, created_by)
-       -- intake_origin is enum('internal','api'); this arrives over the API.
-       -- source_detail plus contact_method='website_form' identify it as the
-       -- public form rather than a keyed server-to-server caller.
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
-      [
-        workshopId, enquiryNumber, extRef, known ? known.id : null,
-        stripMarkup(String(name).trim()), cleanPhone, cleanEmail,
-        stripMarkup(vehicleDescription, 255),
-        blank(vehicle.plateNumber) ? null : stripMarkup(String(vehicle.plateNumber).trim(), 64),
-        mapEnquiryType(service),
-        blank(note) ? null : clampText(String(note).trim()),
-        mapSourceChannel(source),
-        blank(source) ? null : stripMarkup(String(source).trim(), 120),
-        'website_form',
-        blank(branch) ? null : stripMarkup(String(branch).trim(), 120),
-        blank(service) ? null : stripMarkup(String(service).trim(), 190),
-        blank(preferredDate) ? null : String(preferredDate).trim(),
-        JSON.stringify(b),
-      ]
-    );
+    // A lead from Instagram / Facebook / TikTok… arrives through the website
+    // form but came from social media (process Step 2's third channel). It is
+    // recorded as 'social' once the enquiries table has that contact method;
+    // until then it stays 'website_form' with the platform in source_detail.
+    const social = /insta|facebook|\bfb\b|meta|tiktok|snap|twitter|\bx\.com|linkedin|youtube|social/i.test(String(source || ''));
+    const contactMethod = social && (await enquiryContactMethods()).includes('social') ? 'social' : 'website_form';
+
+    // Enquiry numbers are a random draw per day; a collision draws again.
+    let result;
+    for (let attempt = 0; attempt < 6 && !result; attempt++) {
+      enquiryNumber = `ENQ-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
+      try {
+        result = await execute(
+          `INSERT INTO enquiries
+             (workshop_id, enquiry_number, external_reference, customer_id,
+              contact_name, contact_phone, contact_email,
+              vehicle_description, vehicle_plate,
+              enquiry_type, description,
+              source_channel, source_detail, contact_method,
+              branch, service_requested, preferred_date,
+              intake_origin, raw_payload, status, created_by)
+           -- intake_origin is enum('internal','api'); this arrives over the API.
+           -- source_detail plus contact_method='website_form' (or 'social') identify
+           -- it as the public form rather than a keyed server-to-server caller.
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
+          [
+            workshopId, enquiryNumber, extRef, known ? known.id : null,
+            stripMarkup(String(name).trim()), cleanPhone, cleanEmail,
+            stripMarkup(vehicleDescription, 255),
+            blank(vehicle.plateNumber) ? null : stripMarkup(String(vehicle.plateNumber).trim(), 30),
+            mapEnquiryType(service),
+            blank(note) ? null : clampText(String(note).trim()),
+            mapSourceChannel(source),
+            blank(source) ? null : stripMarkup(String(source).trim(), 120),
+            contactMethod,
+            blank(branch) ? null : stripMarkup(String(branch).trim(), 120),
+            blank(service) ? null : stripMarkup(String(service).trim(), 190),
+            blank(preferredDate) ? null : String(preferredDate).trim(),
+            JSON.stringify(b),
+          ]
+        );
+      } catch (e) {
+        if (e.code !== 'ER_DUP_ENTRY' || !/enquiry_number/.test(e.message)) throw e;
+      }
+    }
+    if (!result) throw new Error('Could not allocate an enquiry number');
+
+    // Follow up: the website lead lands as a call-back task.
+    const [enqRow] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
+    await onEnquiryCreated(enqRow);
 
     return res.status(201).json({
       success: true,

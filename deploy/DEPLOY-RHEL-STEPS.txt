@@ -145,15 +145,15 @@ STEP 7 — Install MySQL 8
   -- 7e. Set a new root password (replace TMP_PASS with the password from 7d):
 
     mysql -u root -p'TMP_PASS' --connect-expired-password -e \
-      "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Root@12345'; FLUSH PRIVILEGES;"
+      "ALTER USER 'root'@'localhost' IDENTIFIED BY 'CHANGE_ME_DB_PASSWORD'; FLUSH PRIVILEGES;"
 
     NOTE: MySQL 8 requires a strong password (uppercase + number + symbol).
-          Password used: Root@12345
+          Password used: CHANGE_ME_DB_PASSWORD
           Change it to something stronger in production.
 
   -- 7f. Test the new password:
 
-    mysql -u root -p'Root@12345' -e "SHOW DATABASES;"
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' -e "SHOW DATABASES;"
 
 ================================================================================
 STEP 8 — Create app directories
@@ -193,10 +193,10 @@ STEP 9 — Deploy Backend
     DB_HOST=localhost
     DB_PORT=3306
     DB_USER=root
-    DB_PASSWORD=Root@12345
+    DB_PASSWORD=CHANGE_ME_DB_PASSWORD
     DB_NAME=car_workshop
 
-    JWT_SECRET=rhel-staging-jwt-secret-change-before-go-live
+    JWT_SECRET=GENERATE_WITH__openssl_rand_-hex_32
     JWT_EXPIRES_IN=7d
     MECHANIC_ACCESS_TTL_SHORT=12h
     MECHANIC_REFRESH_TTL_DAYS=30
@@ -218,20 +218,20 @@ STEP 9 — Deploy Backend
 
   -- 9e. Create the database:
 
-    mysql -u root -p'Root@12345' -e "CREATE DATABASE IF NOT EXISTS car_workshop;"
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' -e "CREATE DATABASE IF NOT EXISTS car_workshop;"
 
   -- 9f. Run all DB migrations (in order):
 
-    mysql -u root -p'Root@12345' car_workshop \
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' car_workshop \
       < /var/www/car-workshop/backend/src/migrations/car_workshop.sql
 
-    mysql -u root -p'Root@12345' car_workshop \
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' car_workshop \
       < /var/www/car-workshop/backend/src/migrations/post/00_schema_patches.sql
 
-    mysql -u root -p'Root@12345' car_workshop \
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' car_workshop \
       < /var/www/car-workshop/backend/src/migrations/post/01_seed_countries.sql
 
-    mysql -u root -p'Root@12345' car_workshop \
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' car_workshop \
       < /var/www/car-workshop/backend/src/migrations/post/02_sow_schema.sql
 
   -- 9g. Start the backend with PM2:
@@ -392,7 +392,7 @@ UPDATING THE SERVER IN THE FUTURE
     cd /var/www/car-workshop/backend
     git fetch origin && git reset --hard origin/main
     npm install
-    mysql -u root -p'Root@12345' car_workshop \
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' car_workshop \
       < src/migrations/post/02_sow_schema.sql 2>/dev/null || true
     pm2 restart car-workshop-backend
     pm2 logs car-workshop-backend --lines 20
@@ -424,7 +424,7 @@ TROUBLESHOOTING
 
   MySQL connection refused:
     sudo systemctl status mysqld
-    mysql -u root -p'Root@12345' -e "SHOW DATABASES;"
+    mysql -u root -p'CHANGE_ME_DB_PASSWORD' -e "SHOW DATABASES;"
 
   Port not open:
     sudo firewall-cmd --list-all

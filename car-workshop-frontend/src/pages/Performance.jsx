@@ -1,13 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  StatsUpSquare, DeliveryTruck, Clock, Medal, StarSolid,
+  StatsUpSquare, Wrench, Clock, Medal, StarSolid,
   Timer, Check, Xmark, StatUp, StatDown,
   Refresh, Download
 } from 'iconoir-react';
 import api from '../lib/api';
 import { StatCardSkeleton, ChartSkeleton } from '../components/Loader';
+import { woFilterLabel, woTone } from '../lib/statusLabels';
+import { downloadCsv } from '../utils/csv';
 import './Performance.css';
 import { useTranslation } from 'react-i18next';
+
+// The stored status whose colour each status bar borrows ("Waiting" uses
+// the slate of "Checked in").
+const BAR_TONE_STATUS = {
+  closed: 'completed', in_work: 'in_progress', quality_check: 'inspection',
+  ready: 'ready_for_pickup', waiting: 'pending', cancelled: 'cancelled',
+};
 
 const PERIOD_OPTIONS = [
   { value: 'today', labelKey: 'performance.period_today' },
@@ -75,8 +84,35 @@ export default function Performance() {
   useEffect(() => { load(); }, [load]);
 
   const kpis = data?.kpis || {};
-  const mechanicPerf = data?.mechanics || [];
+  // /reports/performance sends the scorecards as `drivers` (with driver_id);
+  // reading only `mechanics` left the Scorecards tab empty.
+  const mechanicPerf = (data?.mechanics || data?.drivers || [])
+    .map(d => ({ ...d, mechanic_id: d.mechanic_id ?? d.driver_id }));
   const slaTarget = kpis.slaTargetHours || 24;
+
+  // Status bars in the workshop's words (lib/statusLabels.js, WO_FILTERS
+  // keys). The report counts courier-era buckets: delivered = completed,
+  // in_transit = in_progress, failed = cancelled. "Waiting" is every job
+  // not yet started (checked in, inspected, approved or assigned), so it is
+  // what is left of the total.
+  const statusBars = (() => {
+    const counted = {
+      closed: kpis.delivered || 0,
+      in_work: kpis.in_transit || 0,
+      quality_check: kpis.inspection || 0,
+      ready: kpis.ready_for_pickup || 0,
+      cancelled: kpis.failed || 0,
+    };
+    const accounted = Object.values(counted).reduce((a, b) => a + b, 0);
+    const waiting = Math.max(kpis.pending || 0, (kpis.total || 0) - accounted);
+    return ['closed', 'in_work', 'quality_check', 'ready', 'waiting', 'cancelled'].map(key => ({
+      key,
+      label: woFilterLabel(t, key),
+      count: key === 'waiting' ? waiting : counted[key],
+      color: woTone(BAR_TONE_STATUS[key]).color,
+    }));
+  })();
+  const barMax = Math.max(1, ...statusBars.map(b => b.count));
 
   const gradeClass = (pct) => pct >= 85 ? 'excellent' : pct >= 60 ? 'good' : 'poor';
   const gradeLabel = (pct) => pct >= 85 ? t('performance.grade_excellent') : pct >= 60 ? t('performance.grade_good') : t('performance.grade_needs_improvement');
@@ -88,17 +124,19 @@ export default function Performance() {
     return `${(h/24).toFixed(1)}d`;
   };
 
+  // Technician scorecards. No courier columns (Vehicle, Delivered):
+  // Jobs = job cards assigned in the period, Completed = closed ones,
+  // Reworks = failed quality checks, when the report sends them.
   const exportCSV = () => {
     if (!mechanicPerf.length) return;
-    const headers = 'Rank,Mechanic,Phone,Vehicle,Total,Delivered,Failed,Success Rate,On-Time %,Avg Time,Rating,Grade';
-    const rows = mechanicPerf.map((d, i) =>
-      `${i+1},"${d.name}","${d.phone || ''}","${d.vehicle_type || ''}",${d.total},${d.delivered},${d.failed},${d.successRate}%,${d.onTimePct}%,${formatHours(d.avgHours)},${d.rating},${d.grade}`
-    );
-    const blob = new Blob([headers + '\n' + rows.join('\n')], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `mechanic-performance-${period}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    const headers = ['Rank', 'Technician', 'Phone', 'Jobs', 'Completed', 'Cancelled', 'Reworks', 'Completion %', 'On-time %', 'Avg time', 'Rating', 'Grade'];
+    const rows = mechanicPerf.map((d, i) => [
+      i + 1, d.name, d.phone || '', d.total, d.delivered, d.failed,
+      d.reworks ?? d.rework_count ?? '',
+      d.successRate, d.onTimePct, formatHours(d.avgHours), d.rating, d.grade,
+    ]);
+    // csvCell quotes and neutralises spreadsheet formulas (SR-15).
+    downloadCsv(`technician-performance-${period}.csv`, headers, rows);
   };
 
   if (loading) return <div className="perf-page"><StatCardSkeleton count={4} /><ChartSkeleton height={200} /></div>;
@@ -209,7 +247,7 @@ export default function Performance() {
       <div className="perf-tabs">
         {[
           { key: 'overview', label: t('performance.tabs.sla'), Icon: StatsUpSquare },
-          { key: 'mechanics', label: t('performance.tabs.scorecards'), Icon: DeliveryTruck },
+          { key: 'mechanics', label: t('performance.tabs.scorecards'), Icon: Wrench },
         ].map(tab => (
           <button key={tab.key} className={`perf-tab ${activeTab === tab.key ? 'active' : ''}`}
             onClick={() => setActiveTab(tab.key)}>
@@ -259,37 +297,21 @@ export default function Performance() {
               </div>
               <div className="perf-chart-sub">{t("performance.subtitle")}</div>
               <div className="perf-chart-body">
-                <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', height: '100%', paddingBottom: 20 }}>
-                  {[
-                    { label: t('performance.chart.delivered'), count: kpis.delivered || 0, color: '#16a34a' },
-                    { label: t('performance.chart.in_transit'), count: kpis.in_transit || 0, color: '#667eea' },
-                    { label: t('performance.chart.inspection', 'Inspection'), count: kpis.inspection || 0, color: '#0e7490' },
-                    { label: t('performance.chart.ready_for_pickup', 'Ready'), count: kpis.ready_for_pickup || 0, color: '#c2410c' },
-                    { label: t('performance.chart.pending'), count: kpis.pending || 0, color: '#d97706' },
-                    { label: t('performance.chart.failed'), count: kpis.failed || 0, color: '#ef4444' },
-                  ].map(b => {
-                    const max = Math.max(kpis.delivered||0, kpis.in_transit||0, kpis.inspection||0, kpis.ready_for_pickup||0, kpis.pending||0, kpis.failed||0, 1);
-                    return (
-                      <div key={b.label} style={{ textAlign: 'center', flex: 1 }}>
-                        <div style={{
-                          height: `${(b.count / max) * 160}px`,
-                          background: b.color,
-                          borderRadius: '6px 6px 0 0',
-                          minHeight: 4,
-                          transition: 'height 0.6s ease',
-                          marginBottom: 6,
-                        }} />
-                        <div style={{ fontSize: 16, fontWeight: 800, color: '#1e293b' }}>{b.count}</div>
-                        <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>{b.label}</div>
-                      </div>
-                    );
-                  })}
+                <div className="perf-bars">
+                  {statusBars.map(b => (
+                    <div key={b.key} className="perf-bar">
+                      <div className="perf-bar-fill"
+                        style={{ blockSize: `${(b.count / barMax) * 140}px`, background: b.color }} />
+                      <div className="perf-bar-count">{b.count}</div>
+                      <div className="perf-bar-label">{b.label}</div>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
             <div className="perf-chart-card">
               <div className="perf-chart-title">
-                <DeliveryTruck width={16} height={16} style={{ color: '#f97316' }} />
+                <Wrench width={16} height={16} style={{ color: '#f97316' }} />
                 {t('performance.chart.top_mechanics')}
               </div>
               <div className="perf-chart-sub">{t('performance.chart.top_mechanics_sub')}</div>
@@ -332,7 +354,7 @@ export default function Performance() {
       {activeTab === 'mechanics' && (
         mechanicPerf.length === 0 ? (
           <div className="perf-empty">
-            <div className="perf-empty-icon"><DeliveryTruck width={28} height={28} /></div>
+            <div className="perf-empty-icon"><Wrench width={28} height={28} /></div>
             <h3>{t("performance.no_mechanic_data")}</h3>
             <p>{t('performance.no_orders_period')}</p>
           </div>

@@ -1,6 +1,16 @@
 /**
  * acceptance-timeout.js — Auto-unassign work orders not accepted within timeout
  *
+ * NEVER ENABLE FOR WORKSHOP JOBS. This is the delivery product's courier
+ * rule ("the driver did not accept the order in time"). In the workshop a
+ * technician does not accept a job: the Team Leader assigns it (Step 6) and
+ * the technician starts it from My Jobs, so un-assigning after 30 minutes
+ * would undo the Team Leader's plan. It only starts with
+ * ENABLE_ACCEPTANCE_TIMEOUT=true (server.js) and, even then, leaves alone
+ * every work order that has job cards or a current assignment made by a
+ * person (work_order_assignments.assigned_by — the Team Leader board and the
+ * assign screens all record who assigned).
+ *
  * Runs every 5 minutes. For each workshop:
  *  1. Reads `order_accept_timeout_minutes` from settings (default: 30)
  *  2. Finds work orders in 'assigned' status older than the timeout
@@ -54,7 +64,8 @@ async function processWorkshopStaleOrders(workshop) {
   if (timeoutMin <= 0) return;
 
   // Find assigned work orders that have exceeded the timeout
-  // Use work_order_assignments.assigned_at for accurate timing
+  // Use work_order_assignments.assigned_at for accurate timing.
+  // Never a workshop job: one with job cards, or one a person assigned.
   const staleOrders = await query(
     `SELECT o.id, o.work_order_number, o.mechanic_id, m.full_name as mechanic_name,
             oa.assigned_at
@@ -62,6 +73,9 @@ async function processWorkshopStaleOrders(workshop) {
      JOIN mechanics m ON m.id = o.mechanic_id
      LEFT JOIN work_order_assignments oa ON oa.work_order_id = o.id AND oa.is_current = TRUE
      WHERE o.workshop_id = ? AND o.status = 'assigned'
+       AND NOT EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = o.id)
+       AND NOT EXISTS (SELECT 1 FROM work_order_assignments ta
+                        WHERE ta.work_order_id = o.id AND ta.is_current = TRUE AND ta.assigned_by IS NOT NULL)
        AND (
          (oa.assigned_at IS NOT NULL AND oa.assigned_at < DATE_SUB(NOW(), INTERVAL ? MINUTE))
          OR

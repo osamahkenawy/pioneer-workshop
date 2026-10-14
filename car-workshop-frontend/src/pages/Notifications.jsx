@@ -81,6 +81,24 @@ export default function Notifications() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Replace the saved snippets with the workshop defaults (older installs still
+  // carry the courier texts: "ready for pickup!", "Vehicle Returned"…).
+  const [resetting, setResetting] = useState(false);
+  const resetTemplates = async () => {
+    if (!window.confirm(t('notificationTemplates.reset_confirm', 'Replace all templates with the workshop defaults? Your own changes to them are lost.'))) return;
+    setResetting(true); setError('');
+    try {
+      const res = await api.post('/notifications/templates/reset');
+      if (!res.success) { setError(res.message || t('common.failed', 'Failed')); return; }
+      const tRes = await api.get('/notifications/templates');
+      if (tRes.success) setTemplates(tRes.data || []);
+    } catch (e) {
+      setError(e?.message || t('common.failed', 'Failed'));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   /* ── handlers ──────────────────────────────────────────────── */
   const handleSend = async (e) => {
     e.preventDefault(); setSaving(true); setError(''); setResult(null);
@@ -238,6 +256,17 @@ export default function Notifications() {
         <CardListSkeleton count={6} />
       ) : tab === 'templates' ? (
         /* ── Templates Grid ──────────────────────────────── */
+        <>
+        {/* The automatic customer messages are built by the server
+            (lib/notify.js); these are snippets for Send. */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBlockEnd: 8 }}>
+          <button className="notif-btn outline" onClick={resetTemplates} disabled={resetting}>
+            {resetting ? t('notificationTemplates.resetting', 'Resetting…') : t('notificationTemplates.reset', 'Reset to defaults')}
+          </button>
+        </div>
+        <p className="notif-template-body" style={{ marginBlockEnd: 14 }}>
+          {t('notificationTemplates.hint', 'Customers are messaged automatically when the job is opened, when the car is ready for collection, and when the job is closed or cancelled. These templates are for messages you send yourself: add the work order ID and the {placeholders} are filled in from that job.')}
+        </p>
         <div className="notif-template-grid">
           {templates.map(tmpl => (
             <div key={tmpl.template_key || tmpl.id || tmpl.key} className="notif-template-card">
@@ -266,6 +295,7 @@ export default function Notifications() {
             </div>
           ))}
         </div>
+        </>
       ) : (
         /* ── Notification Table ──────────────────────────── */
         <>

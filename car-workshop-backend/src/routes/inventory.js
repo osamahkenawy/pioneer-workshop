@@ -117,7 +117,7 @@ router.post('/stock/receive', async (req, res) => {
       }
     }
 
-    await logAudit(req.workshopId, req.userId, 'STOCK_RECEIVE', 'inventory_stock', null, null, { location_id, reference });
+    await logAudit(req.workshopId, req.user?.id, 'STOCK_RECEIVE', 'inventory_stock', null, null, { location_id, reference });
     res.json({ success: true, message: 'Stock received and AVCO updated' });
   } catch (err) {
     console.error('POST /inventory/stock/receive error:', err);
@@ -171,7 +171,7 @@ router.post('/stock/transfer', async (req, res) => {
       );
     }
 
-    await logAudit(req.workshopId, req.userId, 'STOCK_TRANSFER', 'inventory_stock', null, null,
+    await logAudit(req.workshopId, req.user?.id, 'STOCK_TRANSFER', 'inventory_stock', null, null,
       { from_location_id, to_location_id, part_number, quantity, notes });
     res.json({ success: true, message: 'Stock transferred' });
   } catch (err) {
@@ -235,7 +235,7 @@ router.post('/requisitions', async (req, res) => {
     const req_number = genNumber('MR');
     const result = await execute(
       'INSERT INTO material_requisitions (workshop_id, req_number, job_card_id, requested_by, notes) VALUES (?,?,?,?,?)',
-      [req.workshopId, req_number, job_card_id, req.userId, notes || null]
+      [req.workshopId, req_number, job_card_id, req.user?.id, notes || null]
     );
     const reqId = result.insertId;
 
@@ -279,7 +279,7 @@ router.post('/issues', async (req, res) => {
     const issueResult = await execute(
       `INSERT INTO material_issues (workshop_id, issue_number, requisition_id, job_card_id, issued_by, issue_type, notes)
        VALUES (?,?,?,?,?,?,?)`,
-      [req.workshopId, issue_number, requisition_id || null, job_card_id, req.userId, issue_type, notes || null]
+      [req.workshopId, issue_number, requisition_id || null, job_card_id, req.user?.id, issue_type, notes || null]
     );
     const issueId = issueResult.insertId;
 
@@ -325,7 +325,7 @@ router.post('/issues', async (req, res) => {
         await execute(
           `INSERT INTO wip_ledger (workshop_id, job_card_id, entry_type, amount, description, posted_by)
            VALUES (?, ?, 'parts_charge', ?, ?, ?)`,
-          [req.workshopId, job_card_id, lineCost, `Parts: ${item.description}`, req.userId]
+          [req.workshopId, job_card_id, lineCost, `Parts: ${item.description}`, req.user?.id]
         );
       }
     }
@@ -351,7 +351,7 @@ router.post('/issues', async (req, res) => {
       [job_card_id, req.workshopId]
     );
 
-    await logAudit(req.workshopId, req.userId, 'ISSUE', 'material_issues', issueId, null, { issue_number, issue_type });
+    await logAudit(req.workshopId, req.user?.id, 'ISSUE', 'material_issues', issueId, null, { issue_number, issue_type });
     res.status(201).json({ success: true, issueId, issue_number });
   } catch (err) {
     console.error('POST /inventory/issues error:', err);
@@ -397,7 +397,7 @@ router.post('/returns', async (req, res) => {
     const result = await execute(
       `INSERT INTO material_returns (workshop_id, return_number, issue_id, job_card_id, returned_by, reason)
        VALUES (?,?,?,?,?,?)`,
-      [req.workshopId, return_number, issue_id || null, job_card_id, req.userId, reason || null]
+      [req.workshopId, return_number, issue_id || null, job_card_id, req.user?.id, reason || null]
     );
     const returnId = result.insertId;
 
@@ -439,7 +439,7 @@ router.patch('/returns/:id/accept', async (req, res) => {
   try {
     await execute(
       `UPDATE material_returns SET status = 'accepted', accepted_by = ? WHERE id = ? AND workshop_id = ?`,
-      [req.userId, req.params.id, req.workshopId]
+      [req.user?.id, req.params.id, req.workshopId]
     );
     res.json({ success: true, message: 'Return accepted' });
   } catch (err) {

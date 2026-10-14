@@ -430,3 +430,10 @@
 .cs-kpi.is-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(16,24,40,.10); }
 .cs-kpi.is-clickable:focus-visible { outline: 2px solid var(--cs-blue); outline-offset: 2px; }
 .cs-kpi.is-active { box-shadow: inset 0 0 0 2px var(--cs-rose); }
+
+/* Link from a task to the record it is about (enquiry, estimate, job card). */
+.cs-task-link {
+  margin-top: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 700; color: #ea580c; text-align: start;
+}
+.cs-task-link:hover { text-decoration: underline; }

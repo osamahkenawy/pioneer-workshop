@@ -37,9 +37,9 @@ cp /tmp/backend.env "$BACKEND_DIR/.env"
 
 echo "  Running DB migrations..."
 # Import schema if tables don't exist
-mysql -u root -proot car_workshop < "$BACKEND_DIR/src/migrations/car_workshop.sql" 2>/dev/null || true
-mysql -u root -proot car_workshop < "$BACKEND_DIR/src/migrations/post/00_schema_patches.sql" 2>/dev/null || true
-mysql -u root -proot car_workshop < "$BACKEND_DIR/src/migrations/post/01_seed_countries.sql" 2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "$BACKEND_DIR/src/migrations/car_workshop.sql" 2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "$BACKEND_DIR/src/migrations/post/00_schema_patches.sql" 2>/dev/null || true
+mysql -u root -p"${DB_PASS:?Set DB_PASS to the MySQL root password}" car_workshop < "$BACKEND_DIR/src/migrations/post/01_seed_countries.sql" 2>/dev/null || true
 
 echo "  (Re)starting backend with PM2..."
 pm2 delete car-workshop-backend 2>/dev/null || true

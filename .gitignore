@@ -24,3 +24,5 @@ uploads/*
 # identify different `disputes` rows in every environment, so a committed copy
 # would make --clean delete the wrong cases after a pull.
 car-workshop-backend/scripts/data/.seed-complaints-ids.json
+# Uploaded inspection forms (customer details) — never committed
+private-uploads/

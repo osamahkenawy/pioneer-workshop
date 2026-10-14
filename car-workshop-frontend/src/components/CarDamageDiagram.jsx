@@ -2,23 +2,33 @@
  * Car damage diagram — the clickable part of the Vehicle Inspection Form.
  *
  * Five photographic views (top, both sides, front, rear). Pick a damage code
- * from the legend, click anywhere on a view, and a coloured marker is dropped
+ * from the legend, click anywhere on the car, and a coloured marker is dropped
  * on the spot.
  *
- * Marker coordinates are stored NORMALISED (x/y between 0 and 1, relative to
- * the view's container box), so a form filled in on a tablet still renders
- * correctly on desktop, in print, or at any zoom.
+ * Marker coordinates are stored NORMALISED (x/y between 0 and 1). New markers
+ * carry coord: 'img' and are relative to the car picture itself, which is
+ * drawn fitted and centred in a fixed-height box — so a marker stays on the
+ * same spot of the car at any width: the staff form, its print-out and the
+ * customer's page. Markers saved before that have no `coord` and are relative
+ * to the whole box; they are drawn exactly as before. The geometry is in
+ * lib/inspectionMarks.js.
  */
+import { useTranslation } from 'react-i18next';
 import topRoofImg     from '../inspection/top-roof.png';
 import driverSideImg  from '../inspection/driver-side.png';
 import passengerSideImg from '../inspection/passenger-side.png';
 import frontImg       from '../inspection/front.png';
 import rearImg        from '../inspection/rear.png';
+import {
+  IMAGE_COORD, VIEW_BOX_HEIGHT, isImageMark, pointOnRect, stageStyle,
+} from '../lib/inspectionMarks';
+import './CarDamageDiagram.css';
 
 /* Damage legend, from the printed walk-around sheet. Two deliberate fixes:
    the paper form used "GC" for BOTH Glass Chip and Gouges/Crease, which makes
    a marker ambiguous once it's on the diagram — Gouges/Crease is "GO" here.
-   "Pant Chip" on the sheet is a typo for Paint Chip. */
+   "Pant Chip" on the sheet is a typo for Paint Chip. English defaults; the
+   words on screen come from damageLabel(). */
 export const DAMAGE_CODES = {
   SH: 'Swirls/Holograms',
   WS: 'Water Spots',
@@ -50,7 +60,18 @@ export const DAMAGE_COLORS = {
   GO: '#b77947', LM: '#94a3b8',
 };
 
-const NAVY = '#153d78';
+/* English names of the views; the words on screen come from viewLabel(). */
+export const VIEW_NAMES = {
+  top: 'Top / roof', left: 'Driver side (left)', right: 'Passenger side (right)', front: 'Front', rear: 'Rear',
+};
+
+/** A damage code's name, translated (inspection.code.*). */
+export const damageLabel = (t, code, fallback) =>
+  (t ? t(`inspection.code.${code}`, fallback || DAMAGE_CODES[code] || code) : (fallback || DAMAGE_CODES[code] || code));
+
+/** A view's name, translated (inspection.view.*). */
+export const viewLabel = (t, view) =>
+  (VIEW_NAMES[view] ? (t ? t(`inspection.view.${view}`, VIEW_NAMES[view]) : VIEW_NAMES[view]) : view);
 
 /* ── The five views. Grid layout mirrors the printed inspection sheet:
    row 1: top | driver-left | passenger-right | front
@@ -58,142 +79,88 @@ const NAVY = '#153d78';
    Keys stay as top / left / right / front / rear to preserve marker
    coordinates already stored against them. ────────────────────────── */
 const VIEWS = [
-  { key: 'top',   label: 'TOP / ROOF',              img: topRoofImg,       glyph: '⌂', row: 1, col: 1 },
-  { key: 'left',  label: 'DRIVER SIDE (LEFT)',      img: driverSideImg,    glyph: '◫', row: 1, col: 2 },
-  { key: 'right', label: 'PASSENGER SIDE (RIGHT)',  img: passengerSideImg, glyph: '◫', row: 1, col: 3 },
-  { key: 'front', label: 'FRONT',                   img: frontImg,         glyph: '▣', row: 1, col: 4 },
-  { key: 'rear',  label: 'REAR',                    img: rearImg,          glyph: '▣', row: 2, col: 1 },
+  { key: 'top',   img: topRoofImg,       glyph: '⌂' },
+  { key: 'left',  img: driverSideImg,    glyph: '◫' },
+  { key: 'right', img: passengerSideImg, glyph: '◫' },
+  { key: 'front', img: frontImg,         glyph: '▣' },
+  { key: 'rear',  img: rearImg,          glyph: '▣' },
 ];
 
 /**
- * @param {Array}   marks          [{id, view, code, x, y, note}]
+ * @param {Array}   marks          [{id, view, code, x, y, coord?, note}]
  * @param {string}  activeCode     currently selected legend code ('' = none)
  * @param {string}  selectedMarkId highlighted marker
- * @param {Func}    onAddMark      (view, x, y) — omit to make the diagram read-only
+ * @param {Func}    onAddMark      (view, x, y, coord) — x/y relative to the car
+ *                                 picture, coord is 'img'. Omit to make the
+ *                                 diagram read-only.
  * @param {Func}    onSelectMark   (markId)
  * @param {boolean} compact        stack views in a single column (mobile / preview)
+ * @param {Array}   views          only these view keys (default: all five)
+ * @param {Object}  labels         panel titles by view key (default: viewLabel())
  */
 export default function CarDamageDiagram({
   marks = [], activeCode = '', selectedMarkId = '',
-  onAddMark, onSelectMark, compact = false,
+  onAddMark, onSelectMark, compact = false, views, labels,
 }) {
+  const { t } = useTranslation();
   const readOnly = typeof onAddMark !== 'function';
+  const placing = !readOnly && !!activeCode;
 
+  // Clicks land on the car picture only, and are kept relative to it. Clicks
+  // on an existing marker stop there (their own handler), so they never add one.
   const handleClick = (view) => (e) => {
-    if (readOnly || !activeCode) return;
-    // Clicks on an existing marker bubble up here after their own stopPropagation,
-    // so no extra guard is needed — those handlers already return early.
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-    const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
-    onAddMark(view.key, x, y);
+    if (!placing) return;
+    const { x, y } = pointOnRect(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
+    onAddMark(view.key, x, y, IMAGE_COORD);
   };
 
-  const gridStyle = compact
-    ? { display: 'grid', gridTemplateColumns: '1fr', gap: 14 }
-    : { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 14, alignItems: 'start' };
+  const renderMark = (m) => {
+    const on = m.id === selectedMarkId;
+    const name = damageLabel(t, m.code);
+    return (
+      <button
+        key={m.id}
+        type="button"
+        title={name}
+        aria-label={name}
+        aria-pressed={onSelectMark ? on : undefined}
+        tabIndex={onSelectMark ? 0 : -1}
+        className={`cdd-mark${on ? ' cdd-mark-on' : ''}${onSelectMark ? ' cdd-mark-clickable' : ''}`}
+        onClick={(e) => { e.stopPropagation(); onSelectMark && onSelectMark(m.id); }}
+        style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: DAMAGE_COLORS[m.code] || '#dc2626' }}
+      >
+        {m.code}
+      </button>
+    );
+  };
 
   return (
-    <div style={gridStyle}>
-      {VIEWS.map(view => {
+    <div className={`cdd-grid${compact ? ' cdd-grid-compact' : ''}`}>
+      {(views ? VIEWS.filter(v => views.includes(v.key)) : VIEWS).map(view => {
         const viewMarks = marks.filter(m => m.view === view.key);
-        // In the four-column grid the rear view sits alone on the second row
-        // (matching the printed sheet), so pin it to column 1.
-        const cellStyle = !compact && view.key === 'rear'
-          ? { gridColumn: '1 / 2' } : undefined;
+        const label = labels?.[view.key] || viewLabel(t, view.key);
         return (
-          <div
-            key={view.key}
-            className="vi-view-panel"
-            style={{
-              background: '#fff',
-              border: '1px solid #d9e4f1',
-              borderRadius: 15,
-              overflow: 'hidden',
-              ...cellStyle,
-            }}
-          >
+          // vi-view-panel: the staff form's print rules keep a view on one page.
+          <div key={view.key} className={`cdd-panel vi-view-panel${view.key === 'rear' ? ' cdd-panel-rear' : ''}`}>
             {/* header — navy circular glyph + label, matching the printed sheet */}
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '12px 14px',
-              background: 'linear-gradient(180deg,#f7fbff 0%,#edf5ff 100%)',
-              borderBottom: '1px solid #e7eef7',
-              fontWeight: 800, fontSize: 12, letterSpacing: 0.3, color: NAVY,
-            }}>
-              <div style={{
-                width: 30, height: 30, borderRadius: '50%',
-                background: NAVY, color: '#fff',
-                display: 'grid', placeItems: 'center',
-                fontSize: 14, flex: '0 0 auto',
-              }}>{view.glyph}</div>
-              <span style={{ flex: 1 }}>{view.label}</span>
-              {viewMarks.length > 0 && (
-                <span style={{
-                  fontSize: 11, fontWeight: 800, color: '#dc2626',
-                  background: '#fee2e2', padding: '2px 8px', borderRadius: 10,
-                }}>{viewMarks.length}</span>
-              )}
+            <div className="cdd-head">
+              <div className="cdd-glyph" aria-hidden>{view.glyph}</div>
+              <span className="cdd-title">{label}</span>
+              {viewMarks.length > 0 && <span className="cdd-count">{viewMarks.length}</span>}
             </div>
 
-            {/* clickable image area — markers are absolute-positioned overlays */}
-            <div
-              onClick={handleClick(view)}
-              style={{
-                position: 'relative',
-                height: view.key === 'rear' ? 225 : 260,
-                background: 'radial-gradient(circle at 50% 45%, rgba(46,125,205,.08), transparent 42%), #fff',
-                cursor: !readOnly && activeCode ? 'crosshair' : 'default',
-                touchAction: 'manipulation',
-                userSelect: 'none',
-              }}
-            >
-              <img
-                src={view.img}
-                alt={view.label}
-                draggable={false}
-                style={{
-                  position: 'absolute', inset: 0,
-                  width: '100%', height: '100%',
-                  objectFit: 'contain',
-                  padding: 16,
-                  boxSizing: 'border-box',
-                  pointerEvents: 'none',
-                }}
-              />
-              {viewMarks.map(m => {
-                const on = m.id === selectedMarkId;
-                const bg = DAMAGE_COLORS[m.code] || '#dc2626';
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    title={DAMAGE_CODES[m.code] || m.code}
-                    onClick={(e) => { e.stopPropagation(); onSelectMark && onSelectMark(m.id); }}
-                    style={{
-                      position: 'absolute',
-                      left: `${m.x * 100}%`,
-                      top: `${m.y * 100}%`,
-                      transform: 'translate(-50%, -50%)',
-                      width: on ? 28 : 24, height: on ? 28 : 24,
-                      borderRadius: '50%',
-                      background: bg,
-                      color: '#fff',
-                      fontSize: 10, fontWeight: 800, lineHeight: 1,
-                      border: `${on ? 3 : 2}px solid #fff`,
-                      boxShadow: on
-                        ? '0 0 0 2px rgba(220,38,38,.6), 0 2px 8px rgba(0,0,0,.25)'
-                        : '0 2px 8px rgba(0,0,0,.25)',
-                      cursor: onSelectMark ? 'pointer' : 'default',
-                      padding: 0,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      zIndex: 3,
-                    }}
-                  >
-                    {m.code}
-                  </button>
-                );
-              })}
+            {/* The box; the car picture (the stage) is fitted and centred in it.
+                Picture markers ride on the stage, older box markers on the box. */}
+            <div className="cdd-box" style={{ height: VIEW_BOX_HEIGHT[view.key] }}>
+              <div
+                className={`cdd-stage${placing ? ' cdd-stage-active' : ''}`}
+                style={stageStyle(view.key)}
+                onClick={handleClick(view)}
+              >
+                <img className="cdd-img" src={view.img} alt={label} draggable={false} />
+                {viewMarks.filter(isImageMark).map(renderMark)}
+              </div>
+              {viewMarks.filter(m => !isImageMark(m)).map(renderMark)}
             </div>
           </div>
         );

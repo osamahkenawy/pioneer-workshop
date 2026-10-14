@@ -102,7 +102,7 @@ This inquiry was submitted through the Free Trial registration form.
           {/* Left Side - Features */}
           <div className="register-features">
             <div className="brand-logo">
-              <img src="/assets/images/logos/PIONEER._WHITE_LOGOsvg.svg" alt="Pioneer" />
+              <img src="/assets/images/logos/pioneer/pioneer_logo_white.svg" alt="Pioneer" />
             </div>
 
             <h2>{t('auth.transformYourBusiness')}</h2>
@@ -172,7 +172,7 @@ This inquiry was submitted through the Free Trial registration form.
         {/* Left Side - Features */}
         <div className="register-features">
           <div className="brand-logo">
-            <img src="/assets/images/logos/PIONEER._WHITE_LOGOsvg.svg" alt="Pioneer" />
+            <img src="/assets/images/logos/pioneer/pioneer_logo_white.svg" alt="Pioneer" />
           </div>
 
           <h2>{t('auth.transformYourBusiness')}</h2>

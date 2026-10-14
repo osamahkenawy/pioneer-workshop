@@ -5,6 +5,7 @@ import { PLAN_FEATURES } from '../middleware/plan-gate.js';
 import { refreshSchedule, stopSchedule, generateReportData, buildReportHTML, executeSchedule } from '../lib/scheduled-reports.js';
 import { sendEmail, getWorkshopBranding } from '../lib/email.js';
 import { getFinancialConfig } from '../lib/financial.js';
+import { revenueSql } from '../lib/job-card-billing.js';
 
 const router = express.Router();
 
@@ -74,7 +75,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const [totalWorkOrders]    = await query(`SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND ${dateFilter}`, [workshopId, ...dateParams]);
     const [completedWorkOrders] = await query(`SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}`, [workshopId, ...dateParams]);
     const [failedWorkOrders]   = await query(`SELECT COUNT(*) as count FROM work_orders WHERE workshop_id = ? AND status = 'cancelled' AND ${dateFilter}`, [workshopId, ...dateParams]);
-    const [totalRevenue]   = await query(`SELECT COALESCE(SUM(service_fee - discount), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}`, [workshopId, ...dateParams]);
+    const [totalRevenue]   = await query(`SELECT COALESCE(SUM(${revenueSql()}), 0) as total FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}`, [workshopId, ...dateParams]);
     const [cashCollected]   = await query(`SELECT COALESCE(SUM(cash_amount), 0) as total FROM work_orders WHERE workshop_id = ? AND payment_method = 'cash' AND status = 'completed' AND ${dateFilter}`, [workshopId, ...dateParams]);
 
     data.overview = {
@@ -106,7 +107,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const byZone = await query(
       `SELECT z.name as bay, COUNT(o.id) as orders,
               SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as delivered,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue
        FROM work_orders o JOIN service_bays z ON o.service_bay_id = z.id
        WHERE o.workshop_id = ? AND ${dateFilterJoin}
        GROUP BY z.id ORDER BY orders DESC`,
@@ -140,7 +141,7 @@ router.get('/', authMiddleware, async (req, res) => {
               COUNT(o.id) as total_assigned,
               SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as delivered,
               SUM(CASE WHEN o.status = 'cancelled' THEN 1 ELSE 0 END) as failed,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue,
               m.rating
        FROM work_orders o JOIN mechanics m ON o.mechanic_id = m.id
        WHERE o.workshop_id = ? AND ${dateFilterJoin}
@@ -176,8 +177,8 @@ router.get('/', authMiddleware, async (req, res) => {
               COUNT(o.id) as orders,
               SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as delivered,
               SUM(CASE WHEN o.status = 'cancelled' THEN 1 ELSE 0 END) as failed,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue,
-              COALESCE(AVG(o.service_fee - o.discount), 0) as avg_order_value,
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue,
+              COALESCE(AVG(${revenueSql('o.')}), 0) as avg_order_value,
               COALESCE(SUM(CASE WHEN o.payment_method = 'cash' THEN o.cash_amount ELSE 0 END), 0) as cod_total
        FROM work_orders o JOIN customers c ON o.customer_id = c.id
        WHERE o.workshop_id = ? AND ${dateFilterJoin}
@@ -402,12 +403,12 @@ router.get('/financial', authMiddleware, async (req, res) => {
          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as delivered,
          COALESCE(SUM(CASE WHEN status = 'completed' THEN service_fee ELSE 0 END), 0) as gross_delivery_fees,
          COALESCE(SUM(CASE WHEN status = 'completed' THEN discount ELSE 0 END), 0) as total_discounts,
-         COALESCE(SUM(CASE WHEN status = 'completed' THEN service_fee - discount ELSE 0 END), 0) as net_revenue,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN ${revenueSql()} ELSE 0 END), 0) as net_revenue,
          COALESCE(SUM(CASE WHEN payment_method = 'cash' AND status = 'completed' THEN cash_amount ELSE 0 END), 0) as cod_collected,
          COALESCE(SUM(CASE WHEN payment_method = 'cash' AND status IN ('pending','assigned','accepted','in_progress','confirmed') THEN cash_amount ELSE 0 END), 0) as cod_outstanding,
          COALESCE(SUM(CASE WHEN cash_collected >= 1 THEN cash_amount ELSE 0 END), 0) as cod_settled,
          COALESCE(SUM(CASE WHEN payment_method = 'cash' AND status = 'completed' AND (cash_collected = 0 OR cash_collected IS NULL) THEN cash_amount ELSE 0 END), 0) as cod_unsettled,
-         COALESCE(AVG(CASE WHEN status = 'completed' THEN service_fee - discount END), 0) as avg_order_value
+         COALESCE(AVG(CASE WHEN status = 'completed' THEN ${revenueSql()} END), 0) as avg_order_value
        FROM work_orders WHERE workshop_id = ? AND ${dateFilter}`,
       [workshopId, ...dateParams]
     );
@@ -415,7 +416,7 @@ router.get('/financial', authMiddleware, async (req, res) => {
     // 2) Revenue by day (for line chart)
     const revenueByDay = await query(
       `SELECT DATE(created_at) as date,
-              COALESCE(SUM(service_fee - discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql()}), 0) as revenue,
               COUNT(*) as orders,
               COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN cash_amount ELSE 0 END), 0) as cod
        FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}
@@ -427,7 +428,7 @@ router.get('/financial', authMiddleware, async (req, res) => {
     const byPaymentMethod = await query(
       `SELECT payment_method,
               COUNT(*) as count,
-              COALESCE(SUM(service_fee - discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql()}), 0) as revenue,
               COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN cash_amount ELSE 0 END), 0) as cod_total
        FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}
        GROUP BY payment_method ORDER BY revenue DESC`,
@@ -438,7 +439,7 @@ router.get('/financial', authMiddleware, async (req, res) => {
     const revenueByZone = await query(
       `SELECT z.name as bay,
               COUNT(o.id) as orders,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue,
               COALESCE(SUM(CASE WHEN o.payment_method = 'cash' THEN o.cash_amount ELSE 0 END), 0) as cod_total
        FROM work_orders o JOIN service_bays z ON o.service_bay_id = z.id
        WHERE o.workshop_id = ? AND o.status = 'completed' AND ${dateFilterJoin}
@@ -450,7 +451,7 @@ router.get('/financial', authMiddleware, async (req, res) => {
     const topCustomersByRevenue = await query(
       `SELECT c.full_name AS name, c.company_name AS company,
               COUNT(o.id) as orders,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue,
               COALESCE(SUM(CASE WHEN o.payment_method = 'cash' THEN o.cash_amount ELSE 0 END), 0) as cod_total
        FROM work_orders o JOIN customers c ON o.customer_id = c.id
        WHERE o.workshop_id = ? AND o.status = 'completed' AND ${dateFilterJoin}
@@ -462,7 +463,7 @@ router.get('/financial', authMiddleware, async (req, res) => {
     const mechanicSettlements = await query(
       `SELECT m.full_name as name,
               COUNT(o.id) as deliveries,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as revenue_generated,
+              COALESCE(SUM(${revenueSql('o.')}), 0) as revenue_generated,
               COALESCE(SUM(CASE WHEN o.payment_method = 'cash' THEN o.cash_amount ELSE 0 END), 0) as cod_collected,
               COALESCE(SUM(CASE WHEN o.cash_collected >= 1 THEN o.cash_amount ELSE 0 END), 0) as cod_settled,
               COALESCE(SUM(CASE WHEN o.payment_method = 'cash' AND (o.cash_collected = 0 OR o.cash_collected IS NULL) AND o.status = 'completed' THEN o.cash_amount ELSE 0 END), 0) as cod_pending
@@ -520,7 +521,7 @@ router.get('/commission', authMiddleware, async (req, res) => {
          COALESCE(SUM(commission_amount), 0) as total_commission,
          COALESCE(SUM(net_payable), 0) as total_net_payable,
          COALESCE(SUM(vat_amount), 0) as total_vat,
-         COALESCE(SUM(service_fee - discount), 0) as gross_revenue,
+         COALESCE(SUM(${revenueSql()}), 0) as gross_revenue,
          COALESCE(AVG(commission_rate), 0) as avg_commission_rate
        FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${dateFilter}`,
       [workshopId, ...dateParams]
@@ -532,7 +533,7 @@ router.get('/commission', authMiddleware, async (req, res) => {
               COUNT(o.id) as orders,
               COALESCE(SUM(o.commission_amount), 0) as commission,
               COALESCE(SUM(o.net_payable), 0) as net_payable,
-              COALESCE(SUM(o.service_fee - o.discount), 0) as gross
+              COALESCE(SUM(${revenueSql('o.')}), 0) as gross
        FROM work_orders o JOIN customers c ON o.customer_id = c.id
        WHERE o.workshop_id = ? AND o.status = 'completed' AND ${dateFilterJoin}
        GROUP BY c.id ORDER BY commission DESC LIMIT 20`,
@@ -570,7 +571,7 @@ router.get('/platform-revenue', authMiddleware, async (req, res) => {
          COALESCE(SUM(commission_amount), 0) as commission_revenue,
          COALESCE(SUM(platform_fee), 0) as platform_fee_revenue,
          COALESCE(SUM(vat_amount), 0) as vat_collected,
-         COALESCE(SUM(service_fee - discount), 0) as total_merchant_revenue,
+         COALESCE(SUM(${revenueSql()}), 0) as total_merchant_revenue,
          COALESCE(SUM(net_payable), 0) as total_payable_to_merchants,
          COALESCE(SUM(commission_amount) + SUM(platform_fee), 0) as total_platform_earnings,
          COUNT(*) as total_delivered
@@ -609,7 +610,7 @@ router.get('/financial-comparison', authMiddleware, async (req, res) => {
       const [m] = await query(
         `SELECT COUNT(*) as orders,
                 SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as delivered,
-                COALESCE(SUM(CASE WHEN status='completed' THEN service_fee - discount ELSE 0 END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN status='completed' THEN ${revenueSql()} ELSE 0 END), 0) as revenue,
                 COALESCE(SUM(commission_amount), 0) as commission,
                 COALESCE(SUM(net_payable), 0) as net_payable,
                 COALESCE(SUM(vat_amount), 0) as vat
@@ -657,7 +658,7 @@ router.get('/merchant-earnings', authMiddleware, async (req, res) => {
               COALESCE(SUM(o.vat_amount), 0) as vat_amount,
               COALESCE(SUM(o.platform_fee), 0) as platform_fees,
               COALESCE(SUM(o.net_payable), 0) as net_payable,
-              COALESCE(AVG(o.service_fee - o.discount), 0) as avg_order_value
+              COALESCE(AVG(${revenueSql('o.')}), 0) as avg_order_value
        FROM work_orders o JOIN customers c ON o.customer_id = c.id
        WHERE o.workshop_id = ? AND ${dfj}
        GROUP BY c.id ORDER BY net_payable DESC`,
@@ -685,7 +686,7 @@ router.get('/tax-summary', authMiddleware, async (req, res) => {
     // Total tax collected
     const [totals] = await query(
       `SELECT
-         COALESCE(SUM(CASE WHEN status='completed' THEN service_fee - discount ELSE 0 END), 0) as total_taxable,
+         COALESCE(SUM(CASE WHEN status='completed' THEN ${revenueSql()} ELSE 0 END), 0) as total_taxable,
          COALESCE(SUM(vat_amount), 0) as total_vat_collected,
          COALESCE(SUM(CASE WHEN vat_rate > 0 THEN 1 ELSE 0 END), 0) as taxed_orders,
          COUNT(*) as total_orders
@@ -752,7 +753,7 @@ router.get('/financial/export', authMiddleware, async (req, res) => {
     // Default: revenue overview
     const rows = await query(
       `SELECT DATE(created_at) as date, COUNT(*) as orders,
-              COALESCE(SUM(service_fee - discount), 0) as revenue,
+              COALESCE(SUM(${revenueSql()}), 0) as revenue,
               COALESCE(SUM(commission_amount), 0) as commission,
               COALESCE(SUM(vat_amount), 0) as vat,
               COALESCE(SUM(net_payable), 0) as net_payable
@@ -945,7 +946,7 @@ router.get('/profit-loss', authMiddleware, async (req, res) => {
         COUNT(o.id) as total_orders,
         COALESCE(SUM(o.service_fee), 0) as gross_revenue,
         COALESCE(SUM(o.discount), 0) as total_discounts,
-        COALESCE(SUM(o.service_fee - COALESCE(o.discount, 0)), 0) as net_revenue,
+        COALESCE(SUM(${revenueSql('o.')}), 0) as net_revenue,
         COALESCE(SUM(o.commission_amount), 0) as commission_earned,
         COALESCE(SUM(o.platform_fee), 0) as platform_fees,
         COALESCE(SUM(o.service_fee - COALESCE(o.discount,0) - COALESCE(o.commission_amount,0) - COALESCE(o.platform_fee,0)), 0) as merchant_net,
@@ -985,7 +986,7 @@ router.get('/margin-analysis', authMiddleware, async (req, res) => {
 
     const [overall] = await query(
       `SELECT
-         COALESCE(SUM(service_fee - COALESCE(discount,0)), 0) as net_revenue,
+         COALESCE(SUM(${revenueSql()}), 0) as net_revenue,
          COALESCE(SUM(commission_amount), 0) as commission_total,
          COALESCE(SUM(platform_fee), 0) as platform_fee_total,
          COALESCE(SUM(commission_amount + COALESCE(platform_fee,0)), 0) as total_platform_income,
@@ -998,9 +999,9 @@ router.get('/margin-analysis', authMiddleware, async (req, res) => {
 
     const byDay = await query(
       `SELECT DATE(created_at) as date,
-         COALESCE(SUM(service_fee - COALESCE(discount,0)), 0) as revenue,
+         COALESCE(SUM(${revenueSql()}), 0) as revenue,
          COALESCE(SUM(commission_amount + COALESCE(platform_fee,0)), 0) as platform_income,
-         ROUND(COALESCE(SUM(commission_amount + COALESCE(platform_fee,0)),0) / GREATEST(SUM(service_fee - COALESCE(discount,0)),1) * 100, 2) as margin_pct
+         ROUND(COALESCE(SUM(commission_amount + COALESCE(platform_fee,0)),0) / GREATEST(SUM(${revenueSql()}),1) * 100, 2) as margin_pct
        FROM work_orders WHERE workshop_id = ? AND status = 'completed' AND ${df}
        GROUP BY DATE(created_at) ORDER BY date`, [t, ...dp]
     );
@@ -1036,7 +1037,7 @@ router.get('/forecast', authMiddleware, async (req, res) => {
     const history = await query(
       `SELECT DATE(created_at) as date,
          COUNT(*) as orders,
-         COALESCE(SUM(service_fee - COALESCE(discount,0)), 0) as revenue,
+         COALESCE(SUM(${revenueSql()}), 0) as revenue,
          COALESCE(SUM(commission_amount + COALESCE(platform_fee,0)), 0) as platform_income
        FROM work_orders WHERE workshop_id = ? AND status = 'completed'
        AND created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
@@ -1106,12 +1107,12 @@ router.get('/insights', authMiddleware, async (req, res) => {
 
     // Insight 1: Revenue trend (last 30 vs previous 30)
     const [current] = await query(
-      `SELECT COALESCE(SUM(service_fee - COALESCE(discount,0)), 0) as rev, COUNT(*) as cnt
+      `SELECT COALESCE(SUM(${revenueSql()}), 0) as rev, COUNT(*) as cnt
        FROM work_orders WHERE workshop_id = ? AND status = 'completed'
        AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`, [t]
     );
     const [previous] = await query(
-      `SELECT COALESCE(SUM(service_fee - COALESCE(discount,0)), 0) as rev, COUNT(*) as cnt
+      `SELECT COALESCE(SUM(${revenueSql()}), 0) as rev, COUNT(*) as cnt
        FROM work_orders WHERE workshop_id = ? AND status = 'completed'
        AND created_at >= DATE_SUB(NOW(), INTERVAL 60 DAY)
        AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)`, [t]

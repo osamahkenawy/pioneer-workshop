@@ -17,6 +17,7 @@ import { publicEnquiryLimiter } from '../lib/rate-limits.js';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { createTask } from '../lib/crm-cycle.js';
 
 const publicSurveyRouter = express.Router();
 const adminSurveyRouter  = express.Router();
@@ -294,6 +295,22 @@ publicSurveyRouter.post('/', publicEnquiryLimiter, async (req, res) => {
 
     if (invite) {
       await execute('UPDATE survey_invites SET responded_at = NOW() WHERE id = ?', [invite.id]);
+    }
+
+    // After the visit (CRM): an unhappy customer or an unresolved job is a
+    // call for the manager today, not just a flag on a report.
+    if (isFlagged && workshopId) {
+      const who = pick(body.contact_name, invite?.contact_name) || 'Customer';
+      await createTask({
+        workshopId,
+        title: `Unhappy customer — call back today: ${who} (score ${npsScore}/10)`,
+        details: [isBlank(body.nps_reason) ? null : `"${String(body.nps_reason).trim().slice(0, 300)}"`,
+                  resolution !== 'yes' ? 'Says the problem was not fully resolved.' : null].filter(Boolean).join(' ') || null,
+        taskType: 'complaint', priority: category === 'detractor' ? 'urgent' : 'high',
+        customerId: invite?.customer_id || null,
+        relatedType: invite?.work_order_id ? 'work_order' : 'none', relatedId: invite?.work_order_id || null,
+        dueAt: new Date(Date.now() + 4 * 3600 * 1000),
+      });
     }
 
     return res.status(201).json({

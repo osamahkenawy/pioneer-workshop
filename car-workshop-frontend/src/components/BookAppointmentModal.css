@@ -1,0 +1,126 @@
+/* BookAppointmentModal — new booking. Same family as the Estimates / Store
+   screens: white card, navy headings, orange primary. Logical properties
+   throughout so it mirrors in Arabic / Urdu. */
+
+.bkm-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15, 23, 42, .5);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.bkm-modal {
+  background: #fff; border-radius: 18px; width: 100%; max-width: 640px;
+  max-height: 92vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .28); margin: 0;
+}
+
+.bkm-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 20px 22px 14px; border-bottom: 1px solid #e9eef5;
+}
+.bkm-headMain { flex: 1; min-width: 0; }
+.bkm-title {
+  margin: 0 0 4px; font-size: 19px; font-weight: 800; color: #1e3a6b; letter-spacing: -.015em;
+  display: flex; align-items: center; gap: 8px;
+}
+.bkm-title svg { color: #ea580c; flex-shrink: 0; }
+.bkm-sub { margin: 0; font-size: 13px; color: #64748b; line-height: 1.45; }
+.bkm-from { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.bkm-fromChip {
+  font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+  background: #eaeefb; color: #1e3a6b;
+}
+.bkm-close {
+  flex-shrink: 0; width: 34px; height: 34px; border: none; border-radius: 9px;
+  background: #f1f5f9; color: #64748b; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.bkm-close:hover:not(:disabled) { background: #e2e8f0; }
+
+.bkm-body { padding: 16px 22px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
+.bkm-section { display: flex; flex-direction: column; gap: 10px; }
+.bkm-h {
+  margin: 0; font-size: 11.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #94a3b8;
+}
+
+.bkm-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.bkm-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.bkm-field > span { font-size: 12.5px; font-weight: 700; color: #475569; }
+.bkm-input {
+  width: 100%; box-sizing: border-box; min-height: 42px; padding: 0 11px;
+  border: 1.5px solid #cbd5e1; border-radius: 10px; background: #fff;
+  font-size: 14.5px; font-family: inherit; color: #0f172a;
+}
+/* styles/rtl.css pads every RTL input 40px on the left; keep ours. */
+.bkm-modal .bkm-input { padding: 0 11px; }
+.bkm-modal .bkm-textarea { padding: 9px 11px; }
+.bkm-modal .bkm-input[dir='ltr'] { text-align: left; }
+.bkm-input:focus { outline: none; border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234, 88, 12, .14); }
+.bkm-input:disabled { background: #f8fafc; color: #64748b; }
+.bkm-textarea { padding: 9px 11px; min-height: 76px; resize: vertical; line-height: 1.45; }
+.bkm-timeInput { max-width: 180px; }
+.bkm-contact { margin-top: 2px; }
+
+.bkm-fixed {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 12px; background: #f5f8ff; border: 2px solid #e2effa; color: #1e3a6b;
+}
+.bkm-fixedName { font-weight: 700; font-size: 14px; }
+.bkm-fixedMeta { font-size: 12.5px; color: #64748b; }
+
+/* time slots */
+.bkm-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 7px; }
+.bkm-slot {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 8px 6px; border-radius: 10px; border: 1.5px solid #e2e8f0; background: #fff;
+  font-family: inherit; cursor: pointer; color: #1e3a6b;
+}
+.bkm-slot:hover:not(:disabled) { border-color: #fdba74; background: #fffbf7; }
+.bkm-slot.is-on { border-color: #ea580c; background: #fff7ed; box-shadow: 0 0 0 2px rgba(234, 88, 12, .15); }
+.bkm-slot:disabled { cursor: not-allowed; background: #f8fafc; color: #94a3b8; }
+.bkm-slot.is-full:disabled { background: repeating-linear-gradient(135deg, #f8fafc, #f8fafc 6px, #f1f5f9 6px, #f1f5f9 12px); }
+.bkm-slotTime { font-size: 14.5px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.bkm-slotFree { font-size: 11px; font-weight: 600; color: #16794a; }
+.bkm-slot:disabled .bkm-slotFree { color: #94a3b8; }
+.bkm-slotsMsg {
+  display: flex; align-items: center; gap: 6px; font-size: 13px; color: #64748b;
+  padding: 8px 0;
+}
+
+.bkm-error {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
+  border-radius: 10px; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+  font-size: 13.5px; line-height: 1.45;
+}
+.bkm-error svg { flex-shrink: 0; margin-top: 1px; }
+
+.bkm-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap;
+  padding: 14px 22px; border-top: 1px solid #e9eef5;
+}
+.bkm-summary {
+  display: inline-flex; align-items: center; gap: 6px; margin-inline-end: auto;
+  font-size: 13px; font-weight: 700; color: #1e3a6b;
+}
+.bkm-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 42px; padding: 0 18px; border: 1.5px solid transparent; border-radius: 10px;
+  background: #ea580c; color: #fff; font-size: 14px; font-weight: 700; font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+}
+.bkm-btn:hover:not(:disabled) { background: #c2410c; }
+.bkm-btn:disabled { opacity: .55; cursor: not-allowed; }
+.bkm-btnGhost { background: #fff; color: #334155; border-color: #e2e8f0; }
+.bkm-btnGhost:hover:not(:disabled) { background: #f6f8fb; }
+
+@media (max-width: 640px) {
+  .bkm-overlay { padding: 0; align-items: flex-end; }
+  .bkm-modal { max-height: 94vh; border-radius: 18px 18px 0 0; }
+  .bkm-head { padding: 16px 16px 12px; }
+  .bkm-body { padding: 14px 16px; }
+  .bkm-foot { padding: 12px 16px; }
+  .bkm-grid2 { grid-template-columns: 1fr; }
+  .bkm-slots { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
+  .bkm-summary { flex-basis: 100%; }
+  .bkm-foot .bkm-btn { flex: 1 1 0; }
+  .bkm-timeInput { max-width: none; }
+}

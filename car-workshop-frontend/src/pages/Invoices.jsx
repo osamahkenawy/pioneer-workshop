@@ -11,6 +11,8 @@ import { useTranslation } from 'react-i18next';
 import Toast, { useToast } from '../components/Toast';
 import { AuthContext } from '../context/AuthContext';
 import { fmtCurrency } from '../utils/currency';
+import { woLabel } from '../lib/statusLabels';
+import './Invoices.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,6 +27,9 @@ const STATUS_CONFIG = {
   cancelled:      { color: '#94a3b8', bg: '#f8fafc', label: 'Cancelled', Icon: XmarkCircleSolid },
 };
 
+// 'cod' is the delivery app's cash-on-delivery; at a workshop it is cash
+const payLabel = (m) => ({ cod: 'Cash', cash: 'Cash', prepaid: 'Prepaid', credit: 'Credit', wallet: 'Wallet', card: 'Card' }[m] || m || 'Cash');
+
 /* ═══════════════════════════ MAIN COMPONENT ═══════════════════════════ */
 export default function Invoices() {
   const { t, i18n } = useTranslation();
@@ -32,6 +37,8 @@ export default function Invoices() {
   const { workshop } = useContext(AuthContext);
   const cur = workshop?.currency || 'AED';
   const [invoices, setInvoices] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
@@ -44,19 +51,29 @@ export default function Invoices() {
   const { toasts, showToast } = useToast();
   const PER_PAGE = 12;
 
-  useEffect(() => { fetchInvoices(); }, []);
-
+  // Server-side search, status filter and paging. This used to load the
+  // newest 20 invoices and filter/paginate those in the browser, so the other
+  // ~17,000 could not be found from this screen, and the tiles summed only 20.
   const fetchInvoices = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await api.get('/invoices');
-      if (res.success) setInvoices(res.data || []);
+      const q = new URLSearchParams({ page: String(page), limit: String(PER_PAGE) });
+      if (statusFilter) q.set('status', statusFilter);
+      if (searchTerm.trim()) q.set('search', searchTerm.trim());
+      const [res, st] = await Promise.all([api.get(`/invoices?${q}`), api.get('/invoices/stats')]);
+      if (res.success) { setInvoices(res.data || []); setTotal(res.pagination?.total ?? (res.data || []).length); }
+      if (st.success) setStats(st.data);
     } catch (err) {
       console.error('Failed to fetch invoices:', err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, statusFilter, searchTerm]);
+
+  useEffect(() => {
+    const t = setTimeout(fetchInvoices, searchTerm ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [fetchInvoices, searchTerm]);
 
   const generateMissing = async () => {
     try {
@@ -113,7 +130,9 @@ export default function Invoices() {
       setDetailLoading(true);
       setShowDetails(true);
       const res = await api.get(`/invoices/${inv.id}`);
-      if (res.success) setSelectedInvoice(res.data);
+      // The list row carries work_order_status, which the detail endpoint
+      // does not send; keep it under the detail.
+      if (res.success) setSelectedInvoice({ ...inv, ...res.data });
       else setSelectedInvoice(inv);
     } catch {
       setSelectedInvoice(inv);
@@ -141,43 +160,39 @@ export default function Invoices() {
     });
   };
 
-  /* ── Filter & Paginate ── */
-  let filtered = invoices;
-  if (statusFilter) filtered = filtered.filter(i => i.status === statusFilter);
-  if (searchTerm) {
-    const term = searchTerm.toLowerCase();
-    filtered = filtered.filter(i =>
-      (i.invoice_number || '').toLowerCase().includes(term) ||
-      (i.customer_name || '').toLowerCase().includes(term) ||
-      (i.work_order_number || '').toLowerCase().includes(term)
-    );
-  }
-  const paged = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE);
-  const totalPages = Math.ceil(filtered.length / PER_PAGE);
+  /* ── Page (already filtered and paged by the server) ── */
+  const paged = invoices;
+  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
+  // A window of page buttons: 17,000 invoices is ~1,400 pages
+  const pageWindow = (() => {
+    const set = new Set([1, totalPages, page - 2, page - 1, page, page + 1, page + 2]);
+    const pages = [...set].filter(p => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+    return pages.flatMap((p, i) => (i > 0 && p - pages[i - 1] > 1 ? ['…', p] : [p]));
+  })();
 
-  /* ── Stats ── */
-  const totalAmount = invoices.reduce((s, i) => s + parseFloat(i.total_amount || 0), 0);
-  const paidAmount = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + parseFloat(i.total_amount || 0), 0);
-  const pendingAmount = invoices.filter(i => ['draft', 'sent', 'partially_paid'].includes(i.status)).reduce((s, i) => s + parseFloat(i.total_amount || 0), 0);
-  const overdueAmount = invoices.filter(i => i.status === 'overdue').reduce((s, i) => s + parseFloat(i.total_amount || 0), 0);
+  /* ── Stats (workshop-wide, from /invoices/stats) ── */
+  const totalAmount = Number(stats?.total_amount) || 0;
+  const paidAmount = Number(stats?.total_paid) || 0;
+  const pendingAmount = Number(stats?.total_pending) || 0;
+  const overdueAmount = Number(stats?.total_overdue) || 0;
   const paidPct = totalAmount > 0 ? ((paidAmount / totalAmount) * 100).toFixed(0) : 0;
 
   /* ── Helpers ── */
   const fmtDate = (d) => d ? new Date(d).toLocaleDateString(i18n.language === 'ar' ? 'ar-EG' : 'en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-  const fmtMoney = (v) => parseFloat(v || 0).toFixed(2);
+  const fmtMoney = (v) => Number(v || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const statCards = [
-    { label: t('invoices.stats.total'), value: `${cur} ${fmtMoney(totalAmount)}`, sub: t('invoices.invoices_count', { count: invoices.length }), cardColor: 'primary', bg: '#fff7ed', iconColor: '#f97316', Icon: DollarCircle },
+    { label: t('invoices.stats.total'), value: `${cur} ${fmtMoney(totalAmount)}`, sub: t('invoices.invoices_count', { count: Number(stats?.total || 0).toLocaleString('en-AE') }), cardColor: 'primary', bg: '#fff7ed', iconColor: '#f97316', Icon: DollarCircle },
     { label: t('invoices.stats.collected'), value: `${cur} ${fmtMoney(paidAmount)}`, sub: t('invoices.collection_rate', { rate: paidPct }), cardColor: 'success', bg: '#dcfce7', iconColor: '#16a34a', Icon: CheckCircleSolid },
-    { label: t('invoices.stats.pending'), value: `${cur} ${fmtMoney(pendingAmount)}`, sub: t('invoices.invoices_count', { count: invoices.filter(i => ['draft','sent','partially_paid'].includes(i.status)).length }), cardColor: 'warning', bg: '#fef3c7', iconColor: '#d97706', Icon: ClockSolid },
-    { label: t('invoices.stats.overdue'), value: `${cur} ${fmtMoney(overdueAmount)}`, sub: t('invoices.invoices_count', { count: invoices.filter(i => i.status === 'overdue').length }), cardColor: 'danger', bg: '#fee2e2', iconColor: '#ef4444', Icon: WarningTriangle },
+    { label: t('invoices.stats.pending'), value: `${cur} ${fmtMoney(pendingAmount)}`, sub: t('invoices.invoices_count', { count: Number(stats?.pending_count || 0).toLocaleString('en-AE') }), cardColor: 'warning', bg: '#fef3c7', iconColor: '#d97706', Icon: ClockSolid },
+    { label: t('invoices.stats.overdue'), value: `${cur} ${fmtMoney(overdueAmount)}`, sub: t('invoices.invoices_count', { count: Number(stats?.overdue_count || 0).toLocaleString('en-AE') }), cardColor: 'danger', bg: '#fee2e2', iconColor: '#ef4444', Icon: WarningTriangle },
   ];
 
   /* ═══════════════════════════ RENDER ═══════════════════════════ */
   return (
     <div style={{ padding: 24 }}>
 
-      {/* ── Hero (shared module-hero class, same as ServiceTracking) ── */}
+      {/* ── Hero (shared module-hero class) ── */}
       <div className="module-hero">
         <div className="module-hero-left">
           <div className="module-hero-icon">
@@ -192,7 +207,7 @@ export default function Invoices() {
           <button className="module-btn module-btn-primary" onClick={generateMissing} disabled={generating}
             style={{ background: generating ? '#94a3b8' : undefined }}>
             {generating
-              ? <><span className="trk-spinner" style={{ width:14, height:14, borderWidth:2 }} /> {t('invoices.generating')}</>
+              ? <><span className="inv-spinner inv-spinner--inline" aria-hidden="true" /> {t('invoices.generating')}</>
               : <><FlashSolid width={16} height={16} /> {t('invoices.generate_invoices')}</>
             }
           </button>
@@ -202,7 +217,7 @@ export default function Invoices() {
         </div>
       </div>
 
-      {/* ── Stat Cards (same style as ServiceTracking) ── */}
+      {/* ── Stat Cards ── */}
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
@@ -271,13 +286,13 @@ export default function Invoices() {
         </div>
 
         <FilterPill active={!statusFilter} onClick={() => { setStatusFilter(''); setPage(1); }}>
-          {t('invoices.filter_all')} ({invoices.length})
+          {t('invoices.filter_all')} ({Number(stats?.total ?? total).toLocaleString('en-AE')})
         </FilterPill>
         {Object.entries(STATUS_CONFIG).filter(([k]) => !['void','cancelled'].includes(k)).map(([key, cfg]) => {
           const IconComp = cfg.Icon;
           return (
             <FilterPill key={key} active={statusFilter === key} onClick={() => { setStatusFilter(key); setPage(1); }} color={cfg.color}>
-              <IconComp width={13} height={13} /> {t('invoices.status.' + key)} ({invoices.filter(i => i.status === key).length})
+              <IconComp width={13} height={13} /> {t('invoices.status.' + key)} ({Number(stats?.by_status?.[key] || 0).toLocaleString('en-AE')})
             </FilterPill>
           );
         })}
@@ -313,9 +328,9 @@ export default function Invoices() {
           {totalPages > 1 && (
             <div style={{ display: 'flex', justifyContent: 'center', gap: 6, marginTop: 24, flexWrap: 'wrap' }}>
               <PgBtn disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>{t('invoices.prev')}</PgBtn>
-              {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
-                <PgBtn key={p} active={p === page} onClick={() => setPage(p)}>{p}</PgBtn>
-              ))}
+              {pageWindow.map((p, i) => p === '…'
+                ? <span key={`gap-${i}`} style={{ alignSelf: 'center', color: '#94a3b8', padding: '0 4px' }}>…</span>
+                : <PgBtn key={p} active={p === page} onClick={() => setPage(p)}>{p}</PgBtn>)}
               <PgBtn disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>{t("common.next")}</PgBtn>
             </div>
           )}
@@ -482,7 +497,7 @@ function InvoiceCard({ inv, onView, onDownload, onDelete, onStatusChange }) {
         }}>
           <div style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 3 }}>{t("invoices.total_amount")}</div>
           <div style={{ fontSize: 24, fontWeight: 800, color: '#fff', letterSpacing: '-0.5px' }}>
-            {inv.currency || cur} {parseFloat(inv.total_amount || 0).toFixed(2)}
+            {inv.currency || cur} {Number(inv.total_amount || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
         </div>
 
@@ -496,7 +511,7 @@ function InvoiceCard({ inv, onView, onDownload, onDelete, onStatusChange }) {
           </div>
           <div>
             <div style={{ color: '#94a3b8', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', marginBottom: 2 }}>{t('invoices.payment')}</div>
-            <div style={{ color: '#1e293b', fontWeight: 600, textTransform: 'uppercase' }}>{inv.payment_method || 'COD'}</div>
+            <div style={{ color: '#1e293b', fontWeight: 600, textTransform: 'uppercase' }}>{payLabel(inv.payment_method)}</div>
           </div>
         </div>
 
@@ -593,12 +608,12 @@ function DetailModal({ invoice, loading, onClose, onDownload, onStatusChange, fm
       >
         {loading ? (
           <div style={{ padding: 80, textAlign: 'center', color: '#94a3b8' }}>
-            <div className="trk-spinner" style={{ margin: '0 auto 16px' }} />
+            <div className="inv-spinner inv-spinner--modal" aria-hidden="true" />
             <div>{t("invoices.loading_details")}</div>
           </div>
         ) : invoice ? (
           <>
-            {/* Modal Header — dark gradient like ServiceTracking sections */}
+            {/* Modal Header — dark gradient */}
             <div style={{
               background: 'linear-gradient(135deg, #1e293b, #334155)',
               padding: '20px 24px',
@@ -645,7 +660,9 @@ function DetailModal({ invoice, loading, onClose, onDownload, onStatusChange, fm
               {/* Info Grid */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
                 <MInfoBlock label={t('invoices.customer')} value={invoice.customer_name || t('invoices.walk_in')} sub={invoice.customer_email} />
-                <MInfoBlock label={t('invoices.order')} value={invoice.work_order_number || t('invoices.na')} sub={invoice.order_status ? t('invoices.order_status_prefix', { status: invoice.order_status }) : null} />
+                <MInfoBlock label={t('invoices.order')} value={invoice.work_order_number || t('invoices.na')} sub={(invoice.work_order_status || invoice.order_status)
+                  ? t('invoices.order_status_prefix', { status: woLabel(t, { status: invoice.work_order_status || invoice.order_status }) })
+                  : null} />
                 <MInfoBlock label={t('invoices.created')} value={fmtDate(invoice.created_at)} />
                 <MInfoBlock label={t('invoices.due_date')} value={invoice.due_date ? fmtDate(invoice.due_date) : t('invoices.not_set')} />
               </div>
@@ -732,7 +749,7 @@ function DetailModal({ invoice, loading, onClose, onDownload, onStatusChange, fm
                 </div>
                 <div style={{ background: '#f8fafc', padding: 14, borderRadius: 10, border: '1px solid #f1f5f9' }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', marginBottom: 6 }}>{t('invoices.payment')}</div>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: '#1e293b', textTransform: 'uppercase' }}>{invoice.payment_method || 'COD'}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#1e293b', textTransform: 'uppercase' }}>{payLabel(invoice.payment_method)}</div>
                   {invoice.paid_at && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{t('invoices.paid_at')} {fmtDate(invoice.paid_at)}</div>}
                 </div>
               </div>

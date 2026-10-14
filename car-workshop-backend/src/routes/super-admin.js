@@ -2023,3 +2023,4 @@ router.delete('/barcodes/:id', verifySuperAdmin, async (req, res) => {
 });
 
 export default router;
+export { verifySuperAdmin };

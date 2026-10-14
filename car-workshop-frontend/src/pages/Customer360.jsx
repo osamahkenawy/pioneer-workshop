@@ -5,6 +5,7 @@ import {
   User, Car, Wallet, Calendar, Megaphone, Package, Page, EmojiSatisfied,
   Bell, Phone, Mail, MapPin, Plus, ArrowLeft, ArrowRight, CheckCircle,
   Clock, ClipboardCheck, Search, Download, Filter, MoreVert, Wrench, Xmark,
+  Key, Copy,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { fmtCurrency } from '../utils/currency';
@@ -31,6 +32,8 @@ const EVENT_META = {
   feedback:             { Icon: EmojiSatisfied, tone: 'teal'   },
   activity:             { Icon: Phone,          tone: 'blue'   },
   reminder_sent:        { Icon: Bell,           tone: 'amber'  },
+  estimate:             { Icon: Page,           tone: 'amber'  },
+  booking:              { Icon: Calendar,       tone: 'blue'   },
 };
 
 const TONES = {
@@ -89,6 +92,165 @@ const fmtDay = v => {
   return Number.isNaN(+d) ? String(v).slice(0, 10)
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 };
+
+/** Clipboard, with the textarea fallback for http:// and older browsers.
+ *  `text` may be a promise (the link still being made): the write starts
+ *  inside the click — Safari and iOS refuse one made after an await. */
+async function copyText(text) {
+  try {
+    if (typeof text === 'string') await navigator.clipboard.writeText(text);
+    else await navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then(v => new Blob([v], { type: 'text/plain' })) })]);
+    return true;
+  } catch { /* fall back */ }
+  let value;
+  try { value = typeof text === 'string' ? text : await text; } catch { return false; }
+  const ta = document.createElement('textarea');
+  ta.value = value; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+const WhatsAppGlyph = () => (
+  <svg width={15} height={15} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M17.47 14.38c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.16-.17.2-.35.22-.64.07-.3-.15-1.26-.46-2.39-1.47-.88-.79-1.48-1.76-1.65-2.06-.17-.3-.02-.46.13-.6.13-.14.3-.35.45-.52.15-.17.2-.3.3-.5.1-.2.05-.37-.03-.52-.07-.15-.67-1.61-.92-2.2-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.8.37-.27.3-1.04 1.02-1.04 2.48 0 1.46 1.07 2.88 1.21 3.07.15.2 2.1 3.2 5.08 4.49.71.31 1.26.49 1.7.63.71.22 1.36.19 1.87.12.57-.09 1.76-.72 2-1.41.25-.7.25-1.29.18-1.41-.08-.13-.27-.2-.57-.35M12.05 21.79h-.01a9.87 9.87 0 0 1-5.03-1.38l-.36-.21-3.74.98 1-3.65-.24-.37a9.86 9.86 0 0 1-1.51-5.26c0-5.45 4.44-9.88 9.89-9.88 2.64 0 5.12 1.03 6.99 2.9a9.83 9.83 0 0 1 2.89 6.99c0 5.45-4.44 9.88-9.89 9.88m8.41-18.3A11.82 11.82 0 0 0 12.05 0C5.5 0 .16 5.34.16 11.89c0 2.1.55 4.14 1.59 5.95L.06 24l6.3-1.65a11.88 11.88 0 0 0 5.69 1.45h.01c6.55 0 11.89-5.34 11.89-11.89 0-3.18-1.24-6.17-3.48-8.41z" />
+  </svg>
+);
+
+/**
+ * Customer portal access — "No portal access" / "Invited <date>" /
+ * "Active — last sign-in <date>", and the button that gives access or sends
+ * a new link: by WhatsApp (opens the advisor's WhatsApp with the message),
+ * e-mail, or a copied link. POST /api/customers/:id/portal-access creates the
+ * customer's portal login, marks them verified and issues a link to set
+ * their password (7 days). They sign in with their e-mail or mobile number.
+ */
+function PortalAccessCard({ customerId }) {
+  const { t } = useTranslation();
+  const [info, setInfo] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [note, setNote] = useState(null);
+  const [link, setLink] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    setInfo(null); setFailed(false); setNote(null); setLink('');
+    api.get(`/customers/${customerId}/portal-access`)
+      .then(r => { if (!alive) return; if (r?.success) setInfo(r.data); else setFailed(true); })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [customerId]);
+
+  const send = async (channel) => {
+    setBusy(channel); setNote(null);
+    // Opened now, while the click still counts as the user's — a window
+    // opened after the request would be blocked as a pop-up. The copy too.
+    const win = channel === 'whatsapp' ? window.open('', '_blank') : null;
+    const sent = api.post(`/customers/${customerId}/portal-access`, { channel });
+    const copied = channel === 'link'
+      ? copyText(sent.then(r => (r.success ? r.url : Promise.reject(new Error(r.message)))))
+      : null;
+    try {
+      const res = await sent;
+      if (!res.success) {
+        if (win) win.close();
+        setNote({ kind: 'error', text: res.message || t('portal.access.err', 'Could not give portal access.') });
+        if (res.url) setLink(res.url);
+        return;
+      }
+      if (res.data) setInfo(res.data);
+      setLink(res.url || '');
+      if (channel === 'whatsapp') {
+        if (win) win.location.href = res.whatsapp_url; else window.open(res.whatsapp_url, '_blank');
+        setNote({ kind: 'ok', text: t('portal.access.whatsapp_opened', 'WhatsApp opened with the message — press send there.') });
+      } else if (channel === 'email') {
+        setNote({ kind: 'ok', text: res.message || t('portal.access.email_sent', 'E-mail sent.') });
+      } else {
+        setNote({ kind: 'ok', text: await copied
+          ? t('portal.access.link_copied', 'Link copied — paste it to the customer.')
+          : t('portal.access.copy_manually', 'Copy the link below and send it to the customer.') });
+      }
+    } catch (e) {
+      if (win) win.close();
+      setNote({ kind: 'error', text: e.message || t('portal.access.err', 'Could not give portal access.') });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const ids = info ? [info.login_email, info.login_phone].filter(Boolean) : [];
+  let state = null;
+  if (info) {
+    if (info.status === 'active') {
+      state = { cls: 'on', text: t('portal.access.active', 'Active — last sign-in {{date}}', { date: fmtWhen(info.last_login_at) }) };
+    } else if (info.status === 'invited') {
+      state = info.invited_at
+        ? { cls: info.invite_expired ? 'warn' : 'wait', text: info.invite_expired
+          ? t('portal.access.invited_expired', 'Invited {{date}} — the link has run out', { date: fmtDay(info.invited_at) })
+          : t('portal.access.invited', 'Invited {{date}}', { date: fmtDay(info.invited_at) }) }
+        : { cls: 'wait', text: t('portal.access.not_signed_in', 'Has a login — not signed in yet') };
+    } else {
+      state = { cls: 'off', text: t('portal.access.none', 'No portal access') };
+    }
+  }
+
+  return (
+    <div className="c360-card c360-portal">
+      <div className="c360-panel-head">
+        <h3 className="c360-panel-title"><Key width={14} height={14} /> {t('portal.access.title', 'Customer portal')}</h3>
+      </div>
+      <div className="c360-portal-body">
+        {!info && !failed && <p className="c360-row-meta">{t('portal.loading', 'Loading…')}</p>}
+        {failed && <p className="c360-row-meta">{t('portal.access.load_failed', 'Could not load the portal access.')}</p>}
+        {info && (
+          <>
+            <span className={`c360-state ${state.cls}`}>{state.text}</span>
+            <p className="c360-row-meta">
+              {ids.length
+                ? t('portal.access.signs_in_with', 'Signs in with {{ids}}', { ids: ids.join(' / ') })
+                : t('portal.access.no_contact', 'Add an e-mail or a mobile number first — the customer signs in with one of them.')}
+            </p>
+            {!info.is_active ? (
+              <p className="c360-row-meta">{t('portal.access.inactive', 'This customer is deactivated.')}</p>
+            ) : info.can_send ? (
+              <>
+                <p className="c360-portal-lead">{info.status === 'none'
+                  ? t('portal.access.give_by', 'Give portal access — send the link by:')
+                  : t('portal.access.resend_by', 'Send a new link by:')}</p>
+                <div className="c360-portal-actions">
+                  <button type="button" className="c360-portal-btn wa" disabled={!!busy || !info.can_whatsapp}
+                    title={!info.can_whatsapp ? t('portal.access.no_phone', 'No mobile number on file') : undefined}
+                    onClick={() => send('whatsapp')}>
+                    <WhatsAppGlyph /> {busy === 'whatsapp' ? t('portal.access.sending', 'Sending…') : t('portal.access.whatsapp', 'WhatsApp')}
+                  </button>
+                  <button type="button" className="c360-portal-btn" disabled={!!busy || !info.can_email}
+                    title={!info.can_email ? t('portal.access.no_email', 'No e-mail on file') : undefined}
+                    onClick={() => send('email')}>
+                    <Mail width={15} height={15} /> {busy === 'email' ? t('portal.access.sending', 'Sending…') : t('portal.access.email', 'E-mail')}
+                  </button>
+                  <button type="button" className="c360-portal-btn" disabled={!!busy || !ids.length} onClick={() => send('link')}>
+                    <Copy width={15} height={15} /> {busy === 'link' ? t('portal.access.sending', 'Sending…') : t('portal.access.copy_link', 'Copy link')}
+                  </button>
+                </div>
+                <p className="c360-consent-note">{t('portal.access.hint', 'The link lets the customer choose a password. It works for 7 days; a new link replaces the old one.')}</p>
+              </>
+            ) : (
+              <p className="c360-row-meta">{t('portal.access.advisor_only', 'A Service Advisor or a manager gives portal access.')}</p>
+            )}
+            {note && <div className={`c360-banner ${note.kind}`} role="status" style={{ marginBlock: '10px 0' }}>{note.text}</div>}
+            {link && (
+              <input className="form-control c360-portal-link" readOnly value={link} dir="ltr"
+                aria-label={t('portal.access.link_label', 'Set-password link')} onFocus={e => e.target.select()} />
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function Customer360() {
   const { id } = useParams();
@@ -188,8 +350,8 @@ export default function Customer360() {
     const all = data?.timeline?.events || [];
     if (eventFilter === 'all') return all;
     const groups = {
-      work:     ['work_order', 'work_order_completed'],
-      enquiry:  ['enquiry'],
+      work:     ['work_order', 'work_order_completed', 'booking'],
+      enquiry:  ['enquiry', 'estimate'],
       activity: ['activity', 'reminder_sent'],
       money:    ['invoice'],
       feedback: ['feedback'],
@@ -486,6 +648,8 @@ export default function Customer360() {
 
         {/* ── Side ───────────────────────────────────────────── */}
         <div className="c360-side">
+          <PortalAccessCard customerId={c.id} />
+
           <div className="c360-card">
             <div className="c360-panel-head">
               <h3 className="c360-panel-title"><Car width={14} height={14} /> Vehicles · {vehicles.length}</h3>
