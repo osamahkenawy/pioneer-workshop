@@ -435,7 +435,7 @@ export default function LoginPage() {
         </div>
       </div>
 
-      <div className="login-right" style={loginPhoto ? { backgroundImage: `url(${loginPhoto})`, backgroundPosition: '62% center' } : undefined} />
+      <div className="login-right" style={loginPhoto ? { backgroundImage: `url(${loginPhoto})`, backgroundPosition: 'center' } : undefined} />
     </div>
   );
 }
