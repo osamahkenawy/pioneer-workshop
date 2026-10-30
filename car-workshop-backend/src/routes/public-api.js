@@ -10,7 +10,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { onEnquiryCreated, findCustomerByContact, enquiryContactMethods } from '../lib/crm-cycle.js';
+import { onEnquiryCreated, findCustomerByContact, enquiryContactMethods, openEnquiryWorkOrder } from '../lib/crm-cycle.js';
 import { query, execute } from '../lib/database.js';
 import { sendEmail, buildEmailTemplate, getWorkshopBranding, getLogoCidAttachment } from '../lib/email.js';
 import { config } from '../config.js';
@@ -901,9 +901,13 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     }
     if (!result) throw new Error('Could not allocate an enquiry number');
 
-    // Follow up: the website lead lands as a call-back task.
+    // Follow up: the website lead lands as a call-back task, and as its work
+    // order (the visit) at once — the customer found or added by phone /
+    // e-mail, Received via Website (or Social media), the Service Advisors
+    // told (lib/crm-cycle.js). It never fails the submission: the lead is kept.
     const [enqRow] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
     await onEnquiryCreated(enqRow);
+    await openEnquiryWorkOrder({ enquiryId: result.insertId, workshopId });
 
     return res.status(201).json({
       success: true,

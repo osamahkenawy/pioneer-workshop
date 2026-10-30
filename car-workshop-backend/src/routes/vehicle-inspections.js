@@ -15,6 +15,7 @@ import { isTechnician } from '../lib/access.js';
 import { customerAppBase } from '../lib/customer-link.js';
 import { woLabel } from '../lib/status-labels.js';
 import { IMAGE_COORD, DAMAGE_CODES } from '../lib/inspection-marks.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
 
 /* The paper inspection form, uploaded instead of (or as well as) filling it
  * in on screen: scans, photos of the pages or a PDF. Kept out of the public
@@ -25,14 +26,29 @@ export const DOCS_DIR = path.resolve('private-uploads', 'inspections');
 fs.mkdirSync(DOCS_DIR, { recursive: true });
 const MAX_DOCS = 10;
 const DOC_MIME = { pdf: 'application/pdf', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+const privateStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, DOCS_DIR),
+  filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
+});
 const docUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, DOCS_DIR),
-    filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
-  }),
+  storage: privateStorage,
   limits: { fileSize: 15 * 1024 * 1024, files: MAX_DOCS },
   fileFilter: (_req, file, cb) => (/\.(pdf|jpe?g|png|webp)$/i.test(file.originalname)
     ? cb(null, true) : cb(new Error('Upload a PDF or a photo (JPG, PNG, WEBP).'))),
+});
+
+/* Vehicle photos taken during the physical inspection, next to the diagram
+ * (on-screen form): the phone or tablet camera, or files. Kept with the paper
+ * forms — private, the same JSON shape in vehicle_inspections.photos — and
+ * read back with the staff login (GET /:id/photos/:photoId), from the
+ * customer's link and in the customer portal. Locked once completed. */
+const MAX_PHOTOS = 10;
+const PHOTO_KINDS = ['jpeg', 'png', 'webp'];
+const photoUpload = multer({
+  storage: privateStorage,
+  limits: { fileSize: 15 * 1024 * 1024, files: MAX_PHOTOS },
+  fileFilter: (_req, file, cb) => (/\.(jpe?g|png|webp)$/i.test(file.originalname)
+    ? cb(null, true) : cb(new Error('Add a photo (JPG, PNG or WEBP).'))),
 });
 
 /**
@@ -42,8 +58,9 @@ const docUpload = multer({
  *
  * Backs the visual inspection form: a car diagram the inspector clicks to
  * drop damage markers (legend codes: DS deep scratch, DD dents/dings, ...),
- * done with the customer present at intake (Step 4, the technical
- * inspection) and again at handover (Step 7).
+ * with vehicle photos, done with the customer present at drop-off — the
+ * physical inspection, inspection_type 'intake' (Step 3) — and again at
+ * handover (Step 7).
  *
  * Markers are stored in `vehicle_inspections.marks` as JSON —
  *   [{ id, view: top|left|right|front|rear, code, x: 0..1, y: 0..1, coord?: 'img', note }]
@@ -62,6 +79,13 @@ const docUpload = multer({
  * or — when they could not stay — from the link POST /:id/share sends them
  * (the customer's page is public-inspections.js). The link is their copy
  * either way.
+ *
+ * That sign-off on the physical inspection is the customer's acknowledgement
+ * of the vehicle's condition, and it opens an external customer's main job
+ * card (lib/physical-inspection.js): at completion when signed at the car or
+ * done on the paper form, else when they sign later (here at the car, from
+ * the link or in the portal). Completing and signing answer with job_card:
+ * { open, number, opened_now, waiting_for_signature }.
  */
 
 const router = express.Router();
@@ -77,6 +101,28 @@ const VIEWS = ['top', 'left', 'right', 'front', 'rear'];
 // The walk-arounds done with the customer; 'qc' is the workshop's own check.
 const CUSTOMER_FACING = ['intake', 'joint'];
 const SHARE_CHANNELS = ['whatsapp', 'email', 'link'];
+
+/**
+ * Who records an inspection — fills it in, adds photos, signs, completes,
+ * deletes: the roles that open job cards (job.open), since the physical
+ * inspection is what opens the job card; the joint handover check also the
+ * Step 7 desk (delivery.handover) and the workshop's own QC check the QC
+ * roles. Every other staff role may read it.
+ */
+export const mayRecord = (user, type) => can(user, 'job.open')
+  || (type === 'joint' && can(user, 'delivery.handover'))
+  || (type === 'qc' && can(user, 'qc.perform'));
+const READ_ONLY = { success: false, code: 'ROLE_NOT_ALLOWED', message: 'The vehicle inspection is recorded by the Service Advisor or the Supervisor — your role can view it.' };
+const recordGuard = async (req, res, next) => {
+  try {
+    const [row] = await query('SELECT inspection_type FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
+    return mayRecord(req.user, row.inspection_type) ? next() : res.status(403).json(READ_ONLY);
+  } catch (err) {
+    console.error('[VehicleInspections] Role check error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to check the inspection' });
+  }
+};
 
 const SIGNATURE_REQUIRED_MSG = "The customer hasn't signed yet. Ask them to sign above — or, if they aren't here, tick “Customer not present” and send them the link to sign.";
 
@@ -136,8 +182,9 @@ function parseMarks(row) {
     try { row.marks = JSON.parse(row.marks); } catch { row.marks = []; }
   }
   row.marks = row.marks || [];
-  // Uploaded documents: what the screen needs, never the file's place on disk.
+  // Uploaded documents and photos: what the screen needs, never the file's place on disk.
   row.documents = readDocs(row).map(({ file, ...d }) => d);
+  row.photos = readPhotos(row).map(({ file, ...p }) => p);
   // The customer's link is handed out by GET / POST /:id/share, to the roles that send it.
   delete row.share_token;
   return row;
@@ -237,6 +284,10 @@ router.post('/', async (req, res) => {
       [work_order_id, inspection_type, req.workshopId]
     );
     if (existing) return returnExisting();
+    // Viewers read an inspection that exists; they don't start one.
+    if (!mayRecord(req.user, inspection_type)) {
+      return res.status(403).json({ ...READ_ONLY, code: 'NOT_STARTED', message: 'The inspection has not been started yet — the Service Advisor does it with the customer.' });
+    }
 
     const b = req.body;
     const result = await execute(
@@ -289,7 +340,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/vehicle-inspections/:id — save the form (marks + header fields)
-router.put('/:id', async (req, res) => {
+router.put('/:id', recordGuard, async (req, res) => {
   try {
     const [row] = await query(
       'SELECT id, status FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
@@ -342,13 +393,15 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-export function readDocs(row) {
-  let d = row?.documents;
+const fileList = v => {
+  let d = v;
   if (typeof d === 'string') { try { d = JSON.parse(d); } catch { d = []; } }
   return Array.isArray(d) ? d : [];
-}
+};
+export const readDocs = row => fileList(row?.documents);
+export const readPhotos = row => fileList(row?.photos);
 
-/** Stream one uploaded file — here with the staff login, and from the customer's link. */
+/** Stream one uploaded file (a page of the paper form, a photo) — here with the staff login, from the customer's link and in the portal. */
 export function sendDocument(res, doc) {
   if (!doc || !/^[\w.-]+$/.test(doc.file || '')) return res.status(404).json({ success: false, message: 'Document not found' });
   res.setHeader('Content-Type', doc.type || 'application/octet-stream');
@@ -363,7 +416,7 @@ export function sendDocument(res, doc) {
  * form (multipart, field "files", up to 10 files of 15 MB: PDF, JPG, PNG,
  * WEBP). Content is checked, not just the extension.
  */
-router.post('/:id/documents', (req, res, next) => docUpload.array('files', MAX_DOCS)(req, res, err => {
+router.post('/:id/documents', recordGuard, (req, res, next) => docUpload.array('files', MAX_DOCS)(req, res, err => {
   if (err) return res.status(400).json({ success: false, message: err.code === 'LIMIT_FILE_SIZE' ? 'Each file can be up to 15 MB.' : err.message });
   next();
 }), validateUpload(DOC_KINDS, { field: 'files' }), async (req, res) => {
@@ -410,7 +463,7 @@ router.get('/:id/documents/:docId', async (req, res) => {
 });
 
 /** DELETE /api/vehicle-inspections/:id/documents/:docId — remove an upload (not after completion). */
-router.delete('/:id/documents/:docId', async (req, res) => {
+router.delete('/:id/documents/:docId', recordGuard, async (req, res) => {
   try {
     const [row] = await query('SELECT id, status, documents FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
@@ -429,11 +482,109 @@ router.delete('/:id/documents/:docId', async (req, res) => {
 });
 
 /**
+ * POST /api/vehicle-inspections/:id/photos — vehicle photos on the on-screen
+ * form (multipart, field "files": up to 10 photos per inspection, 15 MB each,
+ * JPG / PNG / WEBP; content checked, not just the extension). Not after
+ * completion, and not on a paper-form inspection (its upload carries them).
+ */
+router.post('/:id/photos', recordGuard, (req, res, next) => photoUpload.array('files', MAX_PHOTOS)(req, res, err => {
+  if (err) return res.status(400).json({ success: false, message: err.code === 'LIMIT_FILE_SIZE' ? 'Each photo can be up to 15 MB.' : err.message });
+  next();
+}), validateUpload(PHOTO_KINDS, { field: 'files' }), async (req, res) => {
+  const files = req.files || [];
+  const discard = () => Promise.all(files.map(f => fs.promises.unlink(f.path).catch(() => {})));
+  try {
+    if (!files.length) return res.status(400).json({ success: false, message: 'Choose a photo to add.' });
+    const [row] = await query('SELECT id, status, entry_mode, photos FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!row) { await discard(); return res.status(404).json({ success: false, message: 'Inspection not found' }); }
+    if (row.status === 'completed') { await discard(); return res.status(409).json({ success: false, message: 'This inspection is completed; it can no longer be changed.' }); }
+    if (row.entry_mode === 'document') {
+      await discard();
+      return res.status(409).json({ success: false, code: 'PAPER_FORM', message: 'This inspection is recorded on the paper form — upload the photos with it, or switch to filling it in on screen.' });
+    }
+    const photos = readPhotos(row);
+    if (photos.length + files.length > MAX_PHOTOS) { await discard(); return res.status(400).json({ success: false, message: `Up to ${MAX_PHOTOS} photos per inspection.` }); }
+    for (const f of files) {
+      photos.push({
+        id: crypto.randomBytes(6).toString('hex'),
+        name: String(f.originalname).slice(0, 200),
+        type: DOC_MIME[f.detectedKind] || f.mimetype,
+        size: f.size,
+        file: path.basename(f.path),
+        uploaded_at: new Date().toISOString(),
+        uploaded_by: req.user?.id || null,
+      });
+    }
+    await execute('UPDATE vehicle_inspections SET photos = ? WHERE id = ? AND workshop_id = ?', [JSON.stringify(photos), row.id, req.workshopId]);
+    const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [row.id]);
+    return res.status(201).json({ success: true, data: parseMarks(updated) });
+  } catch (err) {
+    await discard();
+    console.error('[VehicleInspections] Photo upload error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to add the photo' });
+  }
+});
+
+/** GET /api/vehicle-inspections/:id/photos/:photoId — the photo itself (staff login). */
+router.get('/:id/photos/:photoId', async (req, res) => {
+  try {
+    const [row] = await query('SELECT photos FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    return sendDocument(res, readPhotos(row).find(p => p.id === req.params.photoId));
+  } catch (err) {
+    console.error('[VehicleInspections] Photo read error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load the photo' });
+  }
+});
+
+/** DELETE /api/vehicle-inspections/:id/photos/:photoId — remove a photo (not after completion). */
+router.delete('/:id/photos/:photoId', recordGuard, async (req, res) => {
+  try {
+    const [row] = await query('SELECT id, status, photos FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
+    if (row.status === 'completed') return res.status(409).json({ success: false, message: 'This inspection is completed; it can no longer be changed.' });
+    const photos = readPhotos(row);
+    const photo = photos.find(p => p.id === req.params.photoId);
+    if (!photo) return res.status(404).json({ success: false, message: 'Photo not found' });
+    await execute('UPDATE vehicle_inspections SET photos = ? WHERE id = ?', [JSON.stringify(photos.filter(p => p !== photo)), row.id]);
+    if (/^[\w.-]+$/.test(photo.file || '')) await fs.promises.unlink(path.join(DOCS_DIR, photo.file)).catch(() => {});
+    const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [row.id]);
+    return res.json({ success: true, data: parseMarks(updated) });
+  } catch (err) {
+    console.error('[VehicleInspections] Photo delete error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to remove the photo' });
+  }
+});
+
+/**
+ * Where the work order's main job card stands after the physical inspection
+ * was completed or signed — opened if the customer's acknowledgement now
+ * allows it (lib/physical-inspection.js; the floor is told when it opens).
+ * Never throws: the inspection is saved whatever happens here.
+ */
+async function jobCardAfter(row, userId) {
+  if (row.inspection_type !== 'intake') return null;
+  try {
+    const r = await openJobCardIfReady({ workOrderId: row.work_order_id, workshopId: row.workshop_id, userId });
+    return {
+      open: r.opened,
+      number: r.jobCard?.job_card_number || null,
+      opened_now: r.opened && r.reason === null,
+      waiting_for_signature: r.reason === 'PHYSICAL_INSPECTION_REQUIRED',
+    };
+  } catch (err) {
+    console.error('[VehicleInspections] Job card after the inspection failed:', err.message);
+    return null;
+  }
+}
+
+/**
  * PATCH /api/vehicle-inspections/:id/complete — sign the inspection off.
  * Body (optional): { customer_present: false } — the customer is not at the car.
- * Also stamps the matching Customer Journey checkpoint on the work order.
+ * Also stamps the matching Customer Journey checkpoint on the work order, and
+ * a physical inspection signed at the car or done on paper opens an external
+ * customer's job card (response job_card, see jobCardAfter()).
  */
-router.patch('/:id/complete', async (req, res) => {
+router.patch('/:id/complete', recordGuard, async (req, res) => {
   try {
     const [row] = await query(
       'SELECT * FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
@@ -442,7 +593,7 @@ router.patch('/:id/complete', async (req, res) => {
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
     // A second call (a double click, a retry) changes nothing: completed_at and
     // inspected_by are on the customer's copy and decide who hears it was signed.
-    if (row.status === 'completed') return res.json({ success: true, data: parseMarks(row), already_completed: true });
+    if (row.status === 'completed') return res.json({ success: true, data: parseMarks(row), already_completed: true, job_card: await jobCardAfter(row, req.user.id) });
     if (row.entry_mode === 'document' && !readDocs(row).length) {
       return res.status(400).json({ success: false, code: 'DOCUMENT_REQUIRED', message: 'Upload the inspection form first (PDF or photos), or switch to filling it in on screen.' });
     }
@@ -480,7 +631,7 @@ router.patch('/:id/complete', async (req, res) => {
     // Auto-advance the work order's status now that a walk-around has been
     // signed off. Only nudges by one step and only from the safe states —
     // staff can still change it through the normal status controls.
-    //  intake  : pending     \u2192 confirmed  ("Inspected": Step 4 signed off, on to pricing)
+    //  intake  : pending     \u2192 confirmed  ("Inspected": the physical inspection, Step 3)
     //  joint   : in_progress \u2192 inspection ("Quality check", Step 7.1)
     // The log notes use the shared status words (lib/status-labels.js).
     try {
@@ -495,7 +646,7 @@ router.patch('/:id/complete', async (req, res) => {
           await execute(
             'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note, created_at) VALUES (?, ?, ?, ?, NOW())',
             [row.work_order_id, 'confirmed', req.user.id,
-              `${woLabel('confirmed')} — intake inspection completed${customerPresent ? '' : ', customer signs from the link'}`]
+              `${woLabel('confirmed')} — physical inspection completed${customerPresent ? '' : ', customer signs from the link'}`]
           );
         }
       } else if (row.inspection_type === 'joint') {
@@ -517,7 +668,8 @@ router.patch('/:id/complete', async (req, res) => {
     }
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: parseMarks(updated) });
+    const jobCard = await jobCardAfter(updated, req.user.id);
+    return res.json({ success: true, data: parseMarks(updated), job_card: jobCard });
   } catch (err) {
     console.error('[VehicleInspections] Complete error:', err);
     return res.status(500).json({ success: false, message: 'Failed to complete inspection' });
@@ -533,9 +685,11 @@ router.patch('/:id/complete', async (req, res) => {
  * the walk-around sign-off is a different signature at a different moment.
  *
  * Before completion it can be redone. After completion it can still be
- * captured once, if the inspection was completed unsigned — never replaced.
+ * captured once, if the inspection was completed unsigned — never replaced;
+ * that signature acknowledges a completed physical inspection and opens an
+ * external customer's job card (response job_card).
  */
-router.patch('/:id/signature', async (req, res) => {
+router.patch('/:id/signature', recordGuard, async (req, res) => {
   try {
     const { signature } = req.body;
     const bad = signatureError(signature);
@@ -543,7 +697,7 @@ router.patch('/:id/signature', async (req, res) => {
     const name = cleanName(req.body.name);
     if (name.length > 150) return res.status(400).json({ success: false, message: 'The name can be up to 150 characters.' });
     const [row] = await query(
-      'SELECT id, work_order_id, status, signature_url FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
+      'SELECT id, workshop_id, work_order_id, inspection_type, status, signature_url FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
@@ -565,7 +719,8 @@ router.patch('/:id/signature', async (req, res) => {
     }
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [row.id]);
-    return res.json({ success: true, url, data: parseMarks(updated) });
+    const jobCard = locked ? await jobCardAfter(updated, req.user.id) : null;
+    return res.json({ success: true, url, data: parseMarks(updated), job_card: jobCard });
   } catch (err) {
     console.error('[VehicleInspections] Signature error:', err);
     return res.status(500).json({ success: false, message: err.message || 'Failed to save signature' });
@@ -769,10 +924,10 @@ router.post('/:id/share/reset', async (req, res) => {
 });
 
 // DELETE /api/vehicle-inspections/:id — discard a draft
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', recordGuard, async (req, res) => {
   try {
     const [row] = await query(
-      'SELECT id, status FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
+      'SELECT id, status, documents, photos FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
@@ -780,6 +935,10 @@ router.delete('/:id', async (req, res) => {
       return res.status(400).json({ success: false, message: 'A completed inspection cannot be deleted' });
     }
     await execute('DELETE FROM vehicle_inspections WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    // Its uploads go with it.
+    for (const f of [...readDocs(row), ...readPhotos(row)]) {
+      if (/^[\w.-]+$/.test(f.file || '')) await fs.promises.unlink(path.join(DOCS_DIR, f.file)).catch(() => {});
+    }
     return res.json({ success: true });
   } catch (err) {
     console.error('[VehicleInspections] Delete error:', err);

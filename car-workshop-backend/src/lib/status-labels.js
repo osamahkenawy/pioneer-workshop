@@ -29,6 +29,12 @@
  *   completed                                  closed          Closed
  *   cancelled                                  cancelled       Cancelled
  *
+ * An "approved" job that still waits for the physical inspection (an
+ * external customer who agreed a quote before the car was walked round: no
+ * job card yet, nothing for the Team Leader to assign) reads "Approved —
+ * physical inspection first" for staff, when the row carries
+ * awaiting_physical_inspection (lib/physical-inspection.js AWAITING_PHYSICAL_SQL).
+ *
  * Technicians never see the work order status; their job card says
  * "QC passed" (jcLabel('qc_passed')).
  */
@@ -101,6 +107,12 @@ export const WO_LABELS = Object.freeze({
   }),
 });
 
+/** Staff words for an approved job still waiting for the physical inspection (see the header). */
+export const WO_APPROVED_INSPECTION_FIRST = Object.freeze({
+  staff: 'Approved — physical inspection first',
+  short: 'Approved — inspect first',
+});
+
 /**
  * Status filters for work order lists. "Waiting" covers checked in,
  * inspected and approved; "accepted" is folded into Technician assigned and
@@ -159,6 +171,10 @@ export function woDisplayKey(rowOrStatus) {
 export function woLabel(rowOrStatus, audience = 'staff') {
   const key = woDisplayKey(rowOrStatus);
   const table = WO_LABELS[audience] || WO_LABELS.staff;
+  if (key === 'approved' && Number(rowOrStatus?.awaiting_physical_inspection)) {
+    const first = WO_APPROVED_INSPECTION_FIRST[WO_LABELS[audience] ? audience : 'staff'];
+    if (first) return first;
+  }
   if (key) return table[key];
   const raw = rowOrStatus && typeof rowOrStatus === 'object' ? rowOrStatus.status : rowOrStatus;
   return humanize(raw);

@@ -9,7 +9,7 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const out = []; let section = '';
 const expect = (what, ok, detail) => out.push(`${ok ? 'PASS' : 'FAIL'}  [${section}] ${what}${detail !== undefined && detail !== '' ? '  — ' + detail : ''}`);
 const call = async (method, path, token, body) => {
@@ -17,7 +17,8 @@ const call = async (method, path, token, body) => {
   let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j };
 };
 const n = v => Math.round(Number(v) * 100) / 100;
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {}; for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 const notesFor = async (userId, like) => (await q('SELECT title FROM user_notifications WHERE user_id = ? AND id > ? AND title LIKE ?', [userId, baseline.user_notifications, like])).length;
 const wf = async (tok, id) => (await call('GET', `/workflow/work-orders/${id}`, tok)).json?.data;
@@ -25,6 +26,11 @@ const wf = async (tok, id) => (await call('GET', `/workflow/work-orders/${id}`, 
 const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; let v; do { v = await fn(); if (v) return v; await new Promise(r => setTimeout(r, 150)); } while (Date.now() < end); return v; };
 const custMsgs = async (woId, type) => q('SELECT template_key, message, recipient_email FROM notifications WHERE work_order_id = ? AND type = ? AND id > ? ORDER BY id', [woId, type, baseline.notifications]);
 const stepStates = d => d.steps.map(s => `${s.n}:${s.state}`).join(' ');
+const chk = (d, n, key) => d?.steps?.[n - 1]?.checks?.find(c => c.key === key);
+const mainOf = async woId => (await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId]))[0];
+// A 1×1 PNG, as the signature pad would send.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 try {
   const pw = 'Qa' + crypto.randomBytes(8).toString('hex') + '1';
@@ -53,22 +59,53 @@ try {
   const created = await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh.id, customer_name: cust.full_name, customer_phone: cust.phone,
     description: 'AC not cooling; brake noise', odometer_in: 64000, payment_method: 'cash', service_fee: 0, items: [] });
   const woId = created.json?.data?.id;
-  const [mainJc] = await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId]);
-  expect('work order created and the main job card opened with it (Step 3)', created.status === 201 && !!mainJc, mainJc?.job_card_number);
-  expect('Supervisor and Team Leader told a request was raised (Step 4)', await notesFor(users.supervisor.id, 'New request%') === 1 && await notesFor(users.leader.id, 'New request%') === 1, '');
+  // The client's change (2026-10-29): an EXTERNAL customer's main job card
+  // opens when they acknowledge the physical inspection, not with the work order.
+  expect('work order created; the external customer\'s main job card waits for the physical inspection (Step 3)', created.status === 201 && !(await mainOf(woId)), `HTTP ${created.status}`);
+  expect('no "New request" for the floor before the job card opens', await notesFor(users.supervisor.id, 'New request%') === 0 && await notesFor(users.leader.id, 'New request%') === 0, '');
   let d = await wf(advisor, woId);
-  expect('workflow: steps 1–3 done, step 4 current', d.steps.slice(0, 3).every(s => s.state === 'done') && d.current_step === 4, stepStates(d));
-
-  // ── Steps 4–5 ──────────────────────────────────────────────────────
-  section = '4-5 pricing';
-  const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [
+  expect('workflow: steps 1–2 done, step 3 current; next: the physical inspection with the customer',
+    d.steps.slice(0, 2).every(s => s.state === 'done') && d.current_step === 3 && d.next?.key === 'physical_inspection' && chk(d, 3, 'physical_ack')?.done === false,
+    `${stepStates(d)} · next ${d.next?.key}`);
+  const LINES1 = [
     { job_name: 'AC Compressor', line_type: 'labour', description: 'AC compressor - labour', quantity: 1, unit_price: 100 },
     { job_name: 'AC Compressor', line_type: 'parts', description: 'AC compressor', quantity: 1, unit_price: 999 },
     { job_name: 'Brake pad', line_type: 'labour', description: 'Brake pad - labour', quantity: 1.5, unit_price: 80 },
     { job_name: 'Brake pad', line_type: 'parts', description: 'Brake pads', quantity: 1 },
-  ] });
+  ];
+  const gated = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: LINES1 });
+  const advOpen = await call('POST', `/workflow/work-orders/${woId}/job-card`, advisor, { override_reason: 'Customer in a hurry' });
+  expect('before the acknowledgement the estimate and the Service Advisor opening the job card are refused (409 PHYSICAL_INSPECTION_REQUIRED)',
+    gated.status === 409 && gated.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && advOpen.status === 409 && advOpen.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && !(await mainOf(woId)),
+    `estimate ${gated.status} ${gated.json?.code || ''} / job card ${advOpen.status} ${advOpen.json?.code || ''}`);
+  const insp = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
+  const unsigned = await call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, advisor, {});
+  d = await wf(advisor, woId);
+  expect('physical inspection in progress: with the customer at the car it cannot be completed unsigned; next: finish it',
+    unsigned.status === 400 && unsigned.json?.code === 'SIGNATURE_REQUIRED' && d.next?.key === 'finish_physical_inspection', `${unsigned.status} ${unsigned.json?.code || ''} · next ${d.next?.key}`);
+  const sig = await call('PATCH', `/vehicle-inspections/${insp?.id}/signature`, advisor, { signature: PNG, name: 'QA WF Walk-in' });
+  expect('signed before completion: the walk-around may still change, so no job card yet', sig.status === 200 && !(await mainOf(woId)), `HTTP ${sig.status}`);
+  const ack = await call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, advisor, {});
+  const mainJc = await mainOf(woId);
+  expect('completed with the customer\'s signature → the main job card opens (Step 3)',
+    ack.status === 200 && ack.json?.job_card?.opened_now === true && !!mainJc && ack.json.job_card.number === mainJc.job_card_number, `HTTP ${ack.status} ${JSON.stringify(ack.json?.job_card)}`);
+  expect('Supervisor and Team Leader told a request was raised (Step 4) — once, on the acknowledgement', await notesFor(users.supervisor.id, 'New request%') === 1 && await notesFor(users.leader.id, 'New request%') === 1, '');
+  const [ackLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [woId]);
+  expect('history: "Main job card … opened — physical inspection acknowledged (signed by the customer at the car)"',
+    !!mainJc && (ackLog?.note || '').includes(mainJc.job_card_number) && /physical inspection acknowledged \(signed by the customer at the car\)/.test(ackLog.note), ackLog?.note);
+  d = await wf(advisor, woId);
+  expect('workflow: steps 1–3 done, step 4 current; Step 3 reads "Signed at the car"',
+    d.steps.slice(0, 3).every(s => s.state === 'done') && d.current_step === 4 && chk(d, 3, 'physical_ack')?.done === true && /^Signed at the car/.test(chk(d, 3, 'physical_ack')?.detail || ''),
+    `${stepStates(d)} · ${chk(d, 3, 'physical_ack')?.detail}`);
+
+  // ── Steps 4–5 ──────────────────────────────────────────────────────
+  section = '4-5 pricing';
+  const noPref = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, parts_preference: [], lines: LINES1 });
+  expect('the customer\'s parts preference cannot be empty (400 PARTS_PREFERENCE_REQUIRED)', noPref.status === 400 && noPref.json?.code === 'PARTS_PREFERENCE_REQUIRED', `HTTP ${noPref.status} ${noPref.json?.code || ''}`);
+  const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: LINES1 });
   const estId = est.json?.estimateId;
-  expect('advisor raises the estimate for this visit; 2 part lines wait for the Store', est.status === 201 && est.json.parts_to_price === 2, `parts_to_price ${est.json?.parts_to_price}`);
+  expect('advisor raises the estimate for this visit (default preference Genuine + After-Market); 2 part lines wait for the Store',
+    est.status === 201 && est.json.parts_to_price === 2 && JSON.stringify(est.json.parts_preference) === '["genuine","after_market"]', `parts_to_price ${est.json?.parts_to_price} ${JSON.stringify(est.json?.parts_preference)}`);
   const [advPart] = await q("SELECT unit_price FROM estimate_lines WHERE estimate_id = ? AND description = 'AC compressor'", [estId]);
   expect("an advisor's price on a part line is not taken (Store prices parts)", n(advPart.unit_price) === 0, `unit_price ${advPart.unit_price}`);
   expect('Storekeeper notified to price the parts', await notesFor(users.store.id, 'Price parts%') === 1, '');
@@ -83,15 +120,20 @@ try {
   const L = Object.fromEntries(lines.map(l => [l.description, l.id]));
   const advPrice = await call('PATCH', `/estimates/${estId}/lines/${L['AC compressor']}/pricing`, advisor, { genuine_price: 1 });
   expect('the advisor cannot use the Store pricing', advPrice.status === 403, `HTTP ${advPrice.status}`);
+  const usedOff = await call('PATCH', `/estimates/${estId}/lines/${L['AC compressor']}/pricing`, store, { used_price: 200 });
+  expect('the Store is not asked for a category outside the preference (Used → 400)', usedOff.status === 400, `HTTP ${usedOff.status}`);
   await call('PATCH', `/estimates/${estId}/lines/${L['AC compressor']}/pricing`, store, { genuine_price: 500, aftermarket_price: 300 });
   const na = await call('PATCH', `/estimates/${estId}/lines/${L['Brake pads']}/pricing`, store, { genuine_available: false, aftermarket_price: 150 });
-  expect('Store prices both types; Genuine brake pads marked N/A', na.status === 200 && na.json.parts_left_to_price === 0, `left ${na.json?.parts_left_to_price}`);
+  expect('Store prices both types; Genuine brake pads marked not available', na.status === 200 && na.json.parts_left_to_price === 0, `left ${na.json?.parts_left_to_price}`);
   expect('advisor told the parts are priced', await notesFor(users.advisor.id, 'Parts priced%') === 1, '');
   d = await wf(advisor, woId);
   const ac = d.estimate.pricing.jobs.find(j => j.job === 'AC Compressor');
   const br = d.estimate.pricing.jobs.find(j => j.job === 'Brake pad');
   expect('per-job totals: AC Compressor Genuine 600 / After-Market 400 (the PDF example)', ac.total_genuine === 600 && ac.total_after_market === 400, `${ac.total_genuine} / ${ac.total_after_market}`);
-  expect('N/A falls back: Brake pad is 270 in both columns', br.total_genuine === 270 && br.total_after_market === 270 && br.genuine_na, `${br.total_genuine} / ${br.total_after_market}`);
+  // No automatic fallback any more (client, 2026-10-29): Genuine brake pads
+  // not available leaves the Genuine column without them, flagged.
+  expect('no fallback: Brake pad is Genuine 120 (labour only, flagged not available) / After-Market 270',
+    br.total_genuine === 120 && br.total_after_market === 270 && br.genuine_na === true && br.after_market_na === false, `${br.total_genuine} / ${br.total_after_market} na ${br.genuine_na}`);
   expect('workflow: step 4 done, step 5 current', d.steps[3].state === 'done' && d.current_step === 5, stepStates(d));
   const blocked = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'both' });
   expect('external customer: advisor cannot send without Supervisor / Manager approval', blocked.status === 409 && blocked.json?.code === 'MANAGER_APPROVAL_REQUIRED', `HTTP ${blocked.status}`);
@@ -108,7 +150,12 @@ try {
   section = '6 decision';
   const [{ approval_token: token }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [estId]);
   const pub = await call('GET', `/public/estimates/${token}`);
-  expect('customer page shows Genuine and After-Market totals', pub.status === 200 && pub.json.estimate.estimate_format === 'both' && pub.json.totals_by_type.genuine === 870 && pub.json.totals_by_type.after_market === 670, JSON.stringify(pub.json?.totals_by_type));
+  expect('customer page shows Genuine 720 and After-Market 670 (no fallback) in the customer\'s preference',
+    pub.status === 200 && pub.json.estimate.estimate_format === 'both' && JSON.stringify(pub.json.estimate.parts_preference) === '["genuine","after_market"]'
+    && pub.json.totals_by_type.genuine === 720 && pub.json.totals_by_type.after_market === 670, JSON.stringify(pub.json?.totals_by_type));
+  const notOffered = await call('POST', `/public/estimates/${token}/lines/${L['Brake pads']}/decide`, null, { decision: 'approved', part_option: 'genuine' });
+  expect('the customer cannot approve a part in a category that is not available (400 PART_OPTION_NOT_OFFERED)',
+    notOffered.status === 400 && notOffered.json?.code === 'PART_OPTION_NOT_OFFERED', `HTTP ${notOffered.status} ${notOffered.json?.code || ''}`);
   let lastDecide = null;
   for (const [desc, opt] of [['AC compressor - labour'], ['AC compressor', 'after_market'], ['Brake pad - labour'], ['Brake pads', 'after_market']]) {
     lastDecide = await call('POST', `/public/estimates/${token}/lines/${L[desc]}/decide`, null, { decision: 'approved', part_option: opt });
@@ -235,7 +282,9 @@ try {
   expect('no customer message at internal steps (confirmed, assigned, in progress, quality check)', Number(internal) === 0, `${internal} row(s)`);
   expect('no customer message names the technician', ![...sms, ...emails].some(m => /QA WF (Body )?Tech/.test(m.message)), '');
   const opened = sms.find(m => m.template_key === 'order_pending')?.message || '';
-  expect('job opened SMS: vehicle, plate, job card and the status link', opened.includes(`Toyota Land Cruiser (QAWF01), job card ${mainJc.job_card_number}.`) && /Follow your service: \S+\/service-status\//.test(opened), opened);
+  // Sent when the work order opens: an external customer's job card is not open yet, so it names the job (WO).
+  expect('job opened SMS: vehicle, plate, the job (WO number) and the status link',
+    opened.includes(`Toyota Land Cruiser (QAWF01), job ${created.json.data.work_order_number}.`) && /Follow your service: \S+\/service-status\//.test(opened), opened);
   const { customerMessageView, CUSTOMER_MILESTONES } = await import(BE + '/src/lib/notify.js');
   const { buildWorkOrderStatusEmail } = await import(BE + '/src/lib/email.js');
   const [woRow] = await q('SELECT * FROM work_orders WHERE id = ?', [woId]);
@@ -282,6 +331,10 @@ try {
   const fleet = (await call('POST', '/customers', mgrTok, { full_name: 'QA WF Fleet', phone: '+971500000558', email: 'qa-wf-fleet@example.invalid', customer_class: 'internal', customer_subcategory: 'fleet' })).json?.data;
   const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_number: 'QAWF02', vin: 'TSTWFA00000000002' })).json?.data;
   const wo2 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh2.id, customer_name: fleet.full_name, customer_phone: fleet.phone || '+971500000552', description: 'Service', odometer_in: 120000, payment_method: 'credit', items: [] })).json?.data?.id;
+  d = await wf(advisor, wo2);
+  expect('internal customer: no physical inspection — the main job card opens with the work order',
+    !!(await mainOf(wo2)) && d.steps[2].state === 'done' && chk(d, 3, 'physical_ack')?.done === true && chk(d, 3, 'physical_ack')?.detail === 'Not needed — internal customer',
+    `${stepStates(d)} · ${chk(d, 3, 'physical_ack')?.detail}`);
   const e2 = (await call('POST', '/estimates', advisor, { intake_work_order_id: wo2, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Full service', quantity: 1, unit_price: 250 }] })).json?.estimateId;
   const s2 = await call('POST', `/estimates/${e2}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
   expect('internal (fleet) customer: estimate goes straight out, no manager approval', s2.status === 200, `HTTP ${s2.status} ${s2.json?.message || ''}`);
@@ -293,8 +346,97 @@ try {
   expect('customer rejects all → job closed, no work carried out; workflow stops at step 6', wo2row.status === 'cancelled' && /rejected/.test(wo2row.cancellation_reason || '') && d.steps[5].state === 'stopped', `WO ${wo2row.status}; ${stepStates(d)}`);
   const cancelSms = await waitFor(async () => (await custMsgs(wo2, 'sms')).find(m => m.template_key === 'order_cancelled'));
   expect('cancelled: the customer is told, with the workshop phone', /job WO-\S+ for QAWF02 has been cancelled\. Questions\? Call /.test(cancelSms?.message || ''), cancelSms?.message);
+
+  // ── Step 3: a manager opens the job card without the acknowledgement ──
+  section = '3 override';
+  const veh3 = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Corolla', year: 2019, plate_number: 'QAWF03', vin: 'TSTWFA00000000003' })).json?.data;
+  const wo3 = (await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh3.id, customer_name: cust.full_name, customer_phone: cust.phone,
+    description: 'Engine light on', odometer_in: 30000, payment_method: 'cash', service_fee: 0, items: [] })).json?.data?.id;
+  const ovAdv = await call('POST', `/workflow/work-orders/${wo3}/job-card`, advisor, { override_reason: 'Customer left the keys' });
+  const ovBlank = await call('POST', `/workflow/work-orders/${wo3}/job-card`, mgrTok, { override_reason: '   ' });
+  expect('not acknowledged: the Service Advisor gets 409 PHYSICAL_INSPECTION_REQUIRED, a manager without a reason 400 REASON_REQUIRED; no job card',
+    ovAdv.status === 409 && ovAdv.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && ovBlank.status === 400 && ovBlank.json?.code === 'REASON_REQUIRED' && !(await mainOf(wo3)),
+    `${ovAdv.status} ${ovAdv.json?.code || ''} / ${ovBlank.status} ${ovBlank.json?.code || ''}`);
+  const ov = await call('POST', `/workflow/work-orders/${wo3}/job-card`, mgrTok, { override_reason: 'Car left overnight, customer signs tomorrow' });
+  const jc3 = await mainOf(wo3);
+  const [ovRow] = await q('SELECT inspection_override_by, inspection_override_reason FROM work_orders WHERE id = ?', [wo3]);
+  const [ovLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [wo3]);
+  const [{ n: ovAudit }] = await q("SELECT COUNT(*) n FROM audit_logs WHERE action = 'JOB_CARD_OVERRIDE' AND entity_type = 'work_orders' AND entity_id = ? AND id > ?", [wo3, baseline.audit_logs]);
+  expect('a manager opens it with a reason → 201 overridden; the reason is kept on the work order, in its history and in the audit log',
+    ov.status === 201 && ov.json?.overridden === true && !!jc3 && ovRow.inspection_override_by === users.mgr.id && ovRow.inspection_override_reason === 'Car left overnight, customer signs tomorrow'
+    && /physical inspection skipped \(opened by a manager without the acknowledgement: Car left overnight/.test(ovLog?.note || '') && Number(ovAudit) === 1,
+    `HTTP ${ov.status} · ${ovLog?.note} · audit ${ovAudit}`);
+  d = await wf(advisor, wo3);
+  expect('workflow: Step 3 done, the acknowledgement check stays open and says who skipped it and why',
+    d.steps[2].state === 'done' && chk(d, 3, 'physical_ack')?.done === false && /^Skipped — job card opened by QA mgr: Car left overnight/.test(chk(d, 3, 'physical_ack')?.detail || ''),
+    `${stepStates(d)} · ${chk(d, 3, 'physical_ack')?.detail}`);
+
+  // ── Step 5: parts categories — Used, expected delivery, an alternative ──
+  section = '5 parts categories';
+  const veh4 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Patrol', year: 2018, plate_number: 'QAWF04', vin: 'TSTWFA00000000004' })).json?.data;
+  const wo4 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh4.id, customer_name: fleet.full_name, customer_phone: fleet.phone || '+971500000552',
+    description: 'Charging fault; mirror broken; wipers', odometer_in: 98000, payment_method: 'credit', items: [] })).json?.data?.id;
+  const e4 = await call('POST', '/estimates', advisor, { intake_work_order_id: wo4, parts_preference: 'genuine,used', lines: [
+    { job_name: 'Alternator', line_type: 'labour', description: 'Alternator - labour', quantity: 1, unit_price: 100 },
+    { job_name: 'Alternator', line_type: 'parts', description: 'Alternator', quantity: 2 },
+    { job_name: 'Mirror', line_type: 'parts', description: 'Door mirror', quantity: 1 },
+    { job_name: 'Wipers', line_type: 'parts', description: 'Wiper blades', quantity: 1 },
+  ] });
+  const est4 = e4.json?.estimateId;
+  expect("preference 'genuine,used' stored; 3 part lines for the Store", e4.status === 201 && JSON.stringify(e4.json.parts_preference) === '["genuine","used"]' && e4.json.parts_to_price === 3,
+    `HTTP ${e4.status} ${JSON.stringify(e4.json?.parts_preference)} ${e4.json?.parts_to_price}`);
+  const L4 = Object.fromEntries((await q('SELECT id, description FROM estimate_lines WHERE estimate_id = ?', [est4])).map(l => [l.description, l.id]));
+  const tmr4 = ymd(new Date(Date.now() + 2 * 86400000));
+  const amOff = await call('PATCH', `/estimates/${est4}/lines/${L4.Alternator}/pricing`, store, { aftermarket_price: 250 });
+  const alt = await call('PATCH', `/estimates/${est4}/lines/${L4.Alternator}/pricing`, store, { genuine_price: 400, genuine_expected_date: tmr4, used_price: 150, used_available: true });
+  const altInPref = await call('PATCH', `/estimates/${est4}/lines/${L4['Door mirror']}/pricing`, store, { genuine_available: false, used_available: false, alternative: { option: 'used', for: 'genuine', price: 60 } });
+  const mirror = await call('PATCH', `/estimates/${est4}/lines/${L4['Door mirror']}/pricing`, store, { genuine_available: false, used_available: false, alternative: { option: 'after_market', for: 'genuine', price: 80, expected_date: tmr4 } });
+  const wipers = await call('PATCH', `/estimates/${est4}/lines/${L4['Wiper blades']}/pricing`, store, { genuine_available: false, used_available: false });
+  expect('Store: After-Market not asked for (400); an alternative must be outside the preference (400); Genuine with a delivery date, Used in stock, an After-Market alternative for the mirror',
+    amOff.status === 400 && alt.status === 200 && altInPref.status === 400 && mirror.status === 200 && wipers.status === 200 && wipers.json.parts_left_to_price === 0,
+    `${amOff.status}/${alt.status}/${altInPref.status}/${mirror.status}/${wipers.status} left ${wipers.json?.parts_left_to_price}`);
+  d = await wf(advisor, wo4);
+  const p4 = d.estimate?.pricing;
+  expect('totals in the preference only: Genuine 900, Used 400 — the alternative listed apart, never added; no After-Market column',
+    p4?.totals?.genuine === 900 && p4.totals.used === 400 && p4.total_after_market === null && p4.alternatives?.length === 1
+    && p4.alternatives[0].option === 'after_market' && p4.alternatives[0].for === 'genuine' && p4.alternatives[0].amount === 80 && p4.alternatives[0].expected_date === tmr4,
+    `${JSON.stringify(p4?.totals)} alt ${JSON.stringify(p4?.alternatives)}`);
+  const s4 = await call('POST', `/estimates/${est4}/send`, advisor, { channel: 'whatsapp' });
+  const [{ approval_token: t4 }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [est4]);
+  const pub4 = await call('GET', `/public/estimates/${t4}`);
+  const altLine = (pub4.json?.lines || []).find(l => l.id === L4['Door mirror']);
+  expect('customer page: Genuine and Used totals, the mirror\'s After-Market alternative offered for their approval',
+    s4.status === 200 && JSON.stringify(pub4.json?.estimate?.parts_preference) === '["genuine","used"]' && pub4.json.totals_by_type.genuine === 900 && pub4.json.totals_by_type.used === 400
+    && !('after_market' in pub4.json.totals_by_type) && pub4.json.alternatives?.[0]?.option === 'after_market' && !!altLine,
+    `send ${s4.status}; ${JSON.stringify(pub4.json?.totals_by_type)}`);
+  const decide4 = (id, body) => call('POST', `/public/estimates/${t4}/lines/${id}/decide`, null, body);
+  const amPick = await decide4(L4.Alternator, { decision: 'approved', part_option: 'after_market' });
+  const usedPick = await decide4(L4.Alternator, { decision: 'approved', part_option: 'used' });
+  const altSilent = await decide4(L4['Door mirror'], { decision: 'approved' });
+  const altPick = await decide4(L4['Door mirror'], { decision: 'approved', part_option: 'after_market' });
+  const noneLeft = await decide4(L4['Wiper blades'], { decision: 'approved' });
+  const wipersNo = await decide4(L4['Wiper blades'], { decision: 'rejected', reason: 'Not available' });
+  const labour4 = await decide4(L4['Alternator - labour'], { decision: 'approved' });
+  expect('customer: After-Market not offered for the alternator (400); Used chosen; the alternative needs an explicit choice (409 ALTERNATIVE_NEEDS_CHOICE), then approved; nothing on offer (409 PART_NOT_AVAILABLE)',
+    amPick.status === 400 && amPick.json?.code === 'PART_OPTION_NOT_OFFERED' && usedPick.status === 200 && altSilent.status === 409 && altSilent.json?.code === 'ALTERNATIVE_NEEDS_CHOICE'
+    && altPick.status === 200 && noneLeft.status === 409 && noneLeft.json?.code === 'PART_NOT_AVAILABLE' && wipersNo.status === 200 && labour4.status === 200 && labour4.json?.estimate_status === 'partially_approved',
+    [amPick, usedPick, altSilent, altPick, noneLeft, wipersNo, labour4].map(r => `${r.status}${r.json?.code ? ' ' + r.json.code : ''}`).join(' / '));
+  const conv4 = await call('POST', `/estimates/${est4}/convert-to-work-order`, advisor);
+  const items4 = await q('SELECT name, quantity, unit_price FROM work_order_items WHERE work_order_id = ? ORDER BY id', [wo4]);
+  const [mirrorLine] = await q('SELECT part_option, alternative_approved FROM estimate_lines WHERE id = ?', [L4['Door mirror']]);
+  const [wo4row] = await q('SELECT total_amount FROM work_orders WHERE id = ?', [wo4]);
+  expect('converted onto this visit with the chosen categories: Alternator (Used) 2 × 150, Door mirror (After-Market — alternative to Genuine) 80; 480 + VAT = 504',
+    conv4.status === 200 && conv4.json.workOrderId === wo4 && items4.some(i => i.name === 'Alternator (Used)' && n(i.unit_price) === 150 && n(i.quantity) === 2)
+    && items4.some(i => i.name === 'Door mirror (After-Market — alternative to Genuine)' && n(i.unit_price) === 80) && !items4.some(i => /Wiper/.test(i.name))
+    && mirrorLine.part_option === 'after_market' && Number(mirrorLine.alternative_approved) === 1 && n(wo4row.total_amount) === 504,
+    `HTTP ${conv4.status}; ${items4.map(i => `${i.name} ×${n(i.quantity)} @${i.unit_price}`).join(' | ')}; total ${wo4row?.total_amount}`);
 } catch (e) { out.push('ERROR ' + e.stack); }
 finally {
+  await q("DELETE FROM roles WHERE slug = 'qa_cashier'"); // the roles table is not cleaned by id
+  // Signature images of the inspections signed here.
+  for (const { u } of await q("SELECT signature_url u FROM vehicle_inspections WHERE id > ? AND signature_url LIKE '/uploads/signatures/sig_insp%'", [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(u)) fs.rmSync(BE + u, { force: true });
+  }
   await q('SET FOREIGN_KEY_CHECKS = 0'); const removed = {};
   for (const t of idTables) { const r = await q(`DELETE FROM \`${t}\` WHERE id > ?`, [baseline[t]]); if (r.affectedRows) removed[t] = r.affectedRows; }
   await q('SET FOREIGN_KEY_CHECKS = 1'); await db.end();

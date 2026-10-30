@@ -34,6 +34,12 @@
  *   completed                                  closed          Closed                 green
  *   cancelled                                  cancelled       Cancelled              grey
  *
+ * An "approved" job that still waits for the physical inspection (an
+ * external customer who agreed a quote before the car was walked round: no
+ * job card yet, nothing for the Team Leader to assign) reads "Approved —
+ * physical inspection first" (sky) for staff when the work order carries
+ * awaiting_physical_inspection (GET /work-orders and /work-orders/:id send it).
+ *
  * Technicians never see the work order status; their job card says
  * "QC passed" (jcLabel(t, 'qc_passed')).
  *
@@ -167,6 +173,13 @@ export const WO_LABELS = Object.freeze({
   }),
 });
 
+/** Staff words for an approved job still waiting for the physical inspection (see the header). */
+const WO_APPROVED_INSPECTION_FIRST = Object.freeze({
+  staff: 'Approved — physical inspection first',
+  short: 'Approved — inspect first',
+});
+const inspectionFirst = (woOrStatus, key) => key === 'approved' && !!Number(woOrStatus?.awaiting_physical_inspection);
+
 const WO_TONES = Object.freeze({
   checked_in: toneOf('slate', PasteClipboard),
   inspected: toneOf('sky', Search),
@@ -218,6 +231,9 @@ export function woLabel(t, woOrStatus, audience = 'staff') {
   const key = woDisplayKey(woOrStatus);
   if (!key) return humanize(woOrStatus && typeof woOrStatus === 'object' ? woOrStatus.status : woOrStatus);
   const aud = WO_LABELS[audience] ? audience : 'staff';
+  if (inspectionFirst(woOrStatus, key) && WO_APPROVED_INSPECTION_FIRST[aud]) {
+    return safeT(t)(`woStatus.${aud}.approved_inspection_first`, WO_APPROVED_INSPECTION_FIRST[aud]);
+  }
   return safeT(t)(`woStatus.${aud}.${key}`, WO_LABELS[aud][key]);
 }
 
@@ -231,7 +247,9 @@ export function woLabel(t, woOrStatus, audience = 'staff') {
  *   step). An unknown status gets slate with a Clock.
  */
 export function woTone(woOrStatus) {
-  return WO_TONES[woDisplayKey(woOrStatus)] || toneOf('slate', Clock);
+  const key = woDisplayKey(woOrStatus);
+  if (inspectionFirst(woOrStatus, key)) return toneOf('sky', Search);
+  return WO_TONES[key] || toneOf('slate', Clock);
 }
 
 /**

@@ -19,10 +19,14 @@ import { customerAppBase } from '../lib/customer-link.js';
 import { sendNotificationEmail } from '../lib/email.js';
 import { createInAppNotification } from '../lib/notify.js';
 import { estimateApprovalLimiter } from '../lib/rate-limits.js';
-import { notifyGroups, ensureMainJobCard, onWorkApproved, summariseEstimatePricing } from '../lib/workflow.js';
+import {
+  notifyGroups, onWorkApproved, summariseEstimatePricing, PART_CATEGORIES, PART_CATEGORY_LABEL, categoryColumns,
+  partsPreference, formatOfPreference, partOptions, effectivePartOption, partLineUnpriced, hasCategoryPricing, UNPRICED_PART_SQL,
+} from '../lib/workflow.js';
+import { jobCardGate, openJobCardIfReady } from '../lib/physical-inspection.js';
 import { can, requireCapability, isManagerRole } from '../lib/roles.js';
 import { applyStatusChange } from './work-orders.js';
-import { createTask, closeTasks, markEnquiryQuoted, markEnquiryConverted, snapshotIntakeClass } from '../lib/crm-cycle.js';
+import { createTask, closeTasks, markEnquiryQuoted, markEnquiryConverted, snapshotIntakeClass, closeEnquiryWorkOrder } from '../lib/crm-cycle.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -60,82 +64,133 @@ function computeTotals(lines, vatRate = 5) {
   };
 }
 
-// ─── Step 5: Genuine / After-Market part pricing ───────────────
-// The Storekeeper prices each parts line in both types (or marks a type N/A,
-// i.e. *_available = 0); the Service Advisor prices labour. unit_price stays
-// the price the line currently counts at, so totals, the job card and the
-// invoice keep reading one number: the customer's choice (part_option) if
-// made, else the type the estimate was sent in (Format 1 = Genuine, Format 2
-// = After-Market, Format 3 = both, counted as Genuine until they choose). An
-// unavailable type falls back to the other one.
+// ─── Step 5: part pricing per category (Genuine / After-Market / Used) ──
+// The Storekeeper prices each parts line in every category of the
+// customer's parts preference — available or not, price, expected delivery
+// — and may offer an alternative category when a requested one is not
+// available (lib/workflow.js has the rules); the Service Advisor prices
+// labour. unit_price stays the price the line currently counts at, so
+// totals, the job card and the invoice keep reading one number: the
+// customer's choice (part_option) if made, else the first priced, available
+// category of the preference. Nothing falls back to a category the customer
+// did not ask for: such a line counts at 0 until they approve the
+// alternative.
 const numOrNull = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Math.max(0, Number(v)));
 const flagOrNull = v => (v === null || v === undefined || v === '' ? null : (v === true || v === 1 || v === '1' || v === 'true') ? 1 : 0);
-export const ESTIMATE_FORMATS = ['genuine', 'after_market', 'both'];
+const dateOrNull = v => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.slice(0, 10)) && !Number.isNaN(Date.parse(v.slice(0, 10))) ? v.slice(0, 10) : null);
+// Format 1 = Genuine, 2 = After-Market, 3 = both — the preference before it
+// had Used; still accepted by POST /:id/send and kept on the estimate.
+const FORMAT_PREFERENCE = { genuine: ['genuine'], after_market: ['after_market'], both: ['genuine', 'after_market'] };
+const DEFAULT_PREFERENCE = ['genuine', 'after_market'];
+// Every per-category column of an estimate line, plus the alternative.
+const CATEGORY_FIELDS = PART_CATEGORIES.flatMap(c => Object.values(categoryColumns(c)));
+const ALTERNATIVE_FIELDS = ['alternative_option', 'alternative_for', 'alternative_approved'];
 
-export function effectivePartPrice(l, format) {
-  const g = l.genuine_available === 0 ? null : numOrNull(l.genuine_price);
-  const a = l.aftermarket_available === 0 ? null : numOrNull(l.aftermarket_price);
-  if (g == null && a == null) return null;
-  const want = l.part_option || (format === 'after_market' ? 'after_market' : 'genuine');
-  if (want === 'after_market') return a != null ? { price: a, option: 'after_market' } : { price: g, option: 'genuine' };
-  return g != null ? { price: g, option: 'genuine' } : { price: a, option: 'after_market' };
+/** A parts preference from a request body (array or 'genuine,used'): the
+ *  ordered list, null when not sent, [] when empty or not a category. */
+function preferenceFromBody(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const list = (Array.isArray(v) ? v : String(v).split(',')).map(s => String(s).trim()).filter(Boolean);
+  if (!list.length || list.some(c => !PART_CATEGORIES.includes(c))) return [];
+  return PART_CATEGORIES.filter(c => list.includes(c));
+}
+const PREFERENCE_REQUIRED = 'Choose the customer’s parts preference: Genuine, After-Market and/or Used (at least one).';
+
+/** "Genuine and Used" */
+function categoryWords(pref) {
+  const names = pref.map(c => PART_CATEGORY_LABEL[c]);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0] || '';
 }
 
-/** A parts line nobody has priced yet (both types N/A counts as decided). */
-export function partLineUnpriced(l) {
-  if (l.line_type !== 'parts') return false;
-  if (l.genuine_available === 0 && l.aftermarket_available === 0) return false;
-  return numOrNull(l.genuine_price) == null && numOrNull(l.aftermarket_price) == null && !(Number(l.unit_price) > 0);
+/**
+ * An alternative stands only while a requested category is not available
+ * and the offered category is outside the preference. Otherwise its flags
+ * are cleared (and, when the category is not asked for, its prices).
+ */
+function tidyAlternative(row, pref) {
+  const alt = row.alternative_option;
+  if (!alt) return row;
+  const anyUnavailable = pref.some(c => Number(row[categoryColumns(c).available]) === 0 && row[categoryColumns(c).available] !== null);
+  if (pref.includes(alt) || !anyUnavailable || !PART_CATEGORIES.includes(alt)) {
+    if (!pref.includes(alt) && PART_CATEGORIES.includes(alt)) for (const f of Object.values(categoryColumns(alt))) row[f] = null;
+    for (const f of ALTERNATIVE_FIELDS) row[f] = null;
+  } else if (!pref.includes(row.alternative_for) || Number(row[categoryColumns(row.alternative_for).available]) !== 0) {
+    row.alternative_for = pref.find(c => Number(row[categoryColumns(c).available]) === 0 && row[categoryColumns(c).available] !== null);
+  }
+  return row;
+}
+
+/** What a part line counts at now: the effective option's price, 0 when it has category prices but nothing on offer, else (a single-price line) `fallback`. */
+function countedPartPrice(row, pref, fallback) {
+  const eff = effectivePartOption(row, pref);
+  if (eff) return eff.price;
+  return hasCategoryPricing(row) ? 0 : fallback;
 }
 
 /**
  * Insert estimate lines. Only the Storekeeper (or a manager) may set part
  * prices and only the Service Advisor (or a manager) labour prices — anyone
  * else's values are replaced by what was already on the line (matched by
- * id), or left unpriced for a new line.
+ * id), or left unpriced for a new line. Part prices sent here are taken for
+ * the categories of the preference only; an alternative is offered through
+ * PATCH /:id/lines/:lineId/pricing and carried over on an edit.
  */
-async function insertEstimateLines(estimateId, workshopId, lines, { user, format = null, existingById = new Map() }) {
+async function insertEstimateLines(estimateId, workshopId, lines, { user, pref = DEFAULT_PREFERENCE, existingById = new Map() }) {
   const mayPriceParts = can(user, 'estimate.price_parts');
   const mayPriceLabour = can(user, 'estimate.raise');
+  const emptyPricing = () => Object.fromEntries([...CATEGORY_FIELDS, ...ALTERNATIVE_FIELDS, 'priced_by', 'priced_at'].map(f => [f, null]));
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const old = l.id ? existingById.get(Number(l.id)) : null;
     const type = ['labour', 'parts', 'sublet', 'consumable', 'discount'].includes(l.line_type) ? l.line_type : 'labour';
     let unitPrice = Number(l.unit_price) || 0;
-    let pricing = { genuine_price: null, genuine_available: null, aftermarket_price: null, aftermarket_available: null, priced_by: null, priced_at: null };
+    let pricing = emptyPricing();
+    let partOption = PART_CATEGORIES.includes(l.part_option) ? l.part_option : (old?.part_option || null);
     if (type === 'parts') {
-      if (mayPriceParts && (l.genuine_price !== undefined || l.aftermarket_price !== undefined || l.genuine_available !== undefined || l.aftermarket_available !== undefined)) {
-        pricing = {
-          genuine_price: numOrNull(l.genuine_price), genuine_available: flagOrNull(l.genuine_available),
-          aftermarket_price: numOrNull(l.aftermarket_price), aftermarket_available: flagOrNull(l.aftermarket_available),
-          priced_by: user?.id || null, priced_at: new Date(),
-        };
-      } else if (old) {
-        pricing = { genuine_price: old.genuine_price, genuine_available: old.genuine_available, aftermarket_price: old.aftermarket_price,
-          aftermarket_available: old.aftermarket_available, priced_by: old.priced_by, priced_at: old.priced_at };
+      if (old) {
+        for (const f of Object.keys(pricing)) pricing[f] = old[f] ?? null;
         if (!mayPriceParts) unitPrice = Number(old.unit_price) || 0;
       } else if (!mayPriceParts) {
         unitPrice = 0; // waits for the Storekeeper
       }
-      const eff = effectivePartPrice({ ...pricing, part_option: l.part_option || old?.part_option || null }, format);
-      if (eff) unitPrice = eff.price;
+      if (mayPriceParts && CATEGORY_FIELDS.some(f => l[f] !== undefined)) {
+        // Per category sent; a category (or a delivery date) not sent keeps its value.
+        for (const c of pref) {
+          const col = categoryColumns(c);
+          if (l[col.price] === undefined && l[col.available] === undefined) continue;
+          const price = numOrNull(l[col.price]);
+          const available = flagOrNull(l[col.available]) ?? (price != null ? 1 : null);
+          pricing[col.price] = available === 0 ? null : price;
+          pricing[col.available] = available;
+          pricing[col.expected] = available === 0 ? null : (l[col.expected] !== undefined ? dateOrNull(l[col.expected]) : pricing[col.expected]);
+        }
+        pricing.priced_by = user?.id || null; pricing.priced_at = new Date();
+      }
+      tidyAlternative(pricing, pref);
+      unitPrice = countedPartPrice({ ...pricing, part_option: partOption }, pref, unitPrice);
     } else if (type === 'labour' && !mayPriceLabour) {
       // Labour is priced by the Service Advisor (Step 5).
       unitPrice = old ? (Number(old.unit_price) || 0) : 0;
     }
+    if (type !== 'parts') partOption = null;
     await execute(
       `INSERT INTO estimate_lines
          (estimate_id, workshop_id, line_type, operation_id, description, job_name,
-          part_number, quantity, unit_cost, unit_price, genuine_price, genuine_available,
-          aftermarket_price, aftermarket_available, part_option, priced_by, priced_at, discount_pct,
+          part_number, quantity, unit_cost, unit_price,
+          genuine_price, genuine_available, genuine_expected_date,
+          aftermarket_price, aftermarket_available, aftermarket_expected_date,
+          used_price, used_available, used_expected_date,
+          part_option, alternative_option, alternative_for, alternative_approved, priced_by, priced_at, discount_pct,
           payer_direction, insurance_ref, warranty_ref, urgency, customer_status, sort_order)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [estimateId, workshopId, type, l.operation_id || null,
        l.description, (l.job_name ? String(l.job_name).trim().slice(0, 200) : null) || null,
        l.part_number || null, parseFloat(l.quantity || 1),
        parseFloat(l.unit_cost || 0), unitPrice,
-       pricing.genuine_price, pricing.genuine_available, pricing.aftermarket_price, pricing.aftermarket_available,
-       ['genuine', 'after_market'].includes(l.part_option) ? l.part_option : (old?.part_option || null),
+       pricing.genuine_price, pricing.genuine_available, pricing.genuine_expected_date,
+       pricing.aftermarket_price, pricing.aftermarket_available, pricing.aftermarket_expected_date,
+       pricing.used_price, pricing.used_available, pricing.used_expected_date,
+       partOption, pricing.alternative_option, pricing.alternative_for, pricing.alternative_approved,
        pricing.priced_by, pricing.priced_at,
        parseFloat(l.discount_pct || 0), l.payer_direction || 'customer',
        l.insurance_ref || null, l.warranty_ref || null,
@@ -159,16 +214,27 @@ async function recalcEstimateTotals(estimateId) {
   return t;
 }
 
-/** Re-price every parts line for a format (or the customer's choices). */
-async function applyFormatPrices(estimateId, format) {
-  const lines = await query(
-    `SELECT id, genuine_price, genuine_available, aftermarket_price, aftermarket_available, part_option
-       FROM estimate_lines WHERE estimate_id = ? AND line_type = 'parts'`, [estimateId]);
+/** Re-price every parts line for the preference (and the customer's choices). */
+async function applyPreferencePrices(estimateId, pref) {
+  const lines = await query("SELECT * FROM estimate_lines WHERE estimate_id = ? AND line_type = 'parts'", [estimateId]);
   for (const l of lines) {
-    const eff = effectivePartPrice(l, format);
-    if (eff) await execute('UPDATE estimate_lines SET unit_price = ? WHERE id = ?', [eff.price, l.id]);
+    if (!hasCategoryPricing(l)) continue; // a single-price line keeps its price
+    tidyAlternative(l, pref);
+    await execute(
+      'UPDATE estimate_lines SET unit_price = ?, alternative_option = ?, alternative_for = ?, alternative_approved = ? WHERE id = ?',
+      [countedPartPrice(l, pref, 0), l.alternative_option, l.alternative_for, l.alternative_approved, l.id]);
   }
   return recalcEstimateTotals(estimateId);
+}
+
+/** The estimate's lines as GET /:id and the public page send them: each part line with its `options`. */
+function withPartOptions(lines, pref) {
+  return lines.map(l => {
+    if (l.line_type !== 'parts' || !hasCategoryPricing(l)) return l;
+    const { requested, alternative } = partOptions(l, pref);
+    const eff = effectivePartOption(l, pref);
+    return { ...l, options: { requested, alternative, counted: eff ? eff.option : null } };
+  });
 }
 
 // customer_type (retail_cash/credit/insurance/internal_fleet, on the
@@ -251,9 +317,7 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
     // Discount lines are left out because computeTotals() never counted them
     // either — the customer approved the total they were shown.
     [approvedLines] = await conn.query(
-      `SELECT id, line_type, description, job_name, quantity, unit_price, discount_pct,
-              genuine_price, genuine_available, aftermarket_price, aftermarket_available, part_option
-         FROM estimate_lines
+      `SELECT * FROM estimate_lines
         WHERE estimate_id = ? AND customer_status = 'approved' AND line_type <> 'discount'
         ORDER BY sort_order, id`,
       [estimate.id]
@@ -268,6 +332,16 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
         "SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ? FOR UPDATE",
         [estimate.intake_work_order_id, workshopId]);
       if (intake && ['completed', 'cancelled'].includes(intake.status)) intake = null;
+    } else if (estimate.enquiry_id) {
+      // A quote raised from an enquiry: the enquiry already has its work
+      // order (the visit, opened when the enquiry came in) — the approved
+      // work goes onto it rather than onto a second one.
+      [[intake]] = await conn.query(
+        `SELECT wo.id, wo.work_order_number, wo.status FROM work_orders wo
+          WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled')
+            AND (wo.enquiry_id = ? OR wo.id = (SELECT e.converted_work_order_id FROM enquiries e WHERE e.id = ? AND e.workshop_id = ?))
+          ORDER BY wo.id LIMIT 1 FOR UPDATE`,
+        [workshopId, estimate.enquiry_id, estimate.enquiry_id, workshopId]);
     }
 
     if (intake) {
@@ -311,13 +385,16 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
       await snapshotIntakeClass(workOrderId, { conn });
     }
 
+    const pref = partsPreference(estimate);
     for (const l of approvedLines) {
       // The line's own discount is folded into the unit price, so the job
       // card line totals what the customer saw on the estimate line. A part
-      // carries the type it was approved in.
-      const eff = l.line_type === 'parts' ? effectivePartPrice(l, estimate.estimate_format) : null;
+      // carries the category it was approved in — an approved alternative
+      // says what it stands in for.
+      const eff = l.line_type === 'parts' ? effectivePartOption(l, pref) : null;
       const unitPrice = Math.round(Number(eff ? eff.price : l.unit_price || 0) * (1 - Number(l.discount_pct || 0) / 100) * 100) / 100;
-      const name = (l.description || l.line_type) + (eff ? ` (${eff.option === 'genuine' ? 'Genuine' : 'After-Market'})` : '');
+      const name = (l.description || l.line_type) + (eff
+        ? ` (${PART_CATEGORY_LABEL[eff.option]}${eff.alternative ? ` — alternative to ${PART_CATEGORY_LABEL[eff.for] || 'the requested type'}` : ''})` : '');
       await conn.query(
         `INSERT INTO work_order_items (work_order_id, name, item_type, estimate_line_id, quantity, unit_price)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -342,13 +419,13 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
   await recordCustomerApproval({
     workOrderId, workshopId, channel: 'estimate', note: `Estimate ${estimate.estimate_number}`,
   });
-  // Step 3/6: the main job card (opened at intake for a visit already on the
-  // floor) and the floor told the approved work is ready to assign.
-  await ensureMainJobCard({ workOrderId, workshopId, notify: false });
-  const [mainCard] = await query(
-    'SELECT job_card_number FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL ORDER BY id LIMIT 1',
-    [workOrderId]);
-  await onWorkApproved({ workOrderId, workshopId, how: `estimate ${estimate.estimate_number}` });
+  // Step 3/6: the main job card — open already for a visit on the floor
+  // (the estimate needed it), opened now for an internal customer, and for
+  // an external one only once the physical inspection is acknowledged. With
+  // a job card the floor is told the approved work is ready to assign;
+  // without one there is nothing to assign yet.
+  const { jobCard: mainCard } = await openJobCardIfReady({ workOrderId, workshopId, notify: false });
+  if (mainCard) await onWorkApproved({ workOrderId, workshopId, how: `estimate ${estimate.estimate_number}` });
   // CRM: the quote is decided; the enquiry it came from is now a job.
   await closeTasks({ workshopId, relatedType: 'quote', relatedId: estimate.id, outcome: 'Approved' });
   if (estimate.enquiry_id) {
@@ -387,7 +464,7 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
   // after that used to flip the estimate back to partially_approved while
   // the job card kept billing the line the customer had just rejected.
   const [est] = await query(
-    'SELECT status, work_order_id FROM service_estimates WHERE id = ? AND workshop_id = ?',
+    'SELECT status, work_order_id, parts_preference, estimate_format FROM service_estimates WHERE id = ? AND workshop_id = ?',
     [estimateId, workshopId]
   );
   if (!est) return { ok: false, status: 404, message: 'Estimate not found' };
@@ -404,14 +481,39 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
   );
   if (!line) return { ok: false, status: 404, message: 'Line not found' };
 
-  // Format 3 (both types offered): the customer chooses Genuine or
-  // After-Market for a part when approving it.
-  if (decision === 'approved' && line.line_type === 'parts' && ['genuine', 'after_market'].includes(partOption)) {
-    const eff = effectivePartPrice({ ...line, part_option: partOption }, null);
-    if (eff) {
-      await execute('UPDATE estimate_lines SET part_option = ?, unit_price = ? WHERE id = ?', [eff.option, eff.price, lineId]);
-      await recalcEstimateTotals(estimateId);
+  // A part is approved in one of the categories on offer: a requested one
+  // that is priced and available (the one it counts at unless the customer
+  // picks another), or the alternative — only when picked explicitly.
+  if (line.line_type === 'parts' && hasCategoryPricing(line)) {
+    const pref = partsPreference(est);
+    const { requested, alternative } = partOptions(line, pref);
+    const usable = requested.filter(o => o.usable);
+    let chosen = null;
+    if (decision === 'approved') {
+      if (partOption) {
+        chosen = usable.find(o => o.option === partOption) || (alternative?.option === partOption ? alternative : null);
+        if (!chosen) {
+          return { ok: false, status: 400, code: 'PART_OPTION_NOT_OFFERED',
+            message: `${PART_CATEGORY_LABEL[partOption] || 'That type'} is not on offer for “${line.description}”. Choose one of the priced options.` };
+        }
+      } else {
+        chosen = usable.find(o => o.option === line.part_option) || usable[0] || null;
+        if (!chosen) {
+          return { ok: false, status: 409, code: alternative ? 'ALTERNATIVE_NEEDS_CHOICE' : 'PART_NOT_AVAILABLE',
+            message: alternative
+              ? `“${line.description}” is not available as requested. Choose the alternative (${PART_CATEGORY_LABEL[alternative.option]}) to approve it, or reject it.`
+              : `“${line.description}” is not available in ${categoryWords(pref)}, so it can only be rejected.` };
+        }
+      }
+      await execute('UPDATE estimate_lines SET part_option = ?, unit_price = ?, alternative_approved = ? WHERE id = ?',
+        [chosen.option, chosen.price, alternative ? (chosen.alternative ? 1 : 0) : null, lineId]);
+    } else {
+      // Declined: an alternative on this line was not taken, and the line
+      // counts at what the customer would have had by default.
+      await execute('UPDATE estimate_lines SET part_option = NULL, unit_price = ?, alternative_approved = ? WHERE id = ?',
+        [usable[0]?.price ?? 0, alternative ? 0 : null, lineId]);
     }
+    await recalcEstimateTotals(estimateId);
   }
 
   await execute(
@@ -474,11 +576,13 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
     await notifyEstimateOutcome({ estimateId, workshopId, outcome: 'rejected' });
     await closeTasks({ workshopId, relatedType: 'quote', relatedId: estimateId, outcome: 'Rejected' });
     const [enqLink] = await query('SELECT enquiry_id, estimate_number FROM service_estimates WHERE id = ?', [estimateId]);
+    let enquiryLost = false;
     if (enqLink?.enquiry_id) {
-      await execute(
+      const lost = await execute(
         `UPDATE enquiries SET status = 'lost', lost_reason = COALESCE(lost_reason, 'price'),
                 lost_notes = COALESCE(lost_notes, ?) WHERE id = ? AND workshop_id = ? AND converted_work_order_id IS NULL`,
         [`Customer rejected estimate ${enqLink.estimate_number}`, enqLink.enquiry_id, workshopId]);
+      enquiryLost = lost.affectedRows > 0;
     }
     // Step 6 "Reject all": close the job — no work carried out.
     const [estRow] = await query('SELECT intake_work_order_id, estimate_number, customer_notes FROM service_estimates WHERE id = ?', [estimateId]);
@@ -494,6 +598,14 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
           [estRow.intake_work_order_id, workshopId]);
         result.work_order_closed = estRow.intake_work_order_id;
       }
+    }
+    // The lead is lost: its work order (opened with the enquiry, D1) is
+    // cancelled when nothing has happened on it yet — "Enquiry closed: …".
+    if (enquiryLost) {
+      await closeEnquiryWorkOrder({
+        workshopId, enquiryId: enqLink.enquiry_id, userId: actingUserId,
+        reason: `customer rejected estimate ${enqLink.estimate_number}`,
+      }).catch(err => console.error('[estimates] enquiry work order on rejection:', err.message));
     }
   } else if (!anyPending && newStatus === 'partially_approved') {
     // Deliberately not auto-converted (see above) — which is exactly why
@@ -528,7 +640,13 @@ async function notifyEstimateOutcome({ estimateId, workshopId, outcome, workOrde
   // (no new one); otherwise a new work order and job card were opened.
   const jc = jobCardNumber || wo_number;
   const msg = {
-    approved: addedToJob ? {
+    // The work order has no job card yet: an external customer's opens when
+    // they acknowledge the physical inspection.
+    approved: addedToJob && !jobCardNumber ? {
+      title: `Estimate ${estimate.estimate_number} approved — work added to work order ${wo_number}`,
+      body: `${who} approved every line. The work was added to work order ${wo_number}; its job card opens when the customer acknowledges the physical inspection.`,
+      type: 'success', icon: '✅',
+    } : addedToJob ? {
       title: `Estimate ${estimate.estimate_number} approved — work added to job card ${jc} (${wo_number})`,
       body: `${who} approved every line. The work was added to job card ${jc} (${wo_number}) and is ready for the Team Leader to assign.`,
       type: 'success', icon: '✅',
@@ -577,6 +695,62 @@ function estimateApprovalUrl(token) {
   return `${customerAppBase()}/estimate-approval/${token}`;
 }
 
+const esc = s => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+const aed = n => `AED ${Number(n || 0).toFixed(2)}`;
+const shortDate = d => new Date(`${d}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+/**
+ * What the customer is sent (POST /:id/send): the e-mail's table and the
+ * WhatsApp sentence, both in the categories of the parts preference. One
+ * category: one price per part and the total. Several: each part's price in
+ * each category and a total per category (labour included). A part not
+ * available as asked says so, with its alternative marked as needing their
+ * approval — it is in no total.
+ */
+function estimateMessage(est, lines, pref) {
+  const vat = 1 + Number(est.vat_rate ?? 5) / 100;
+  const shown = lines.filter(l => l.line_type !== 'discount');
+  const pricing = summariseEstimatePricing(shown, pref);
+  const categoryParts = shown.some(l => l.line_type === 'parts' && hasCategoryPricing(l));
+  const several = categoryParts && pref.length > 1;
+  const optionText = (o, qty) => `${PART_CATEGORY_LABEL[o.option]} ${aed(o.price * qty)}${o.expected_date ? ` (expected ${shortDate(o.expected_date)})` : ''}`;
+
+  const td = 'padding:6px 0;vertical-align:top;';
+  const rows = shown.map(l => {
+    const qty = Number(l.quantity) || 1;
+    const name = `${esc(l.description)}${qty !== 1 ? ` × ${qty}` : ''}`;
+    if (l.line_type !== 'parts' || !hasCategoryPricing(l)) {
+      return `<tr><td style="${td}">${name}</td><td style="${td}text-align:right;white-space:nowrap;">${aed(l.line_total ?? qty * Number(l.unit_price || 0))}</td></tr>`;
+    }
+    const { requested, alternative } = partOptions(l, pref);
+    const notes = [];
+    if (several) notes.push(requested.map(o => (o.usable ? optionText(o, qty) : `${PART_CATEGORY_LABEL[o.option]}: not available`)).join(' · '));
+    else if (!requested[0]?.usable) notes.push(`${PART_CATEGORY_LABEL[pref[0]]}: not available`);
+    else if (requested[0].expected_date) notes.push(`Expected ${shortDate(requested[0].expected_date)}`);
+    if (alternative) notes.push(`Alternative offered — ${optionText(alternative, qty)}, needs your approval`);
+    const amount = several ? '' : requested[0]?.usable ? aed(requested[0].price * qty) : '—';
+    return `<tr><td style="${td}">${name}${notes.map(n => `<div style="font-size:12.5px;color:#64748b;">${esc(n)}</div>`).join('')}</td>` +
+      `<td style="${td}text-align:right;white-space:nowrap;">${amount}</td></tr>`;
+  }).join('');
+  const strong = 'padding-top:10px;font-weight:700;';
+  const totals = several
+    ? pref.map(c => `<tr><td style="${strong}">Total with ${PART_CATEGORY_LABEL[c]} parts (incl. VAT)</td><td style="${strong}text-align:right;">${aed(pricing.totals[c] * vat)}</td></tr>`).join('')
+    : `<tr><td style="${strong}">Total (incl. VAT)</td><td style="${strong}text-align:right;">${aed(est.total_amount)}</td></tr>`;
+  const alts = pricing.alternatives.length;
+  const notesAfter = [
+    categoryParts ? `Parts priced in ${categoryWords(pref)}${several ? ' — choose for each part on the next page' : ''}.` : null,
+    alts ? `${alts} part${alts > 1 ? 's are' : ' is'} not available as you asked; an alternative is offered for your approval.` : null,
+  ].filter(Boolean).map(n => `<p style="margin:12px 0 0;color:#64748b;font-size:13px;">${esc(n)}</p>`).join('');
+  const html = `<table style="width:100%;margin-top:14px;border-collapse:collapse;font-size:14px;">${rows}${totals}</table>${notesAfter}`;
+
+  const totalText = several
+    ? `parts priced in ${categoryWords(pref)}: ${pref.map(c => `${PART_CATEGORY_LABEL[c]} ${aed(pricing.totals[c] * vat)}`).join(' / ')} incl. VAT`
+    : `${aed(est.total_amount)} incl. VAT${categoryParts ? `, ${categoryWords(pref)} parts` : ''}`;
+  const text = `Your service estimate ${est.estimate_number}${est.vehicle_plate ? ` for ${est.vehicle_plate}` : ''} is ready (${totalText}).` +
+    `${alts ? ` ${alts} part${alts > 1 ? 's are' : ' is'} offered as an alternative for your approval.` : ''}`;
+  return { html, text };
+}
+
 // ══════════════════════════════════════════════════════════════
 // GET /api/estimates — list estimates
 // ══════════════════════════════════════════════════════════════
@@ -590,9 +764,11 @@ router.get('/', async (req, res) => {
     // been signed off and has not gone out yet (process step 5).
     const NEEDS_APPROVAL = `(e.internal_approved_at IS NULL AND e.status = 'draft'
       AND COALESCE(e.customer_type, '') <> 'internal_fleet' AND COALESCE(c.customer_class, 'external') <> 'internal')`;
-    // The staff screen's tabs. 'needs_approval' and 'to_convert' are the two
-    // queues somebody has to act on.
+    // The staff screen's tabs. 'parts_to_price' (the Store), 'needs_approval'
+    // and 'to_convert' are the queues somebody has to act on.
+    const UNPRICED_LINES = `(SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id AND ${UNPRICED_PART_SQL})`;
     const VIEWS = {
+      parts_to_price: `e.status = 'draft' AND ${UNPRICED_LINES} > 0`,
       needs_approval: NEEDS_APPROVAL,
       with_customer:  "e.status = 'sent_to_customer'",
       to_convert:     "e.status IN ('approved','partially_approved') AND e.work_order_id IS NULL",
@@ -619,9 +795,10 @@ router.get('/', async (req, res) => {
       `SELECT e.*, c.full_name AS customer_full_name, c.customer_class, v.plate_number, v.make, v.model,
               ${NEEDS_APPROVAL} AS needs_internal_approval,
               (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id) AS line_count,
-              (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id AND l.customer_status = 'approved') AS approved_count
+              (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id AND l.customer_status = 'approved') AS approved_count,
+              ${UNPRICED_LINES} AS unpriced_parts
        ${FROM}${where}
-       ORDER BY e.created_at DESC LIMIT ? OFFSET ?`,
+       ORDER BY e.created_at ${view === 'parts_to_price' ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`,
       [...params, lim, offset]
     );
     // Was a bare COUNT(*) of every estimate, whatever the filter.
@@ -635,7 +812,7 @@ router.get('/', async (req, res) => {
     );
     for (const k of Object.keys(VIEWS)) counts[k] = Number(countRow?.[k]) || 0;
 
-    res.json({ success: true, estimates: rows.map(r => ({ ...r, customer_type_label: CUSTOMER_TYPE_LABEL[r.customer_type] || r.customer_type })),
+    res.json({ success: true, estimates: rows.map(r => ({ ...r, customer_type_label: CUSTOMER_TYPE_LABEL[r.customer_type] || r.customer_type, preference: partsPreference(r) })),
       total, counts, page: parseInt(page) || 1, limit: lim });
   } catch (err) {
     console.error('GET /estimates error:', err);
@@ -674,6 +851,7 @@ router.get('/:id', async (req, res) => {
     );
 
     const external = await isExternalEstimate(rows[0]);
+    const pref = partsPreference(rows[0]);
     res.json({
       success: true,
       estimate: {
@@ -681,8 +859,11 @@ router.get('/:id', async (req, res) => {
         customer_type_label: CUSTOMER_TYPE_LABEL[rows[0].customer_type] || rows[0].customer_type,
         is_external: external,
         needs_internal_approval: external && !rows[0].internal_approved_at && rows[0].status === 'draft',
+        preference: pref,
       },
-      lines,
+      lines: withPartOptions(lines, pref),
+      // Per job and per category of the preference, alternatives apart (lib/workflow.js).
+      pricing: summariseEstimatePricing(lines.filter(l => l.line_type !== 'discount'), pref),
       can_approve: canApproveEstimates(req.user),
     });
   } catch (err) {
@@ -694,7 +875,13 @@ router.get('/:id', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // POST /api/estimates — create new estimate
 // Body: { customer_id, vehicle_id, customer_type, receiving_form_id,
-//         advisor_id, valid_until, vat_rate, lines: [{...}] }
+//         advisor_id, valid_until, vat_rate, lines: [{...}],
+//         parts_preference: ['genuine','after_market','used'] (any, ≥ 1;
+//         default Genuine + After-Market) }
+// An external job's estimate waits for its main job card, i.e. for the
+// customer's acknowledgement of the physical inspection (409
+// PHYSICAL_INSPECTION_REQUIRED). A quote from an enquiry (no
+// intake_work_order_id) is not held.
 // ══════════════════════════════════════════════════════════════
 router.post('/', requireCapability('estimate.raise'), async (req, res) => {
   try {
@@ -706,6 +893,8 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     if (customer_type && !CUSTOMER_TYPES.includes(customer_type)) {
       return res.status(400).json({ success: false, message: `Account type must be one of: ${CUSTOMER_TYPES.join(', ')}` });
     }
+    const pref = preferenceFromBody(req.body.parts_preference) ?? DEFAULT_PREFERENCE;
+    if (!pref.length) return res.status(400).json({ success: false, code: 'PARTS_PREFERENCE_REQUIRED', message: PREFERENCE_REQUIRED });
 
     // Quote stage of the CRM cycle: an estimate raised from an enquiry.
     let enquiry = null;
@@ -736,6 +925,16 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
         "SELECT estimate_number FROM service_estimates WHERE intake_work_order_id = ? AND workshop_id = ? AND status NOT IN ('rejected','expired','converted') LIMIT 1",
         [intakeWo.id, req.workshopId]);
       if (open) return res.status(409).json({ success: false, message: `Estimate ${open.estimate_number} is already open for this job — edit that one.` });
+      // D2: the physical inspection comes first for an external customer —
+      // the main job card opens when they acknowledge it, and the estimate
+      // follows. Internal customers' job cards open with the job.
+      const gate = await jobCardGate({ workOrderId: intakeWo.id, workshopId: req.workshopId });
+      if (!gate.internal && !gate.jobCardOpen) {
+        return res.status(409).json({
+          success: false, code: 'PHYSICAL_INSPECTION_REQUIRED',
+          message: 'Do the physical inspection with the customer first — the job card opens when they acknowledge it.',
+        });
+      }
       customer_id = customer_id || intakeWo.customer_id;
       vehicle_id = vehicle_id || intakeWo.vehicle_id;
       if (!customer_id && intakeWo.customer_name) req.body.customer_name = intakeWo.customer_name;
@@ -793,12 +992,12 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
           `INSERT INTO service_estimates
              (workshop_id, estimate_number, receiving_form_id, customer_id, vehicle_id,
               customer_name, customer_type, vehicle_plate, vehicle_vin, advisor_id,
-              valid_until, vat_rate, intake_work_order_id, enquiry_id, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              valid_until, vat_rate, intake_work_order_id, enquiry_id, parts_preference, created_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [req.workshopId, estimate_number, receiving_form_id || null, customer_id || null,
            vehicle_id || null, customerName, customer_type, vehiclePlate, vehicleVin,
            advisor_id || req.user?.id, valid_until || null, parseFloat(vat_rate),
-           intakeWo?.id || null, enquiry?.id || null, req.user?.id]
+           intakeWo?.id || null, enquiry?.id || null, pref.join(','), req.user?.id]
         );
       } catch (e) {
         if (e.code !== 'ER_DUP_ENTRY' || !/estimate_number/.test(e.message)) throw e;
@@ -806,29 +1005,27 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     }
     if (!result) throw new Error('Could not allocate an estimate number');
 
+    // Raising the estimate does not open the job card (D2): an external
+    // job's is open already (checked above), an internal job's opened with it.
     const estimateId = result.insertId;
-    await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user });
+    await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user, pref });
     const totals = await recalcEstimateTotals(estimateId);
-    if (intakeWo) await ensureMainJobCard({ workOrderId: intakeWo.id, workshopId: req.workshopId, userId: req.user?.id });
     if (enquiry) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
 
     // Step 5: the Storekeeper prices the parts.
-    const savedLines = await query('SELECT line_type, genuine_price, genuine_available, aftermarket_price, aftermarket_available, unit_price FROM estimate_lines WHERE estimate_id = ?', [estimateId]);
-    const unpriced = savedLines.filter(partLineUnpriced).length;
+    const savedLines = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [estimateId]);
+    const unpriced = savedLines.filter(l => partLineUnpriced(l, pref)).length;
     if (unpriced) {
-      await notifyGroups(req.workshopId, ['storekeeper'], {
-        title: `Price parts: estimate ${estimate_number}`,
-        body: `${unpriced} part line${unpriced > 1 ? 's' : ''} for ${customerName || 'a customer'}${vehiclePlate ? ` (${vehiclePlate})` : ''} — Genuine and After-Market, or mark a type N/A.`,
-        link: `/estimates?id=${estimateId}`, orderId: intakeWo?.id || null, icon: '🏷️', type: `workflow_price_parts_${estimateId}`, exceptUserId: req.user?.id,
-      });
+      await notifyStoreToPrice({ workshopId: req.workshopId, estimateId, estimateNumber: estimate_number, count: unpriced, pref,
+        customerName, plate: vehiclePlate, orderId: intakeWo?.id || null, exceptUserId: req.user?.id });
     }
 
     await logAudit({
       workshopId: req.workshopId, userId: req.user?.id, action: 'CREATE', entityType: 'service_estimates',
-      entityId: estimateId, newValue: { estimate_number, total_amount: totals.total_amount },
+      entityId: estimateId, newValue: { estimate_number, total_amount: totals.total_amount, parts_preference: pref },
     });
 
-    res.status(201).json({ success: true, estimateId, estimate_number, parts_to_price: unpriced,
+    res.status(201).json({ success: true, estimateId, estimate_number, parts_to_price: unpriced, parts_preference: pref,
       customer_type, customer_type_label: CUSTOMER_TYPE_LABEL[customer_type] });
   } catch (err) {
     console.error('POST /estimates error:', err);
@@ -852,30 +1049,45 @@ router.put('/:id', requireCapability('estimate.raise'), async (req, res) => {
 
     const { lines = [], valid_until, advisor_id, notes } = req.body;
     const vat_rate = parseFloat(req.body.vat_rate || est.vat_rate || 5);
+    // The customer's parts preference may change with the edit; a category
+    // added to it goes back to the Store.
+    const sentPref = preferenceFromBody(req.body.parts_preference);
+    if (sentPref && !sentPref.length) return res.status(400).json({ success: false, code: 'PARTS_PREFERENCE_REQUIRED', message: PREFERENCE_REQUIRED });
+    const oldPref = partsPreference(est);
+    const pref = sentPref || oldPref;
 
     await execute(
       `UPDATE service_estimates SET
-         valid_until = ?, advisor_id = ?, vat_rate = ?,
+         valid_until = ?, advisor_id = ?, vat_rate = ?, parts_preference = ?,
          status = CASE WHEN status = 'sent_to_customer' THEN 'draft' ELSE status END,
          -- the sign-off was for the old prices
          internal_approved_by = NULL, internal_approved_at = NULL,
          version = version + 1
        WHERE id = ? AND workshop_id = ?`,
-      [valid_until || est.valid_until, advisor_id || est.advisor_id, vat_rate, req.params.id, req.workshopId]
+      [valid_until || est.valid_until, advisor_id || est.advisor_id, vat_rate, pref.join(','), req.params.id, req.workshopId]
     );
     const existingRows = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [req.params.id]);
     const existingById = new Map(existingRows.map(r => [r.id, r]));
+    const unpricedBefore = existingRows.filter(l => partLineUnpriced(l, oldPref)).length;
 
     // Replace lines (prices the editor may not set are carried over by id)
     await execute('DELETE FROM estimate_lines WHERE estimate_id = ?', [req.params.id]);
-    await insertEstimateLines(req.params.id, req.workshopId, lines, { user: req.user, format: est.estimate_format, existingById });
+    await insertEstimateLines(req.params.id, req.workshopId, lines, { user: req.user, pref, existingById });
     await recalcEstimateTotals(req.params.id);
+
+    // New part lines, or a category the Store has not priced yet: tell the Store.
+    const saved = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [req.params.id]);
+    const unpriced = saved.filter(l => partLineUnpriced(l, pref)).length;
+    if (unpriced > unpricedBefore) {
+      await notifyStoreToPrice({ workshopId: req.workshopId, estimateId: est.id, estimateNumber: est.estimate_number, count: unpriced, pref,
+        customerName: est.customer_name, plate: est.vehicle_plate, orderId: est.intake_work_order_id || null, exceptUserId: req.user?.id, version: Number(est.version) + 1 });
+    }
 
     await logAudit({
       workshopId: req.workshopId, userId: req.user?.id, action: 'UPDATE', entityType: 'service_estimates',
-      entityId: req.params.id, newValue: { action: 'edit_estimate' },
+      entityId: req.params.id, newValue: { action: 'edit_estimate', parts_preference: pref },
     });
-    res.json({ success: true, message: 'Estimate updated' });
+    res.json({ success: true, message: 'Estimate updated', parts_to_price: unpriced, parts_preference: pref });
   } catch (err) {
     console.error('PUT /estimates/:id error:', err);
     res.status(500).json({ success: false, message: 'Failed to update estimate' });
@@ -948,7 +1160,7 @@ router.patch('/:id/lines/:lineId/approve', requireCapability('customer.approval'
       estimateId: req.params.id, lineId: req.params.lineId, workshopId: req.workshopId,
       decision: customer_status, responder: { channel: 'in_person' }, actingUserId: req.user?.id, reason, partOption: part_option,
     });
-    if (!result.ok) return res.status(result.status).json({ success: false, message: result.message });
+    if (!result.ok) return res.status(result.status).json({ success: false, code: result.code, message: result.message });
 
     res.json({
       success: true, message: `Line ${customer_status}`, estimate_status: result.estimate_status,
@@ -963,9 +1175,18 @@ router.patch('/:id/lines/:lineId/approve', requireCapability('customer.approval'
 
 // ══════════════════════════════════════════════════════════════
 // PATCH /api/estimates/:id/lines/:lineId/pricing — Storekeeper (Step 5)
-// Body: { genuine_price, genuine_available, aftermarket_price, aftermarket_available, part_number }
-// A type that is not available is sent as *_available: false (N/A); the
-// line then falls back to the other type.
+// Body, for each category of the customer's parts preference (fields not
+// sent keep their value):
+//   genuine_price, genuine_available, genuine_expected_date
+//   aftermarket_price, aftermarket_available, aftermarket_expected_date
+//   used_price, used_available, used_expected_date
+// *_available: false = not available (no price); *_expected_date
+// 'YYYY-MM-DD' = expected delivery, null = in stock. Optional: quantity
+// (the confirmed quantity, for every category), part_number, and
+//   alternative: { option, for, price, expected_date } — a category the
+//   customer did not ask for, offered because `for` (a requested category)
+//   is not available; null withdraws it. It is shown to the customer as an
+//   alternative needing their approval and never counts by itself.
 // ══════════════════════════════════════════════════════════════
 router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
   try {
@@ -981,42 +1202,100 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Line not found' });
     if (line.line_type !== 'parts') return res.status(400).json({ success: false, message: 'Only parts lines are priced by the Store; labour is priced by the Service Advisor.' });
 
+    const pref = partsPreference(est);
     const b = req.body || {};
-    const gAvail = flagOrNull(b.genuine_available) ?? (numOrNull(b.genuine_price) != null ? 1 : line.genuine_available);
-    const aAvail = flagOrNull(b.aftermarket_available) ?? (numOrNull(b.aftermarket_price) != null ? 1 : line.aftermarket_available);
-    const g = gAvail === 0 ? null : (b.genuine_price !== undefined ? numOrNull(b.genuine_price) : line.genuine_price);
-    const a = aAvail === 0 ? null : (b.aftermarket_price !== undefined ? numOrNull(b.aftermarket_price) : line.aftermarket_price);
-    if (gAvail !== 0 && g == null && aAvail !== 0 && a == null) {
-      return res.status(400).json({ success: false, message: 'Enter a Genuine or After-Market price, or mark both N/A.' });
+    const bad = message => res.status(400).json({ success: false, message });
+    const row = { ...line };
+
+    // The categories the customer asked for.
+    for (const c of PART_CATEGORIES) {
+      const col = categoryColumns(c);
+      const sent = [col.price, col.available, col.expected].some(f => b[f] !== undefined);
+      if (!sent) continue;
+      if (!pref.includes(c)) {
+        return bad(`The customer did not ask for ${PART_CATEGORY_LABEL[c]} parts — offer it as an alternative when a requested type is not available.`);
+      }
+      if (b[col.price] !== undefined && b[col.price] !== null && b[col.price] !== '' && numOrNull(b[col.price]) == null) {
+        return bad(`The ${PART_CATEGORY_LABEL[c]} price must be a number, zero or more.`);
+      }
+      if (b[col.expected] && !dateOrNull(b[col.expected])) return bad(`The ${PART_CATEGORY_LABEL[c]} delivery date must be a date (YYYY-MM-DD).`);
+      const available = flagOrNull(b[col.available]) ?? (numOrNull(b[col.price]) != null ? 1 : row[col.available]);
+      row[col.available] = available;
+      row[col.price] = available === 0 ? null : (b[col.price] !== undefined ? numOrNull(b[col.price]) : row[col.price]);
+      row[col.expected] = available === 0 ? null : (b[col.expected] !== undefined ? dateOrNull(b[col.expected]) : row[col.expected]);
     }
-    const eff = effectivePartPrice({ genuine_price: g, genuine_available: gAvail, aftermarket_price: a, aftermarket_available: aAvail, part_option: line.part_option }, est.estimate_format);
+    if (!pref.some(c => partOptions(row, [c]).requested[0].decided)) {
+      return bad(`Enter the ${categoryWords(pref)} price, or mark it not available.`);
+    }
+
+    // The alternative, when a requested category is not available.
+    if (b.alternative === null) {
+      if (row.alternative_option && !pref.includes(row.alternative_option)) for (const f of Object.values(categoryColumns(row.alternative_option))) row[f] = null;
+      for (const f of ALTERNATIVE_FIELDS) row[f] = null;
+    } else if (b.alternative !== undefined) {
+      const alt = b.alternative || {};
+      const unavailable = pref.filter(c => partOptions(row, [c]).requested[0].available === false);
+      if (!PART_CATEGORIES.includes(alt.option) || pref.includes(alt.option)) {
+        return bad(`An alternative has to be a type the customer did not ask for (${PART_CATEGORIES.filter(c => !pref.includes(c)).map(c => PART_CATEGORY_LABEL[c]).join(' or ') || 'none left'}).`);
+      }
+      if (!unavailable.length) return bad('An alternative is offered only when a requested type is not available — mark it not available first.');
+      if (alt.for !== undefined && alt.for !== null && !unavailable.includes(alt.for)) {
+        return bad(`${PART_CATEGORY_LABEL[alt.for] || 'That type'} is not a requested type marked not available.`);
+      }
+      if (numOrNull(alt.price) == null) return bad(`Enter the price of the ${PART_CATEGORY_LABEL[alt.option]} alternative.`);
+      if (alt.expected_date && !dateOrNull(alt.expected_date)) return bad('The alternative’s delivery date must be a date (YYYY-MM-DD).');
+      if (row.alternative_option && row.alternative_option !== alt.option && !pref.includes(row.alternative_option)) {
+        for (const f of Object.values(categoryColumns(row.alternative_option))) row[f] = null;
+      }
+      const col = categoryColumns(alt.option);
+      row[col.price] = numOrNull(alt.price); row[col.available] = 1; row[col.expected] = dateOrNull(alt.expected_date);
+      row.alternative_option = alt.option; row.alternative_for = alt.for || unavailable[0]; row.alternative_approved = null;
+    }
+    tidyAlternative(row, pref);
+
+    if (b.quantity !== undefined && b.quantity !== null && b.quantity !== '') {
+      if (!(Number(b.quantity) > 0)) return bad('The quantity must be more than zero.');
+      row.quantity = Number(b.quantity);
+    }
+    const unitPrice = countedPartPrice(row, pref, 0);
     await execute(
       `UPDATE estimate_lines
-          SET genuine_price = ?, genuine_available = ?, aftermarket_price = ?, aftermarket_available = ?,
-              unit_price = ?, part_number = COALESCE(?, part_number), priced_by = ?, priced_at = NOW()
+          SET genuine_price = ?, genuine_available = ?, genuine_expected_date = ?,
+              aftermarket_price = ?, aftermarket_available = ?, aftermarket_expected_date = ?,
+              used_price = ?, used_available = ?, used_expected_date = ?,
+              alternative_option = ?, alternative_for = ?, alternative_approved = ?,
+              quantity = ?, unit_price = ?, part_number = COALESCE(?, part_number), priced_by = ?, priced_at = NOW()
         WHERE id = ?`,
-      [g, gAvail, a, aAvail, eff ? eff.price : 0, b.part_number ? String(b.part_number).slice(0, 100) : null, req.user.id, line.id]
+      [row.genuine_price, row.genuine_available, row.genuine_expected_date,
+       row.aftermarket_price, row.aftermarket_available, row.aftermarket_expected_date,
+       row.used_price, row.used_available, row.used_expected_date,
+       row.alternative_option, row.alternative_for, row.alternative_approved,
+       row.quantity, unitPrice, b.part_number ? String(b.part_number).slice(0, 100) : null, req.user.id, line.id]
     );
     // Prices changed: a sign-off given on the old ones no longer stands.
     await execute('UPDATE service_estimates SET internal_approved_by = NULL, internal_approved_at = NULL WHERE id = ? AND status = \'draft\'', [est.id]);
     const totals = await recalcEstimateTotals(est.id);
 
-    const lines = await query('SELECT line_type, genuine_price, genuine_available, aftermarket_price, aftermarket_available, unit_price FROM estimate_lines WHERE estimate_id = ?', [est.id]);
-    const remaining = lines.filter(partLineUnpriced).length;
+    const lines = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [est.id]);
+    const remaining = lines.filter(l => partLineUnpriced(l, pref)).length;
     if (!remaining) {
       // Pricing done — the advisor who raised it is next.
+      const alternatives = lines.filter(l => l.line_type === 'parts' && partOptions(l, pref).alternative).length;
       const to = [...new Set([est.advisor_id, est.created_by].filter(Boolean))].filter(id => id !== req.user.id);
       for (const userId of to) {
         await createInAppNotification({
           workshopId: req.workshopId, userId, title: `Parts priced: estimate ${est.estimate_number}`,
-          body: 'The Store has priced every part (Genuine / After-Market). Check the labour and send it to the customer.',
+          body: `The Store has priced every part (${categoryWords(pref)})` +
+            `${alternatives ? ` and offered ${alternatives} alternative${alternatives > 1 ? 's' : ''} for the customer's approval` : ''}. Check the labour and send it to the customer.`,
           type: 'workflow_parts_priced', icon: '🏷️', link: `/estimates?id=${est.id}`, orderId: est.intake_work_order_id || null,
         });
       }
     }
+    const pick = r => Object.fromEntries([...CATEGORY_FIELDS, ...ALTERNATIVE_FIELDS, 'quantity'].map(f => [f, r[f] ?? null]));
     await logAudit({ workshopId: req.workshopId, userId: req.user.id, action: 'PRICE_PARTS', entityType: 'estimate_lines', entityId: line.id,
-      oldValue: { genuine: line.genuine_price, after_market: line.aftermarket_price }, newValue: { genuine: g, genuine_available: gAvail, after_market: a, aftermarket_available: aAvail } });
-    res.json({ success: true, unit_price: eff ? eff.price : 0, parts_left_to_price: remaining, total_amount: totals.total_amount });
+      oldValue: pick(line), newValue: pick(row) });
+    const [saved] = withPartOptions(lines.filter(l => l.id === line.id), pref);
+    res.json({ success: true, unit_price: unitPrice, parts_left_to_price: remaining, total_amount: totals.total_amount, line: saved || null });
   } catch (err) {
     console.error('PATCH /estimates/:id/lines/:lineId/pricing error:', err);
     res.status(500).json({ success: false, message: 'Failed to price the part' });
@@ -1037,18 +1316,26 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
       return res.status(400).json({ success: false, message: 'Already converted to a job card' });
     }
 
+    // The estimate goes out in the customer's parts preference, as raised.
+    // The old Format 1/2/3 (body `format`) still narrows it to Genuine and/or
+    // After-Market when those were asked for; otherwise it is ignored.
+    let pref = partsPreference(est);
+    const narrowed = FORMAT_PREFERENCE[req.body.format];
+    if (narrowed && narrowed.every(c => pref.includes(c))) pref = narrowed;
+
     // Step 5 order: parts priced by the Store, labour by the advisor, then send.
-    const priceCheck = await query('SELECT line_type, unit_price, genuine_price, genuine_available, aftermarket_price, aftermarket_available FROM estimate_lines WHERE estimate_id = ?', [est.id]);
-    const unpricedParts = priceCheck.filter(partLineUnpriced).length;
+    const priceCheck = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [est.id]);
+    const unpricedParts = priceCheck.filter(l => partLineUnpriced(l, pref)).length;
     if (unpricedParts) {
       return res.status(409).json({ success: false, code: 'PARTS_NOT_PRICED',
-        message: `${unpricedParts} part line${unpricedParts > 1 ? 's are' : ' is'} waiting for the Storekeeper's Genuine / After-Market price.` });
+        message: `${unpricedParts} part line${unpricedParts > 1 ? 's are' : ' is'} waiting for the Storekeeper's price (${categoryWords(pref)}).` });
     }
     if (priceCheck.some(l => l.line_type === 'labour' && !(Number(l.unit_price) > 0))) {
       return res.status(409).json({ success: false, code: 'LABOUR_NOT_PRICED', message: 'Price the labour before sending.' });
     }
-    // Format 1 = Genuine, 2 = After-Market, 3 = both side by side.
-    const format = ESTIMATE_FORMATS.includes(req.body.format) ? req.body.format : (est.estimate_format || 'genuine');
+    // Kept for the screens that still read the format: genuine / after_market
+    // / both, or null for a preference with Used.
+    const format = formatOfPreference(pref);
     const channel = req.body.channel === 'whatsapp' ? 'whatsapp' : 'email';
 
     // Process step 5: an external customer's estimate is signed off by a
@@ -1074,14 +1361,12 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
       return res.status(400).json({ success: false, message: 'No email on file for this customer — send it by WhatsApp, or pass an email.' });
     }
 
-    await execute('UPDATE service_estimates SET estimate_format = ? WHERE id = ?', [format, est.id]);
-    const sentTotals = await applyFormatPrices(est.id, format);
+    await execute('UPDATE service_estimates SET parts_preference = ?, estimate_format = ? WHERE id = ?', [pref.join(','), format, est.id]);
+    const sentTotals = await applyPreferencePrices(est.id, pref);
     est.total_amount = sentTotals.total_amount;
 
-    const lines = await query(
-      'SELECT description, line_type, quantity, unit_price, line_total FROM estimate_lines WHERE estimate_id = ? ORDER BY sort_order, id',
-      [req.params.id]
-    );
+    const lines = await query('SELECT * FROM estimate_lines WHERE estimate_id = ? ORDER BY sort_order, id', [req.params.id]);
+    const message = estimateMessage(est, lines, pref);
 
     // Re-issuing keeps the same token unless the previous one already
     // expired or was consumed by a decision (status moved past
@@ -1114,35 +1399,24 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
     if (channel === 'whatsapp') {
       const [cust] = est.customer_id ? await query('SELECT phone FROM customers WHERE id = ?', [est.customer_id]) : [];
       const phone = String(req.body.phone || cust?.phone || '').replace(/[^\d]/g, '');
-      const text = `Your service estimate ${est.estimate_number}${est.vehicle_plate ? ` for ${est.vehicle_plate}` : ''} is ready ` +
-        `(AED ${Number(est.total_amount).toFixed(2)} incl. VAT). Please review and approve each item here: ${approvalUrl}`;
+      const text = `${message.text} Please review and approve each item here: ${approvalUrl}`;
       await logAudit({
         workshopId: req.workshopId, userId: req.user?.id, action: 'SEND', entityType: 'service_estimates',
-        entityId: req.params.id, oldValue: est.status, newValue: { channel: 'whatsapp', format },
+        entityId: req.params.id, oldValue: est.status, newValue: { channel: 'whatsapp', parts_preference: pref },
       });
       return res.json({
-        success: true, message: 'Ready to send on WhatsApp', approval_url: approvalUrl, format,
+        success: true, message: 'Ready to send on WhatsApp', approval_url: approvalUrl, format, parts_preference: pref,
         whatsapp_url: `https://wa.me/${phone}?text=${encodeURIComponent(text)}`,
       });
     }
-
-    const pricing = format === 'both' ? summariseEstimatePricing(await query(
-      'SELECT job_name, line_type, description, quantity, unit_price, genuine_price, genuine_available, aftermarket_price, aftermarket_available, part_option, customer_status FROM estimate_lines WHERE estimate_id = ? AND line_type <> \'discount\'', [est.id])) : null;
-    const lineRows = lines.map(l =>
-      `<tr><td style="padding:6px 0;">${l.description}${l.quantity > 1 ? ` × ${l.quantity}` : ''}</td>` +
-      `<td style="padding:6px 0;text-align:right;white-space:nowrap;">AED ${Number(l.line_total ?? (l.quantity * l.unit_price)).toFixed(2)}</td></tr>`
-    ).join('') + (pricing ? `<tr><td colspan="2" style="padding-top:10px;color:#64748b;">With Genuine parts AED ${pricing.total_genuine.toFixed(2)} · With After-Market parts AED ${pricing.total_after_market.toFixed(2)} (before VAT) — choose on the next page.</td></tr>` : '');
 
     const sent = await sendNotificationEmail({
       to: customerEmail,
       tenantId: req.workshopId,
       subject: `Estimate ${est.estimate_number} — approval needed`,
       title: 'Your service estimate is ready',
-      body: `We've prepared an estimate for ${est.vehicle_plate ? `your vehicle (${est.vehicle_plate})` : 'your vehicle'}. ` +
-        `Please review each item and approve or reject it before we begin any work.` +
-        `<table style="width:100%;margin-top:14px;border-collapse:collapse;font-size:14px;">${lineRows}` +
-        `<tr><td style="padding-top:10px;font-weight:700;">Total (incl. VAT)</td>` +
-        `<td style="padding-top:10px;font-weight:700;text-align:right;">AED ${Number(est.total_amount).toFixed(2)}</td></tr></table>`,
+      body: `We've prepared an estimate for ${est.vehicle_plate ? `your vehicle (${esc(est.vehicle_plate)})` : 'your vehicle'}. ` +
+        `Please review each item and approve or reject it before we begin any work.${message.html}`,
       ctaText: 'Review and approve',
       ctaUrl: approvalUrl,
       expiryNote: 'This link expires in 7 days.',
@@ -1153,16 +1427,16 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
       return res.status(502).json({
         success: false, code: 'EMAIL_FAILED',
         message: 'The e-mail could not be sent — send it by WhatsApp, or copy the link.',
-        approval_url: approvalUrl, format,
+        approval_url: approvalUrl, format, parts_preference: pref,
       });
     }
 
     await logAudit({
       workshopId: req.workshopId, userId: req.user?.id, action: 'SEND', entityType: 'service_estimates',
-      entityId: req.params.id, oldValue: est.status, newValue: { sent_to: customerEmail, format },
+      entityId: req.params.id, oldValue: est.status, newValue: { sent_to: customerEmail, parts_preference: pref },
     });
 
-    res.json({ success: true, message: `Sent to ${customerEmail}`, approval_url: approvalUrl, format });
+    res.json({ success: true, message: `Sent to ${customerEmail}`, approval_url: approvalUrl, format, parts_preference: pref });
   } catch (err) {
     console.error('POST /estimates/:id/send error:', err);
     res.status(500).json({ success: false, message: 'Failed to send the estimate' });
@@ -1204,6 +1478,17 @@ router.post('/:id/internal-approve', async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to approve the estimate' });
   }
 });
+
+/** Step 5: the Store is told which part lines to price, in the categories the customer asked for. */
+async function notifyStoreToPrice({ workshopId, estimateId, estimateNumber, count, pref, customerName, plate, orderId = null, exceptUserId = null, version = 1 }) {
+  await notifyGroups(workshopId, ['storekeeper'], {
+    title: `Price parts: estimate ${estimateNumber}`,
+    body: `${count} part line${count > 1 ? 's' : ''} for ${customerName || 'a customer'}${plate ? ` (${plate})` : ''} — ` +
+      `the customer asked for ${categoryWords(pref)}: availability, price and delivery for each, or mark it not available.`,
+    // An edit (a new version) is its own notice — the type is the hour's dedup key.
+    link: `/estimates?id=${estimateId}`, orderId, icon: '🏷️', type: `workflow_price_parts_${estimateId}${version > 1 ? `_v${version}` : ''}`, exceptUserId,
+  });
+}
 
 async function notifyApprovers(est, workshopId) {
   try {
@@ -1370,16 +1655,21 @@ publicRouter.get('/:token', estimateApprovalLimiter, async (req, res) => {
     const est = await loadByToken(req.params.token, res);
     if (!est) return;
 
-    // Genuine / After-Market prices are what the customer is choosing between
-    // (Format 3) — they are selling prices, not the workshop's cost.
+    // The per-category prices are what the customer is choosing between —
+    // selling prices, not the workshop's cost. Each part line carries its
+    // `options`: the requested categories and the alternative (if any).
+    const pref = partsPreference(est);
     const lines = await query(
       `SELECT id, line_type, description, job_name, part_number, quantity, unit_price,
               discount_pct, line_total, customer_status, urgency,
-              genuine_price, genuine_available, aftermarket_price, aftermarket_available, part_option
+              genuine_price, genuine_available, genuine_expected_date,
+              aftermarket_price, aftermarket_available, aftermarket_expected_date,
+              used_price, used_available, used_expected_date,
+              part_option, alternative_option, alternative_for, alternative_approved
          FROM estimate_lines WHERE estimate_id = ? ORDER BY sort_order, id`,
       [est.id]
     );
-    const pricing = summariseEstimatePricing(lines.filter(l => l.line_type !== 'discount'));
+    const pricing = summariseEstimatePricing(lines.filter(l => l.line_type !== 'discount'), pref);
 
     res.json({
       success: true,
@@ -1396,11 +1686,14 @@ publicRouter.get('/:token', estimateApprovalLimiter, async (req, res) => {
         status: est.status,
         valid_until: est.valid_until,
         work_order_id: est.work_order_id,
-        estimate_format: est.estimate_format || 'genuine',
+        estimate_format: est.estimate_format || formatOfPreference(pref),
+        parts_preference: pref,
       },
-      lines,
+      lines: withPartOptions(lines, pref),
       jobs: pricing.jobs,
-      totals_by_type: { genuine: pricing.total_genuine, after_market: pricing.total_after_market },
+      // Before VAT, per category of the preference; alternatives apart.
+      totals_by_type: pricing.totals,
+      alternatives: pricing.alternatives,
     });
   } catch (err) {
     console.error('GET /public/estimates/:token error:', err);
@@ -1426,7 +1719,7 @@ publicRouter.post('/:token/lines/:lineId/decide', estimateApprovalLimiter, async
       estimateId: est.id, lineId: req.params.lineId, workshopId: est.workshop_id,
       decision, responder: { channel: 'email', name: name || null }, reason, partOption: part_option,
     });
-    if (!result.ok) return res.status(result.status).json({ success: false, message: result.message });
+    if (!result.ok) return res.status(result.status).json({ success: false, code: result.code, message: result.message });
 
     res.json({
       success: true, estimate_status: result.estimate_status,

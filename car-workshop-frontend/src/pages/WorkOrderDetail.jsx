@@ -383,7 +383,7 @@ export default function WorkOrderDetail() {
       <div className="od-progress-card od-extras">
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, fontWeight: 700, color: '#1e3a6b' }}>{t('orderDetail.inspections', 'Vehicle inspections')}</span>
-          {[['intake', 'intake_inspection_at', t('orderDetail.intake_inspection', 'Intake walk-around')], ['joint', 'joint_inspection_at', t('orderDetail.joint_inspection', 'Joint inspection at handover')]].map(([type, col, label]) => (
+          {[['intake', 'intake_inspection_at', t('orderDetail.physical_inspection', 'Physical inspection')], ['joint', 'joint_inspection_at', t('orderDetail.joint_inspection', 'Joint inspection at handover')]].map(([type, col, label]) => (
             <button key={type} className="od-insp-btn" onClick={() => navigate(`/work-orders/${id}/inspection?type=${type}`)}
               style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 20, fontSize: 12, fontWeight: 600, border: '1px solid',
                 cursor: 'pointer', background: order[col] ? '#dcfce7' : '#eff6ff', color: order[col] ? '#16a34a' : '#1d4ed8', borderColor: order[col] ? '#bbf7d0' : '#bfdbfe' }}>

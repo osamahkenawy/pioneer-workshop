@@ -13,7 +13,7 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const out = []; let section = '';
 const expect = (what, ok, detail) => out.push(`${ok ? 'PASS' : 'FAIL'}  [${section}] ${what}${detail !== undefined && detail !== '' ? '  — ' + detail : ''}`);
 const raw = async (method, path, token, body) => fetch(API + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -21,7 +21,8 @@ const call = async (method, path, token, body) => {
   const r = await raw(method, path, token, body);
   let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j, headers: r.headers };
 };
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {}; for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 
 // What must never be in the public payload.
@@ -29,6 +30,13 @@ const LEAKS = /mechanic|technician|customer_phone|"phone_alt"|"note"|"notes"|"la
 // A 1×1 PNG, as the signature pad would send.
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const rnd7 = () => String(crypto.randomInt(0, 1e7)).padStart(7, '0');
+const mainOf = async woId => (await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId || 0]))[0];
+const upload = async (tok, path, name, dataUrl) => {
+  const fd = new FormData();
+  fd.append('files', new Blob([Buffer.from(dataUrl.split(',')[1], 'base64')], { type: 'image/png' }), name);
+  const r = await fetch(API + path, { method: 'POST', headers: { Authorization: `Bearer ${tok}` }, body: fd });
+  let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j };
+};
 
 try {
   const pw = 'Qa' + crypto.randomBytes(8).toString('hex') + '1';
@@ -56,7 +64,7 @@ try {
   const woId = created.json?.data?.id;
   const [wo] = await q('SELECT service_status_token FROM work_orders WHERE id = ?', [woId]);
   const token = wo?.service_status_token;
-  expect('customer, car and job card created', !!cust?.id && !!veh?.id && created.status === 201 && token?.length >= 32, `wo ${woId}`);
+  expect('customer, car and work order created (an external customer: the job card waits for the physical inspection)', !!cust?.id && !!veh?.id && created.status === 201 && token?.length >= 32 && !(await mainOf(woId)), `wo ${woId}`);
   const status = async () => (await call('GET', `/public/service-status/${token}`)).json?.data;
 
   // ── Public status payload ───────────────────────────────────────────
@@ -70,7 +78,9 @@ try {
   // "Stage 1 of 7"); only the last stage, Collected, is 'done' when reached.
   expect('seven stages: Vehicle received is current, with its time; the rest upcoming', pub.json?.data?.stages?.length === 7 && pub.json.data.stages[0].state === 'current' && !!pub.json.data.stages[0].at
     && pub.json.data.stages.slice(1).every(s => s.state === 'upcoming' && !s.at), (pub.json?.data?.stages || []).map(s => s.state).join(','));
-  expect('vehicle, job card number and the reported issue are shown', pub.json?.data?.vehicle?.plate === 'QACS01' && /^JC-/.test(pub.json?.data?.job?.job_card_number || '') && /Vibration/.test(pub.json?.data?.job?.reported_issue || ''));
+  expect('vehicle, the job (WO number) and the reported issue are shown; no job card number before the acknowledgement',
+    pub.json?.data?.vehicle?.plate === 'QACS01' && /^WO-/.test(pub.json?.data?.job?.work_order_number || '') && pub.json?.data?.job?.job_card_number === null && /Vibration/.test(pub.json?.data?.job?.reported_issue || ''),
+    JSON.stringify(pub.json?.data?.job && { wo: pub.json.data.job.work_order_number, jc: pub.json.data.job.job_card_number }));
   expect('workshop contact and a map link', !!pub.json?.data?.workshop?.name && /^https:\/\/www\.google\.com\/maps\//.test(pub.json?.data?.workshop?.map_url || ''));
   expect('not cached', /no-store/.test(pub.headers.get('cache-control') || ''), pub.headers.get('cache-control'));
   const unknown = await call('GET', `/public/service-status/${'0'.repeat(32)}`);
@@ -146,9 +156,28 @@ try {
   section = 'inspection';
   const insp = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
   await call('PUT', `/vehicle-inspections/${insp.id}`, advisor, { marks: [{ id: 'm1', view: 'front', code: 'PC', x: 0.5, y: 0.4 }] });
+  // Vehicle photos on the physical inspection: private, like the paper forms.
+  const ph = await upload(advisor, `/vehicle-inspections/${insp.id}/photos`, 'front.png', PNG);
+  const photoId = ph.json?.data?.photos?.[0]?.id;
+  const staffPhoto = await raw('GET', `/vehicle-inspections/${insp.id}/photos/${photoId}`, advisor);
+  const anonPhoto = await raw('GET', `/vehicle-inspections/${insp.id}/photos/${photoId}`);
+  expect('a vehicle photo added before completion: read with a staff login (the image, no place on disk in the payload), not without one (401)',
+    ph.status === 201 && !!photoId && !('file' in (ph.json?.data?.photos?.[0] || {})) && staffPhoto.status === 200 && /^image\/png/.test(staffPhoto.headers.get('content-type') || '') && anonPhoto.status === 401,
+    `upload ${ph.status} · staff ${staffPhoto.status} · anonymous ${anonPhoto.status}`);
   r = await call('PATCH', `/vehicle-inspections/${insp.id}/complete`, advisor, { customer_present: false });
-  expect('intake inspection completed without the customer', r.status === 200, `HTTP ${r.status}`);
-  expect('stage: Inspection & estimate', (await status())?.stage?.key === 'inspection_estimate');
+  const nextKey = (await call('GET', `/workflow/work-orders/${woId}`, advisor)).json?.data?.next?.key;
+  expect('intake inspection completed without the customer: no job card yet, waiting for their signature (next: send them the link)',
+    r.status === 200 && r.json?.job_card?.waiting_for_signature === true && !(await mainOf(woId)) && nextKey === 'send_inspection_link',
+    `HTTP ${r.status} ${JSON.stringify(r.json?.job_card)} next ${nextKey}`);
+  // An external customer's job is still "Vehicle received" until they acknowledge the inspection.
+  expect('stage stays Vehicle received until the customer acknowledges it', (await status())?.stage?.key === 'received', (await status())?.stage?.key);
+  const lateUp = await upload(advisor, `/vehicle-inspections/${insp.id}/photos`, 'late.png', PNG);
+  const ownPhoto = await raw('GET', `/customer-portal/inspections/${insp.id}/photos/${photoId}`, cTok);
+  const otherPhoto = await raw('GET', `/customer-portal/inspections/${insp.id}/photos/${photoId}`, oTok);
+  expect('photos are locked once completed (409); the customer sees them in the portal, another customer does not (404)',
+    lateUp.status === 409 && ownPhoto.status === 200 && otherPhoto.status === 404, `${lateUp.status}/${ownPhoto.status}/${otherPhoto.status}`);
+  const early = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [{ line_type: 'labour', job_name: 'Suspension', description: 'Front suspension check', quantity: 1, unit_price: 200 }] });
+  expect('no estimate before the acknowledgement (409 PHYSICAL_INSPECTION_REQUIRED)', early.status === 409 && early.json?.code === 'PHYSICAL_INSPECTION_REQUIRED', `HTTP ${early.status} ${early.json?.code || ''}`);
   r = await call('GET', '/customer-portal/home', cTok);
   expect('Home: "Sign your vehicle inspection"', (r.json?.data?.actions?.sign || []).some(s => s.id === insp.id));
   r = await call('POST', `/customer-portal/inspections/${insp.id}/sign`, oTok, { name: 'Someone', confirmed: true, signature: PNG });
@@ -159,6 +188,10 @@ try {
   expect('an SVG is not a signature', r.status === 400, `HTTP ${r.status}`);
   r = await call('POST', `/customer-portal/inspections/${insp.id}/sign`, cTok, { name: 'QA Status Customer', confirmed: true, signature: PNG });
   expect('the customer signs in the portal', r.status === 200 && r.json?.signature?.signed && r.json.signature.signed_by_name === 'QA Status Customer', `HTTP ${r.status}`);
+  const jcPortal = await mainOf(woId);
+  const afterSign = await status();
+  expect('signed in the portal → the main job card opens; stage: Inspection & estimate, with the job card number',
+    !!jcPortal && afterSign?.stage?.key === 'inspection_estimate' && afterSign.job?.job_card_number === jcPortal.job_card_number, `${afterSign?.stage?.key} ${afterSign?.job?.job_card_number}`);
   r = await call('POST', `/customer-portal/inspections/${insp.id}/sign`, cTok, { name: 'Again', confirmed: true, signature: PNG });
   expect('a second signature is refused (409)', r.status === 409 && r.json?.code === 'ALREADY_SIGNED', `HTTP ${r.status}`);
   const [signed] = await q('SELECT signed_via, signed_by_name, signature_url FROM vehicle_inspections WHERE id = ?', [insp.id]);
@@ -200,6 +233,12 @@ try {
 } catch (e) {
   out.push('ERROR ' + e.stack);
 } finally {
+  // Files of the inspections made here: signature images and vehicle photos.
+  for (const row of await q('SELECT signature_url, photos FROM vehicle_inspections WHERE id > ?', [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(row.signature_url || '')) fs.rmSync(BE + row.signature_url, { force: true });
+    let photos = []; try { photos = (typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos) || []; } catch { /* none */ }
+    for (const f of photos) if (/^[\w.-]+$/.test(f?.file || '')) fs.rmSync(`${BE}/private-uploads/inspections/${f.file}`, { force: true });
+  }
   await q('SET FOREIGN_KEY_CHECKS = 0');
   const removed = {};
   for (const t of idTables) { const r = await q(`DELETE FROM \`${t}\` WHERE id > ?`, [baseline[t]]); if (r.affectedRows) removed[t] = r.affectedRows; }

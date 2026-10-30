@@ -8,8 +8,17 @@
  * Small helpers the routes call at each hand-off, so an enquiry knows it was
  * quoted and converted, and the follow-ups the process map asks for land in
  * Tasks & Follow-ups instead of depending on someone remembering.
+ *
+ * Every submitted enquiry gets its work order — the visit — at once (client
+ * e-mail, 2026-10-29: openEnquiryWorkOrder below), linked both ways
+ * (enquiries.work_order_id, work_orders.enquiry_id). Converting the lead
+ * later (direct convert, booking check-in, approved quote) works on that
+ * work order; an enquiry closed with nothing done on it cancels it.
  */
-import { query, execute } from './database.js';
+import pool, { query, execute } from './database.js';
+import { serviceStatusToken } from './tokens.js';
+import { notifyGroups, fulfilReminders } from './workflow.js';
+import { openJobCardIfReady } from './physical-inspection.js';
 
 /**
  * Open a CRM task unless an open one already exists for the same record and
@@ -104,18 +113,216 @@ export async function markEnquiryQuoted({ workshopId, enquiryId, amount = null, 
  */
 const via = conn => (conn ? async (sql, params = []) => (await conn.query(sql, params))[0] : query);
 
-/** The enquiry became a job (approved quote, check-in or direct convert). */
+/**
+ * The enquiry became a job (approved quote, check-in or direct convert) —
+ * normally on its own work order. A path that opened a different one takes
+ * its place: the enquiry's is cancelled when nothing happened on it yet, so
+ * the visit is not left twice on the boards.
+ */
 export async function markEnquiryConverted({ workshopId, enquiryId, workOrderId, customerId = null, userId = null, conn = null }) {
   if (!enquiryId || !workOrderId) return;
   const q = via(conn);
+  const [enq] = await q('SELECT work_order_id FROM enquiries WHERE id = ? AND workshop_id = ?', [enquiryId, workshopId]);
+  let repoint = !enq?.work_order_id;
+  if (enq?.work_order_id && Number(enq.work_order_id) !== Number(workOrderId)) {
+    const [other] = await q('SELECT work_order_number FROM work_orders WHERE id = ?', [workOrderId]);
+    const r = await cancelUnstartedWorkOrder({
+      workshopId, workOrderId: enq.work_order_id, userId, conn,
+      note: `Enquiry converted to work order ${other?.work_order_number || `#${workOrderId}`}`,
+    });
+    repoint = r.cancelled || !r.live;
+  }
   await q(
     `UPDATE enquiries SET status = 'converted', converted_work_order_id = ?, converted_at = NOW(),
-            customer_id = COALESCE(customer_id, ?)
+            work_order_id = IF(?, ?, work_order_id), customer_id = COALESCE(customer_id, ?)
       WHERE id = ? AND workshop_id = ? AND converted_work_order_id IS NULL`,
-    [workOrderId, customerId, enquiryId, workshopId]);
+    [workOrderId, repoint ? 1 : 0, workOrderId, customerId, enquiryId, workshopId]);
   await q('UPDATE work_orders SET enquiry_id = COALESCE(enquiry_id, ?) WHERE id = ? AND workshop_id = ?',
     [enquiryId, workOrderId, workshopId]);
   await closeTasks({ workshopId, relatedType: 'enquiry', relatedId: enquiryId, userId, outcome: 'Converted to a job' });
+}
+
+/**
+ * A work order nothing has happened on yet — no job card opened, no customer
+ * approval, still Received / Inspected — cancelled, with `note` in its
+ * history ("Enquiry closed: …"). Quietly: no "cancelled" message to the
+ * customer, who turned the visit down or never had one. A job with work on
+ * it is left for the Service Advisor.
+ *
+ * @returns {Promise<{cancelled: boolean, live: boolean, workOrderNumber: string|null}>}
+ *   live — the work order is still open afterwards.
+ */
+export async function cancelUnstartedWorkOrder({ workshopId, workOrderId, note, userId = null, conn = null }) {
+  const q = via(conn);
+  const [wo] = await q(
+    `SELECT wo.id, wo.work_order_number, wo.status, wo.customer_approved_at,
+            EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = wo.id AND jc.status <> 'cancelled') AS has_card
+       FROM work_orders wo WHERE wo.id = ? AND wo.workshop_id = ?`,
+    [workOrderId, workshopId]);
+  if (!wo) return { cancelled: false, live: false, workOrderNumber: null };
+  const live = !['completed', 'cancelled'].includes(wo.status);
+  if (!live || Number(wo.has_card) || wo.customer_approved_at || !['pending', 'confirmed'].includes(wo.status)) {
+    return { cancelled: false, live, workOrderNumber: wo.work_order_number };
+  }
+  const reason = String(note || 'Enquiry closed').slice(0, 500);
+  const r = await q(
+    `UPDATE work_orders SET status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ?
+      WHERE id = ? AND workshop_id = ? AND status IN ('pending','confirmed') AND customer_approved_at IS NULL`,
+    [reason, wo.id, workshopId]);
+  if (!r.affectedRows) return { cancelled: false, live: true, workOrderNumber: wo.work_order_number };
+  await q('INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
+    [wo.id, 'cancelled', userId, reason]);
+  return { cancelled: true, live: false, workOrderNumber: wo.work_order_number };
+}
+
+/**
+ * The enquiry was closed without the visit (lost, or not now — a re-offer
+ * date): its work order is cancelled when nothing has happened on it yet,
+ * with "Enquiry closed: <reason>" in its history.
+ * @returns {Promise<{cancelled: boolean, live: boolean, workOrderNumber: string|null}|null>} null: no work order.
+ */
+export async function closeEnquiryWorkOrder({ workshopId, enquiryId, reason, userId = null }) {
+  const [enq] = await query(
+    `SELECT e.work_order_id, (SELECT wo.id FROM work_orders wo WHERE wo.enquiry_id = e.id AND wo.workshop_id = e.workshop_id
+                                AND wo.status NOT IN ('completed','cancelled') ORDER BY wo.id DESC LIMIT 1) AS linked_id
+       FROM enquiries e WHERE e.id = ? AND e.workshop_id = ?`,
+    [enquiryId, workshopId]);
+  const workOrderId = enq?.work_order_id || enq?.linked_id;
+  if (!workOrderId) return null;
+  const text = String(reason || '').replace(/_/g, ' ').trim();
+  return cancelUnstartedWorkOrder({ workshopId, workOrderId, userId, note: `Enquiry closed${text ? `: ${text}` : ''}` });
+}
+
+const CHANNEL_WORDS = { advisor: 'the Service Advisor', website: 'the website', whatsapp: 'WhatsApp', social: 'social media', fleet_link: 'the fleet link', api: 'the API' };
+const ymd = () => { const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`; };
+
+/**
+ * The enquiry's work order — the visit — opened (or found) inside the
+ * caller's transaction (`conn`, the enquiry row locked) or on the pool.
+ *
+ * The enquiry's live work order (enquiries.work_order_id, else the open one
+ * carrying its enquiry_id) is reused, so no path opens a second one. Else:
+ * the customer behind the enquiry (customerForEnquiry), the car it names
+ * (vehicleForEnquiry; a plate on file for someone else is left off and comes
+ * back in `info.conflict`), and a 'pending' work order linked both ways,
+ * with the source in intake_channel (`channel`, else from the contact
+ * method) and the Step 1 classification snapshot. The reported issue is
+ * `complaint`, else the enquiry's description — it may still be empty, and
+ * Step 2 then asks for it.
+ *
+ * No job card here: after the commit, announceEnquiryWorkOrder() opens it
+ * when the rule allows (internal customer) and tells the Service Advisors.
+ *
+ * @returns {Promise<{workOrderId: number, workOrderNumber: string, customerId: number,
+ *   vehicleId: number|null, created: boolean}>}
+ */
+export async function workOrderForEnquiry(enq, { conn = null, userId = null, channel = null, complaint = null, info = {} } = {}) {
+  const q = via(conn);
+  const [live] = await q(
+    `SELECT id, work_order_number, customer_id, vehicle_id FROM work_orders
+      WHERE workshop_id = ? AND status NOT IN ('completed','cancelled') AND (id = ? OR enquiry_id = ?)
+      ORDER BY id = ? DESC, id DESC LIMIT 1`,
+    [enq.workshop_id, enq.work_order_id || 0, enq.id, enq.work_order_id || 0]);
+  if (live) {
+    if (Number(enq.work_order_id) !== Number(live.id)) await q('UPDATE enquiries SET work_order_id = ? WHERE id = ?', [live.id, enq.id]);
+    return { workOrderId: live.id, workOrderNumber: live.work_order_number, customerId: live.customer_id, vehicleId: live.vehicle_id, created: false };
+  }
+
+  const customerId = await customerForEnquiry(enq, { conn });
+  const vehicleId = await vehicleForEnquiry({ ...enq, customer_id: customerId }, customerId, { conn, info });
+  const [cust] = await q('SELECT full_name, phone, email, customer_class, customer_subcategory FROM customers WHERE id = ?', [customerId]);
+  // An insurer- or company-paid enquiry keeps its payer route; otherwise the
+  // payer follows the Step 1 classification.
+  const payer = enq.payer_type && enq.payer_type !== 'self_pay'
+    ? enq.payer_type : payerTypeForClass(cust?.customer_class, cust?.customer_subcategory);
+  const realPhone = p => (/\d{5,}/.test(String(p || '').replace(/\D/g, '')) ? p : null);
+  const issue = String(complaint ?? enq.description ?? '').trim();
+  const notes = info.conflict
+    ? `Plate ${info.conflict.plate} from the enquiry is on file for ${info.conflict.owner_name || 'another customer'} — not attached; confirm the owner.` : null;
+
+  let workOrderId = null; let workOrderNumber = null;
+  for (let attempt = 0; attempt < 6 && !workOrderId; attempt++) {
+    const number = `WO-${ymd()}-${Math.floor(Math.random() * 9000) + 1000}`;
+    try {
+      const ins = await q(
+        `INSERT INTO work_orders
+           (workshop_id, work_order_number, customer_id, vehicle_id, customer_name, customer_phone, customer_email,
+            description, service_tier, payer_type, enquiry_id, service_fee, intake_channel, status, service_status_token, notes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?, 'pending', ?, ?)`,
+        [enq.workshop_id, number, customerId, vehicleId || null,
+         cust?.full_name || enq.contact_name, realPhone(cust?.phone) || enq.contact_phone || cust?.phone || '',
+         cust?.email || enq.contact_email || null,
+         issue ? issue.slice(0, 5000) : null, enq.service_tier || null, payer, enq.id,
+         channel || intakeChannelFor(enq.contact_method), serviceStatusToken(), notes]);
+      workOrderId = ins.insertId; workOrderNumber = number;
+    } catch (e) {
+      if (e.code !== 'ER_DUP_ENTRY' || !/work_order_number/.test(e.message)) throw e; // a number collision: draw another
+    }
+  }
+  if (!workOrderId) throw new Error('Could not allocate a work order number');
+  await q('INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
+    [workOrderId, 'pending', userId, `Created from enquiry ${enq.enquiry_number}`]);
+  await snapshotIntakeClass(workOrderId, { conn });
+  await q('UPDATE enquiries SET work_order_id = ? WHERE id = ?', [workOrderId, enq.id]);
+  return { workOrderId, workOrderNumber, customerId, vehicleId, created: true };
+}
+
+/**
+ * After the commit that opened an enquiry's work order: the plate clash
+ * noted, the main job card opened when the rule allows (an internal
+ * customer; an external one's waits for the physical inspection), and the
+ * Service Advisors told a new work order arrived and through which channel.
+ * Never throws.
+ */
+export async function announceEnquiryWorkOrder({ enq, workOrderId, conflict = null, userId = null }) {
+  try {
+    if (conflict) await notePlateConflict({ enq, conflict, userId });
+    const { opened, jobCard } = await openJobCardIfReady({ workOrderId, workshopId: enq.workshop_id, userId });
+    if (!opened) fulfilReminders({ workshopId: enq.workshop_id, workOrderId });
+    const [wo] = await query(
+      `SELECT wo.work_order_number, wo.customer_name, wo.description, wo.intake_channel, v.plate_number
+         FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id WHERE wo.id = ?`, [workOrderId]);
+    if (!wo) return;
+    const issue = String(wo.description || '').replace(/\s+/g, ' ').trim();
+    await notifyGroups(enq.workshop_id, ['service_advisor'], {
+      title: `New work order ${wo.work_order_number}${wo.plate_number ? ` · ${wo.plate_number}` : ''}`,
+      body: `${wo.customer_name || enq.contact_name || 'A customer'} — enquiry ${enq.enquiry_number} through ${CHANNEL_WORDS[wo.intake_channel] || 'the Service Advisor'}`
+        + `${issue ? `: ${issue.length > 120 ? `${issue.slice(0, 119)}…` : issue}` : ''}. `
+        + (opened ? `Job card ${jobCard.job_card_number} is open.` : 'Next: the physical inspection with the customer.'),
+      link: `/work-orders/${workOrderId}`, orderId: workOrderId, icon: '📥', type: 'enquiry_work_order', exceptUserId: userId,
+    });
+  } catch (err) {
+    console.error('[crm-cycle] enquiry work order follow-up:', err.message);
+  }
+}
+
+/**
+ * A submitted enquiry's work order, in a transaction of its own with the
+ * enquiry row locked (two requests for the same enquiry open one), then
+ * announced. For the routes that have just stored the enquiry: staff CRM,
+ * the website form, the v1 API. A failure is logged and returns null — the
+ * enquiry is kept, and converting it later opens the work order.
+ */
+export async function openEnquiryWorkOrder({ enquiryId, workshopId, userId = null, channel = null }) {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [[enq]] = await conn.query('SELECT * FROM enquiries WHERE id = ? AND workshop_id = ? FOR UPDATE', [enquiryId, workshopId]);
+    if (!enq) { await conn.rollback(); return null; }
+    const info = {};
+    const r = await workOrderForEnquiry(enq, { conn, userId, channel, info });
+    await conn.commit();
+    conn.release(); conn = null;
+    if (r.created) await announceEnquiryWorkOrder({ enq: { ...enq, customer_id: r.customerId }, workOrderId: r.workOrderId, conflict: info.conflict || null, userId });
+    return r;
+  } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch { /* connection gone */ } }
+    console.error('[crm-cycle] enquiry work order:', err.message);
+    return null;
+  } finally {
+    if (conn) conn.release();
+  }
 }
 
 // Arabic-Indic (and Persian) digits typed on a phone keyboard count as digits.

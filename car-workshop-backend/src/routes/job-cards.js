@@ -18,6 +18,7 @@ import { can, isManagerRole } from '../lib/roles.js';
 import { syncWorkOrderFromJobCards } from '../lib/workflow-sync.js';
 import { parsePauseInput, timeStateFromLogs } from '../lib/status-labels.js';
 import { extractStatusToken } from '../lib/customer-link.js';
+import { jobCardGate, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -577,6 +578,12 @@ router.post('/', async (req, res) => {
     const [mainJc] = await query(
       "SELECT id FROM job_cards WHERE work_order_id = ? AND workshop_id = ? AND parent_job_card_id IS NULL AND status <> 'cancelled' LIMIT 1",
       [work_order_id, req.workshopId]);
+    // Without a main card this one would become it: an external customer's
+    // waits for the physical inspection (lib/physical-inspection.js).
+    if (!mainJc) {
+      const gate = await jobCardGate({ workOrderId: wo.id, workshopId: req.workshopId });
+      if (!gate.internal && !gate.acknowledged) return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
+    }
     const job_card_number = genJobCardNumber();
     const [veh] = wo.vehicle_id
       ? await query('SELECT plate_number FROM vehicles WHERE id = ? AND workshop_id = ?', [wo.vehicle_id, req.workshopId])

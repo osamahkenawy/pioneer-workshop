@@ -32,7 +32,9 @@ const EST_EN = {
 const INV_EN = { draft: 'Draft', sent: 'Unpaid', paid: 'Paid', partially_paid: 'Part paid', overdue: 'Overdue' };
 const CHANNEL_EN = { phone: 'Phone', whatsapp: 'WhatsApp', email: 'Email', sms: 'SMS' };
 const OUTCOME_EN = { reached: 'Reached', no_answer: 'No answer', message_sent: 'Message sent' };
-const FORMAT_EN = { genuine: 'Genuine', after_market: 'After-Market', both: 'Genuine & After-Market' };
+// Parts categories: the customer's preference on the estimate (backend lib/workflow.js PART_CATEGORIES).
+const CATEGORY_EN = { genuine: 'Genuine', after_market: 'After-Market', used: 'Used' };
+const PREFERENCE_DEFAULT = ['genuine', 'after_market'];
 const QC_EN = { issue_repaired: 'Vehicle issue has been repaired correctly', test_drive: 'Test drive', other_issues: 'Any other issues or comments' };
 
 const fmtMinutes = m => fmtAge(m);
@@ -247,11 +249,15 @@ export default function BoardDrawer({ item, sheet = false, onClose, actions }) {
                   <div className="vsb-facts">
                     <Fact label={t('vehicleBoard.drawer.est_number', 'Number')}><span dir="ltr">{est.estimate_number}</span></Fact>
                     <Fact label={t('vehicleBoard.drawer.est_status', 'Status')}>{t(`vehicleBoard.est.${est.status}`, EST_EN[est.status] || est.status)}</Fact>
-                    {est.pricing && <Fact label={t('vehicleBoard.drawer.genuine', 'Genuine')}>{money(est.pricing.total_genuine, currency)}</Fact>}
-                    {est.pricing && <Fact label={t('vehicleBoard.drawer.after_market', 'After-Market')}>{money(est.pricing.total_after_market, currency)}</Fact>}
+                    {/* A total for each category the customer asked for (older payloads: Genuine / After-Market). */}
+                    {est.pricing && (est.pricing.preference || PREFERENCE_DEFAULT).map(c => (
+                      <Fact key={c} label={t(`vehicleBoard.drawer.${c}`, CATEGORY_EN[c] || c)}>
+                        {money(est.pricing.totals?.[c] ?? (c === 'genuine' ? est.pricing.total_genuine : c === 'after_market' ? est.pricing.total_after_market : null), currency)}
+                      </Fact>
+                    ))}
                     <Fact label={t('vehicleBoard.drawer.sent', 'Sent')}>
                       {est.sent_to_customer_at
-                        ? `${fmtWhen(est.sent_to_customer_at)}${est.estimate_format ? ` · ${t(`vehicleBoard.format.${est.estimate_format}`, FORMAT_EN[est.estimate_format])}` : ''}`
+                        ? `${fmtWhen(est.sent_to_customer_at)} · ${(est.pricing?.preference || PREFERENCE_DEFAULT).map(c => t(`vehicleBoard.drawer.${c}`, CATEGORY_EN[c] || c)).join(' & ')}`
                         : t('vehicleBoard.drawer.not_sent', 'Not sent')}
                     </Fact>
                     <Fact label={t('vehicleBoard.drawer.decision', 'Decision')}>
@@ -297,7 +303,9 @@ export default function BoardDrawer({ item, sheet = false, onClose, actions }) {
                     })}
                   </ul>
                 ) : (
-                  <p className="vsb-muted">{t('vehicleBoard.drawer.no_cards', 'No job card on this job.')}</p>
+                  <p className="vsb-muted">{!item.legacy && item.customer_class !== 'internal'
+                    ? t('vehicleBoard.drawer.no_card_physical', 'No job card yet — it opens once the customer has acknowledged the physical inspection.')
+                    : t('vehicleBoard.drawer.no_cards', 'No job card on this job.')}</p>
                 )}
               </Section>
 

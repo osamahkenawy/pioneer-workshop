@@ -40,6 +40,7 @@ const STATUS_OF_KEY = {
 const SKIP_REASONS = {
   no_eligible_mechanic: 'No technician free within the limits',
   out_of_range: 'No technician within the distance limit',
+  physical_inspection: 'Waiting for the physical inspection — no job card yet',
 };
 
 /* ── Custom Mechanic Dropdown ─────────────────────────────── */

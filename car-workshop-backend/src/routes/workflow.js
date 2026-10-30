@@ -4,7 +4,7 @@
  * Technicians use /api/job-cards (time booking, job done, requisitions).
  *
  *   GET   /work-orders/:id                 where the job stands in Steps 1–7
- *   POST  /work-orders/:id/job-card        open the main job card (Step 3)
+ *   POST  /work-orders/:id/job-card        open the main job card (Step 3; a manager's override)
  *   POST  /work-orders/:id/sub-job-cards   sub-job card for part of the approved work (Step 6)
  *   PATCH /job-cards/:id/technician        assign a sub-job card's technician (Step 6)
  *   GET   /store/queue                     what the Store has to act on
@@ -18,12 +18,13 @@ import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { logAudit } from '../lib/audit.js';
 import {
-  buildWorkflow, ensureMainJobCard, getMainJobCard, notifyGroups, notifyMechanic,
-  paymentSettled, JC_QC_PASSED, FLOOR, genJobCardNumber,
+  buildWorkflow, getMainJobCard, notifyGroups, notifyMechanic,
+  paymentSettled, JC_QC_PASSED, FLOOR, genJobCardNumber, UNPRICED_PART_SQL,
 } from '../lib/workflow.js';
 import { syncWorkOrderFromJobCards } from '../lib/workflow-sync.js';
-import { can, requireCapability, capabilitiesOf } from '../lib/roles.js';
+import { can, requireCapability, capabilitiesOf, isManagerRole } from '../lib/roles.js';
 import { ASSIGN_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE } from '../lib/floor-queues.js';
+import { jobCardGate, openJobCardIfReady, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
 
 const anyCapability = caps => (req, res, next) => caps.some(c => can(req.user, c)) ? next()
   : res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: "Your role can't do this." });
@@ -63,9 +64,9 @@ router.get('/my-tasks', async (req, res) => {
                        AND EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = wo.id AND jc.status <> 'cancelled')`;
     const WO_COLS = 'SELECT wo.id, wo.work_order_number, wo.customer_name, v.plate_number, wo.updated_at AS at ';
 
-    // Storekeeper
-    const UNPRICED = `l.line_type = 'parts' AND l.genuine_price IS NULL AND l.aftermarket_price IS NULL
-                      AND NOT (COALESCE(l.genuine_available, 1) = 0 AND COALESCE(l.aftermarket_available, 1) = 0) AND COALESCE(l.unit_price, 0) = 0`;
+    // Storekeeper. A part line still to price in the customer's categories
+    // (lib/workflow.js; `l` the line, `e` its estimate).
+    const UNPRICED = UNPRICED_PART_SQL;
     await add('estimate.price_parts', 'price_parts', 'Price parts',
       `SELECT COUNT(DISTINCT e.id) n FROM service_estimates e JOIN estimate_lines l ON l.estimate_id = e.id WHERE e.workshop_id = ? AND e.status = 'draft' AND ${UNPRICED}`,
       `SELECT e.id, e.estimate_number, e.customer_name, e.vehicle_plate, e.created_at AS at, COUNT(*) AS n FROM service_estimates e JOIN estimate_lines l ON l.estimate_id = e.id
@@ -92,6 +93,27 @@ router.get('/my-tasks', async (req, res) => {
       [W], r => ({ id: r.id, title: r.estimate_number, subtitle: [r.vehicle_plate, r.customer_name].filter(Boolean).join(' · '), link: `/estimates?id=${r.id}`, at: r.at }));
 
     // Service Advisor
+    // Step 3: external jobs whose job card waits for the physical inspection
+    // and the customer's acknowledgement (lib/physical-inspection.js). A job
+    // with no card opened before the workshop's first job card is the old
+    // system's, as on the Vehicle Status Board (lib/job-phase.js isLegacyJob).
+    const PHYSICAL = `FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id LEFT JOIN customers c ON c.id = wo.customer_id
+                      LEFT JOIN vehicle_inspections vi ON vi.work_order_id = wo.id AND vi.inspection_type = 'intake'
+                      WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled')
+                        AND (CASE WHEN wo.intake_customer_class IS NOT NULL AND wo.intake_customer_subcategory IS NOT NULL THEN wo.intake_customer_class
+                                  ELSE COALESCE(c.customer_class, wo.intake_customer_class, 'external') END) <> 'internal'
+                        AND NOT EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = wo.id)
+                        AND wo.created_at >= COALESCE((SELECT MIN(jf.created_at) FROM job_cards jf WHERE jf.workshop_id = wo.workshop_id), wo.created_at)`;
+    const physicalState = r => (!r.insp_status ? 'physical inspection not started'
+      : r.insp_status !== 'completed' ? 'physical inspection in progress'
+      : r.signed_at || r.entry_mode === 'document' ? 'acknowledged — open the job card'
+      : r.shared_at ? 'link sent — waiting for the signature' : 'not signed — send the link');
+    await add('job.open', 'physical_inspection', 'Physical inspection',
+      `SELECT COUNT(*) n ${PHYSICAL}`,
+      `SELECT wo.id, wo.work_order_number, wo.customer_name, v.plate_number, wo.created_at AS at, vi.status AS insp_status, vi.signed_at, vi.entry_mode, vi.shared_at
+         ${PHYSICAL} ORDER BY wo.created_at`,
+      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: [r.plate_number, r.customer_name, physicalState(r)].filter(Boolean).join(' · '),
+                   link: `/work-orders/${r.id}/inspection?type=intake`, at: r.at }));
     await add('estimate.raise', 'raise_estimate', 'Raise the estimate',
       `SELECT COUNT(*) n ${WO_BASE} AND wo.customer_approved_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
@@ -156,7 +178,9 @@ router.get('/work-orders/:id', async (req, res) => {
     const data = await buildWorkflow(req.params.id, req.workshopId);
     if (!data) return res.status(404).json({ success: false, message: 'Work order not found' });
     // What the person looking can do — the screen shows only their actions.
-    data.you = { capabilities: capabilitiesOf(req.user) };
+    // can_override_job_card: may open an external job's card without the
+    // customer's acknowledgement (POST /work-orders/:id/job-card).
+    data.you = { capabilities: capabilitiesOf(req.user), can_override_job_card: isManagerRole(req.user) };
     res.json({ success: true, data });
   } catch (err) {
     console.error('GET /workflow/work-orders/:id error:', err);
@@ -164,14 +188,47 @@ router.get('/work-orders/:id', async (req, res) => {
   }
 });
 
-// POST /api/workflow/work-orders/:id/job-card — Step 3 (job cards opened before this existed)
+/**
+ * POST /api/workflow/work-orders/:id/job-card — Step 3, open the main job card.
+ * Body, for a manager's override only: { override_reason }
+ *
+ * An internal customer's job, or an external one whose physical inspection
+ * the customer has acknowledged (lib/physical-inspection.js) — normally it
+ * has opened by itself by then. Without the acknowledgement only a manager
+ * (Workshop / General Manager, admin, the owner) may open it, giving a
+ * reason: kept on the work order (inspection_override_*), in its history
+ * and in the audit log. Anyone else gets 409 PHYSICAL_INSPECTION_REQUIRED.
+ */
 router.post('/work-orders/:id/job-card', requireCapability('job.open'), async (req, res) => {
   try {
     const wo = await loadWorkOrder(req.params.id, req.workshopId);
     if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
     if (['completed', 'cancelled'].includes(wo.status)) return res.status(409).json({ success: false, message: `This job is ${wo.status}.` });
-    const jc = await ensureMainJobCard({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
-    res.status(201).json({ success: true, data: jc });
+    const gate = await jobCardGate({ workOrderId: wo.id, workshopId: req.workshopId });
+    let overridden = false;
+    if (!gate.jobCardOpen && !gate.internal && !gate.acknowledged) {
+      if (!isManagerRole(req.user)) {
+        return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED,
+          message: 'The customer has not acknowledged the physical inspection yet, so the job card cannot be opened. Only a manager can open it without that.' });
+      }
+      const reason = String(req.body?.override_reason ?? '').replace(/\s+/g, ' ').trim();
+      if (!reason) {
+        return res.status(400).json({ success: false, code: 'REASON_REQUIRED', message: 'Give the reason for opening the job card without the customer\'s acknowledgement.' });
+      }
+      await execute(
+        `UPDATE work_orders SET inspection_override_at = NOW(), inspection_override_by = ?, inspection_override_reason = ?
+          WHERE id = ? AND workshop_id = ?`,
+        [req.user.id, reason.slice(0, 500), wo.id, req.workshopId]);
+      await logAudit({
+        workshopId: req.workshopId, userId: req.user.id, action: 'JOB_CARD_OVERRIDE', entityType: 'work_orders', entityId: wo.id,
+        newValue: { reason: reason.slice(0, 500), physical_inspection: 'not acknowledged' },
+      });
+      overridden = true;
+    }
+    // The history gets "Main job card … opened — physical inspection skipped (…: reason)".
+    const r = await openJobCardIfReady({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
+    if (!r.opened) return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
+    res.status(201).json({ success: true, data: r.jobCard, overridden });
   } catch (err) {
     console.error('POST /workflow/work-orders/:id/job-card error:', err);
     res.status(500).json({ success: false, message: 'Failed to open the job card' });
@@ -192,7 +249,10 @@ router.post('/work-orders/:id/sub-job-cards', anyCapability(['job.open', 'job.as
       const [m] = await query('SELECT id FROM mechanics WHERE id = ? AND workshop_id = ?', [mechanicId, req.workshopId]);
       if (!m) mechanicId = null;
     }
-    const main = await ensureMainJobCard({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
+    // A sub-job card hangs off the main one, which an external job only has
+    // once the customer has acknowledged the physical inspection.
+    const { jobCard: main } = await openJobCardIfReady({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
+    if (!main) return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
     const [veh] = wo.vehicle_id ? await query('SELECT plate_number FROM vehicles WHERE id = ?', [wo.vehicle_id]) : [];
 
     let jcId, number;
@@ -287,10 +347,7 @@ router.get('/store/queue', async (req, res) => {
               COUNT(l.id) AS part_lines
          FROM service_estimates e
          JOIN estimate_lines l ON l.estimate_id = e.id AND l.line_type = 'parts'
-        WHERE e.workshop_id = ? AND e.status = 'draft'
-          AND l.genuine_price IS NULL AND l.aftermarket_price IS NULL
-          AND NOT (COALESCE(l.genuine_available, 1) = 0 AND COALESCE(l.aftermarket_available, 1) = 0)
-          AND COALESCE(l.unit_price, 0) = 0
+        WHERE e.workshop_id = ? AND e.status = 'draft' AND ${UNPRICED_PART_SQL}
         GROUP BY e.id ORDER BY e.created_at`,
       [req.workshopId]
     );

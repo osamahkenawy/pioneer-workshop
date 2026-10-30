@@ -19,7 +19,8 @@ const call = async (method, path, token, body) => {
   const r = await fetch(API + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
   let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j };
 };
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {}; for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 
 const board = async (tok, qs = '') => (await call('GET', `/vehicle-board${qs}`, tok)).json?.data;
@@ -28,12 +29,14 @@ const badgeKeys = it => (it?.badges || []).map(b => b.key).join(',');
 const show = it => (it ? `${it.phase} step ${it.step} · ${badgeKeys(it)} · waiting ${it.waiting_on?.key}` : 'not on the board');
 /**
  * The job card's current step (buildWorkflow) → the columns it may be in.
- * Steps 1–3 → Reception; 4 → Inspection & pricing, or Reception while the
- * intake inspection is not signed off and no estimate exists (the "Checked in"
- * status, Steps 1–3 in the vocabulary); 5 → pricing or with the customer;
- * 6 → in work or with the customer; 7 → quality check or ready for collection.
+ * Steps 1–3 → Reception (Step 3: the physical inspection, until the customer's
+ * acknowledgement opens the job card); 4 → Inspection & pricing (the job card
+ * is open); 5 → pricing or with the customer; 6 → in work or with the
+ * customer; 7 → quality check or ready for collection.
  */
-const ALLOWED = { 1: ['intake'], 2: ['intake'], 3: ['intake'], 4: ['pricing', 'intake'], 5: ['pricing', 'customer'], 6: ['work', 'customer'], 7: ['qc', 'ready'] };
+const ALLOWED = { 1: ['intake'], 2: ['intake'], 3: ['intake'], 4: ['pricing'], 5: ['pricing', 'customer'], 6: ['work', 'customer'], 7: ['qc', 'ready'] };
+// A 1×1 PNG, as the signature pad would send.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const PHASES = ['intake', 'pricing', 'customer', 'work', 'qc', 'ready'];
 
 try {
@@ -87,7 +90,7 @@ try {
   const created = await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh.id, customer_name: cust.full_name, customer_phone: cust.phone,
     description: 'Brake noise; AC weak', odometer_in: 41000, payment_method: 'cash', service_fee: 0, items: [] });
   const woId = created.json?.data?.id;
-  const [mainJc] = await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId]);
+  const mainOf = async id => (await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [id]))[0];
   const item = async (tok = advisor, qs = '') => (await board(tok, qs))?.items.find(i => i.id === woId);
   /** The board's column agrees with the job card's own workflow. */
   const agrees = async (label, it) => {
@@ -96,12 +99,28 @@ try {
     expect(`${label}: board column fits the job card's step ${wf.current_step}`, okPhase, `${show(it)}; workflow step ${wf.current_step}`);
   };
   let it = await item();
-  expect('a new job is in Reception, "Inspection not started", waiting on the Service Advisor',
-    it?.phase === 'intake' && it.badges[0]?.key === 'inspection_not_started' && it.waiting_on?.key === 'service_advisor' && it.main_job_card_number === mainJc.job_card_number,
+  // An external customer's job card waits for the physical inspection (client, 2026-10-29): Reception, not legacy.
+  expect('a new external job (no job card yet) is in Reception, "Physical inspection not started", waiting on the Service Advisor — not legacy',
+    it?.phase === 'intake' && it.step === 3 && it.badges[0]?.key === 'physical_not_started' && it.waiting_on?.key === 'service_advisor' && it.main_job_card_number === null && it.legacy === false,
     show(it));
   await agrees('new job', it);
   expect('the card carries the vehicle, customer class and link token', it?.plate === plate && it.make === 'Toyota' && it.customer_class === 'external'
     && it.customer_subcategory === 'walkin' && !!it.service_status_token && it.legacy === false, `${it?.plate} ${it?.customer_class}/${it?.customer_subcategory}`);
+  const insp = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
+  it = await item();
+  expect('inspection started → "Physical inspection in progress"', it?.phase === 'intake' && it.badges[0]?.key === 'physical_in_progress' && it.waiting_on?.key === 'service_advisor', show(it));
+  await call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, advisor, { customer_present: false });
+  it = await item();
+  expect('completed without the customer → "Waiting for the customer\'s signature", waiting on the customer, still in Reception',
+    it?.phase === 'intake' && it.badges[0]?.key === 'awaiting_acknowledgement' && it.waiting_on?.key === 'customer' && it.main_job_card_number === null, show(it));
+  await agrees('awaiting the signature', it);
+  const linkToken = String((await call('POST', `/vehicle-inspections/${insp?.id}/share`, advisor, { channel: 'link' })).json?.url || '').split('/').pop();
+  const signed = await call('POST', `/public/inspections/${linkToken}/sign`, null, { name: 'QA VB Walk-in', signature: PNG });
+  const mainJc = await mainOf(woId);
+  it = await item();
+  expect('signed from the link → the job card opens; Inspection & pricing, "Estimate not raised"',
+    signed.status === 200 && !!mainJc && it?.phase === 'pricing' && it.badges[0]?.key === 'estimate_not_raised' && it.main_job_card_number === mainJc.job_card_number, show(it));
+  await agrees('job card open', it);
 
   // ── Steps 4–5 ──────────────────────────────────────────────────────
   const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [
@@ -241,6 +260,25 @@ try {
   expect('?include_legacy=1 shows it, flagged legacy', shown?.legacy === true && withLegacy.counts.legacy_hidden === 0
     && withLegacy.items.length === def.items.length + def.counts.legacy_hidden, `${withLegacy.items.length} vs ${def.items.length} + ${def.counts.legacy_hidden}`);
 
+  // ── Approved before the physical inspection ────────────────────────
+  // A quote the customer approved before the car was walked round opens its
+  // work order (estimate_approved) with no job card: Reception, the physical
+  // inspection first — not an import's "No job card".
+  section = 'inspection first';
+  const vehQ = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Yaris', year: 2019, plate_number: `${plate}Q`, vin: `${vin.slice(0, 16)}Z` })).json?.data;
+  const eq = (await call('POST', '/estimates', advisor, { customer_id: cust.id, vehicle_id: vehQ?.id, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Minor service', quantity: 1, unit_price: 180 }] })).json?.estimateId;
+  await call('POST', `/estimates/${eq}/internal-approve`, supervisor);
+  await call('POST', `/estimates/${eq}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
+  const [{ approval_token: tq }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [eq]);
+  const [lq] = await q('SELECT id FROM estimate_lines WHERE estimate_id = ?', [eq]);
+  await call('POST', `/public/estimates/${tq}/lines/${lq.id}/decide`, null, { decision: 'approved' });
+  const [{ work_order_id: woQ }] = await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [eq]);
+  const [woQrow] = await q('SELECT status, customer_approved_at FROM work_orders WHERE id = ?', [woQ || 0]);
+  const itQ = (await board(advisor)).items.find(i => i.id === woQ);
+  expect('quote approved, no job card yet → Reception, "Physical inspection not started" (not "No job card", not legacy)',
+    woQrow?.status === 'estimate_approved' && !!woQrow.customer_approved_at && !(await mainOf(woQ)) && itQ?.phase === 'intake' && itQ.badges[0]?.key === 'physical_not_started'
+    && !badgeKeys(itQ).includes('no_job_card') && itQ.legacy === false, `WO ${woQrow?.status}; ${show(itQ)}`);
+
   // ── Declined ───────────────────────────────────────────────────────
   section = 'declined';
   // A QA internal fleet account of its own (a manager sets the class), never a real customer.
@@ -261,6 +299,10 @@ try {
   expect('every line declined → the job is cancelled and leaves the board', wo2row.status === 'cancelled' && !it2, `WO ${wo2row.status}; ${show(it2)}`);
 } catch (e) { out.push('ERROR ' + e.stack); }
 finally {
+  // Signature images of the inspections signed here.
+  for (const { u } of await q("SELECT signature_url u FROM vehicle_inspections WHERE id > ? AND signature_url LIKE '/uploads/signatures/sig_insp%'", [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(u)) fs.rmSync(BE + u, { force: true });
+  }
   await q('SET FOREIGN_KEY_CHECKS = 0'); const removed = {};
   for (const t of idTables) { const r = await q(`DELETE FROM \`${t}\` WHERE id > ?`, [baseline[t]]); if (r.affectedRows) removed[t] = r.affectedRows; }
   await q('SET FOREIGN_KEY_CHECKS = 1'); await db.end();

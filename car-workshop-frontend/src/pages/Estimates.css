@@ -299,7 +299,31 @@
 
 .es-totNote { margin: 6px 0 0; font-size: 11.5px; color: #94a3b8; text-align: right; }
 
-.es-rowStore { display: inline-flex; align-items: center; gap: 5px; color: #b45309; font-weight: 700; }
+.es-rowStore { display: inline-flex; align-items: center; gap: 5px; color: #b45309; font-weight: 700; flex-wrap: wrap; }
+
+/* parts categories (Genuine / After-Market / Used): the preference, alternatives, the Store's editor */
+.es-prefChips { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; }
+.es-catChip { font-size: 10.5px; font-weight: 700; padding-block: 2px; padding-inline: 8px; border-radius: 6px; background: #eef2f8; color: #1e3a6b; white-space: nowrap; }
+.es-cat-after_market { background: #fff7ed; color: #c2410c; }
+.es-cat-used { background: #eef7f1; color: #16794a; }
+.es-subAmt { display: block; margin-block-start: 2px; font-size: 11px; font-weight: 600; color: #64748b; white-space: nowrap; }
+.es-optWhen { font-weight: 500; color: #94a3b8; }
+.es-optAlt { border-style: dashed; border-color: #f3c27a; background: #fffbf3; color: #92400e; white-space: normal; }
+.es-optAlt b { color: #92400e; }
+.es-seg .es-segAlt { color: #92400e; }
+.es-seg .es-segAlt.es-segOn { background: #fdf4e5; color: #92400e; }
+.es-catRow {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px;
+  padding-block: 8px; border-block-end: 1px dashed #f3d9a8;
+}
+.es-catRow:first-of-type { padding-block-start: 0; }
+.es-catName { inline-size: 96px; font-size: 13px; font-weight: 800; color: #15294a; padding-block-end: 8px; }
+.es-deliv { display: flex; flex-wrap: wrap; gap: 6px; }
+.es-inputQty { inline-size: 80px; }
+.es-priceEd > .es-priceEdFields { margin-block-start: 10px; }
+.es-altBox { margin-block-start: 10px; padding: 10px; border: 1px dashed #f3c27a; border-radius: 9px; background: #fffbf3; }
+.es-altBox .es-priceEdFields { margin-block-start: 8px; }
+.es-priceEd > .es-priceActions { display: flex; justify-content: flex-end; margin-block-start: 10px; }
 
 /* send dialog, above the detail */
 .es-overlayTop { z-index: 10000; }
@@ -325,5 +349,7 @@
   .es-mFoot .es-btn { flex: 1 1 auto; }
   .es-priceActions { margin-left: 0; width: 100%; }
   .es-priceActions .es-btn { flex: 1; }
+  .es-catName { inline-size: 100%; padding-block-end: 0; }
+  .es-opt { white-space: normal; }
   .es-totals { max-width: none; }
 }

@@ -77,13 +77,13 @@ export const LATE_MINUTES = Object.freeze({
  * worked in the Steps 1–7 process? The board hides those unless asked
  * (?include_legacy=1).
  *
- * Every work order opened in the app gets its main job card at intake
- * (POST /work-orders, appointments, enquiries, fleet intake, the v1 API), and
- * a job card is never deleted (cancelling one keeps the row). So a work order
+ * A job card is never deleted (cancelling one keeps the row), so a work order
  * with any job card is in the process. One with none is legacy when it was
  * opened before the job card process went live, i.e. before the workshop's
- * first job card: a job with no card opened after that (an intake whose job
- * card failed to open) still shows, with its "No job card" badge.
+ * first job card. A job with no card opened after that is in the process
+ * too: an external customer's job waits for its card until the customer
+ * acknowledges the physical inspection (lib/physical-inspection.js), and it
+ * shows in Reception.
  *
  * @param {{anyCard: boolean, createdAgoSecs: number|null, liveAgoSecs: number|null}} p
  *   createdAgoSecs: seconds since the work order was opened; liveAgoSecs:
@@ -129,13 +129,15 @@ export const BADGES = Object.freeze({
   // Steps 1–3
   not_classified:         { text: 'Customer not classified', tone: 'amber', who: 'service_advisor' },
   vehicle_missing:        { text: 'Vehicle / issue missing', tone: 'red', who: 'service_advisor' },
-  inspection_not_started: { text: 'Inspection not started', tone: 'slate', who: 'service_advisor' },
-  inspection_in_progress: { text: 'Inspection in progress', tone: 'sky', who: 'service_advisor' },
+  physical_not_started:   { text: 'Physical inspection not started', tone: 'slate', who: 'service_advisor' },
+  physical_in_progress:   { text: 'Physical inspection in progress', tone: 'sky', who: 'service_advisor' },
+  awaiting_acknowledgement: { text: 'Waiting for the customer\'s signature', tone: 'sky', who: 'customer' },
+  open_job_card:          { text: 'Open the job card', tone: 'amber', who: 'service_advisor' },
   // Imported jobs
   no_job_card:            { text: 'No job card', tone: 'grey', who: null },
 });
 
-/** Statuses that put a job with no job card in each column (rule 10). */
+/** Statuses that put an imported job with no job card in each column (rule 10b). */
 const NO_CARD_PHASE = Object.freeze({
   pending: 'intake', confirmed: 'intake', estimate_approved: 'intake',
   assigned: 'work', accepted: 'work', auto_assign: 'work', in_progress: 'work',
@@ -211,7 +213,11 @@ function workBadges(f) {
  *   itemised          billing_basis = 'itemised'
  *   classified        Step 1 done (class and subcategory)
  *   vehicleAndIssue   Step 2 done (vehicle and reported issue)
- *   inspection        'none' | 'draft' | 'completed' (the intake inspection)
+ *   inspection        'none' | 'draft' | 'completed' (the physical inspection, intake)
+ *   inProcess         opened in the Steps 1–7 process (not a legacy import — isLegacyJob)
+ *   anyCard           a job card was ever opened on it (cancelled ones count)
+ *   physicalNeeded    an external customer: the job card waits for the physical inspection
+ *   acknowledged      the customer acknowledged it (signed, or the paper form), or a manager's override
  *   pickupContacted, paid, gateReleased   Step 7.2
  * @returns {{ phase: string, step: number, sub_status: (object|null), badges: object[],
  *             waiting_on: ({key: string, label: string}|null) }}
@@ -229,7 +235,22 @@ export function boardPhase(f) {
   // 1. Closed (the board only loads jobs closed today).
   if (f.status === 'completed') return out('closed', 7);
 
-  // 10. No job card: an imported job. Its status is all there is.
+  // 10a. No job card yet, opened here and not started: an external
+  // customer's job waits for the physical inspection and the customer's
+  // acknowledgement, which open it (Step 3) — Reception. That includes one
+  // opened by a quote the customer approved before the car was walked round
+  // (estimate_approved). (A job further on with no card is an anomaly,
+  // placed by its status as below.)
+  if (!f.cards && f.inProcess && !f.anyCard && ['pending', 'confirmed', 'estimate_approved'].includes(f.status)) {
+    const badges = [];
+    if (!f.classified) badges.push(badge('not_classified'));
+    if (!f.vehicleAndIssue) badges.push(badge('vehicle_missing'));
+    badges.push(!f.physicalNeeded || f.acknowledged ? badge('open_job_card')
+      : badge(f.inspection === 'completed' ? 'awaiting_acknowledgement' : f.inspection === 'draft' ? 'physical_in_progress' : 'physical_not_started'));
+    return out('intake', !f.classified ? 1 : !f.vehicleAndIssue ? 2 : 3, badges);
+  }
+
+  // 10b. No job card: an imported job. Its status is all there is.
   if (!f.cards) {
     const phase = NO_CARD_PHASE[f.status] || 'intake';
     const badges = [];
@@ -268,8 +289,9 @@ export function boardPhase(f) {
   }
   if (!est && f.counterPriced && f.itemised) return out('customer', 5, [badge('awaiting_approval')]);
 
-  // 8. Inspection & pricing: an estimate, or the intake inspection signed off.
-  if (est || f.status === 'confirmed' || f.inspection === 'completed') {
+  // 8. Inspection & pricing: an estimate, or Steps 1–2 done — with a job card
+  // open, Step 3 (the physical inspection) is behind the job.
+  if (est || (f.classified && f.vehicleAndIssue)) {
     if (!est) return out('pricing', 4, [badge('estimate_not_raised')]);
     const badges = [];
     if (est.status === 'expired') badges.push(badge('estimate_expired'));
@@ -280,12 +302,11 @@ export function boardPhase(f) {
     return out('pricing', priced ? 5 : 4, badges);
   }
 
-  // 9. Reception: Steps 1–3, and the intake inspection not signed off yet.
+  // 9. Reception: Steps 1–2 not complete.
   const badges = [];
   if (!f.classified) badges.push(badge('not_classified'));
   if (!f.vehicleAndIssue) badges.push(badge('vehicle_missing'));
-  badges.push(badge(f.inspection === 'draft' ? 'inspection_in_progress' : 'inspection_not_started'));
-  return out('intake', !f.classified ? 1 : !f.vehicleAndIssue ? 2 : 3, badges);
+  return out('intake', !f.classified ? 1 : 2, badges);
 }
 
 /**

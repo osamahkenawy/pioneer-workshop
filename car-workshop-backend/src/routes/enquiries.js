@@ -9,17 +9,23 @@
  * convert record a reason and a re-offer date, which is the "nurture and
  * re-offer" loop drawn back to stage 01 on the map.
  *
+ * Every enquiry gets its work order (the visit) the moment it is saved
+ * (lib/crm-cycle.js openEnquiryWorkOrder), and the Service Advisors are
+ * told. Converting it later fills that work order in; marking it lost (or
+ * deleting it) cancels the work order if nothing has happened on it yet.
+ *
  * Mounted at: /api/enquiries
  */
 import express from 'express';
 import pool, { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { ensureMainJobCard } from '../lib/workflow.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { requireCapability } from '../lib/roles.js';
 import { serviceStatusToken } from '../lib/tokens.js';
 import {
   onEnquiryCreated, onEnquiryNurture, closeTasks, markEnquiryConverted, customerForEnquiry, vehicleForEnquiry,
   notePlateConflict, intakeChannelFor, payerTypeForClass, snapshotIntakeClass, enquiryContactMethods,
+  openEnquiryWorkOrder, closeEnquiryWorkOrder,
 } from '../lib/crm-cycle.js';
 
 const router = express.Router();
@@ -85,10 +91,10 @@ router.get('/', async (req, res) => {
 
     const [{ total }] = await query(`SELECT COUNT(*) as total FROM enquiries e ${where}`, params);
     const rows = await query(
-      `SELECT e.*, c.full_name AS customer_full_name, wo.work_order_number
+      `SELECT e.*, c.full_name AS customer_full_name, wo.work_order_number, wo.status AS work_order_status
        FROM enquiries e
        LEFT JOIN customers c ON e.customer_id = c.id
-       LEFT JOIN work_orders wo ON e.converted_work_order_id = wo.id
+       LEFT JOIN work_orders wo ON wo.id = COALESCE(e.converted_work_order_id, e.work_order_id)
        ${where}
        ORDER BY e.created_at DESC
        LIMIT ${lim} OFFSET ${offset}`,
@@ -179,10 +185,10 @@ router.get('/stats', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const [row] = await query(
-      `SELECT e.*, c.full_name AS customer_full_name, wo.work_order_number
+      `SELECT e.*, c.full_name AS customer_full_name, wo.work_order_number, wo.status AS work_order_status
        FROM enquiries e
        LEFT JOIN customers c ON e.customer_id = c.id
-       LEFT JOIN work_orders wo ON e.converted_work_order_id = wo.id
+       LEFT JOIN work_orders wo ON wo.id = COALESCE(e.converted_work_order_id, e.work_order_id)
        WHERE e.id = ? AND e.workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
@@ -193,7 +199,13 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/enquiries
+/**
+ * POST /api/enquiries — a staff-created CRM enquiry.
+ * The work order is opened with it (Received via: the contact method's
+ * channel, else the Service Advisor): data.work_order_id, and
+ * work_order { id, work_order_number, created } — null if it could not be
+ * opened (the enquiry is kept; Convert opens it later).
+ */
 router.post('/', async (req, res) => {
   try {
     const {
@@ -242,10 +254,15 @@ router.post('/', async (req, res) => {
     }
     if (!result) throw new Error('Could not allocate an enquiry number');
 
-    const [row] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
     // Follow up: a call-back task for whoever picks up new enquiries.
-    await onEnquiryCreated(row, req.user?.id);
-    return res.status(201).json({ success: true, data: row });
+    await onEnquiryCreated((await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]))[0], req.user?.id);
+    // The visit: its work order, now (lib/crm-cycle.js).
+    const wo = await openEnquiryWorkOrder({ enquiryId: result.insertId, workshopId: req.workshopId, userId: req.user?.id || null });
+    const [row] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
+    return res.status(201).json({
+      success: true, data: row,
+      work_order: wo ? { id: wo.workOrderId, work_order_number: wo.workOrderNumber, created: wo.created } : null,
+    });
   } catch (err) {
     console.error('[Enquiries] create error:', err);
     return res.status(500).json({ success: false, message: 'Failed to create enquiry' });
@@ -281,15 +298,28 @@ router.put('/:id', async (req, res) => {
        req.params.id, req.workshopId]
     );
 
+    // Marked lost here (rather than through /lost): its work order goes as there.
+    let workOrder = null;
+    if (['lost', 'nurture'].includes(f.status) && !['lost', 'nurture'].includes(existing.status)) {
+      workOrder = await closeEnquiryWorkOrder({ workshopId: req.workshopId, enquiryId: existing.id, reason: f.lost_reason || f.status, userId: req.user?.id });
+    }
     const [row] = await query('SELECT * FROM enquiries WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: row });
+    return res.json({ success: true, data: row, ...(workOrder ? { work_order: workOrderOutcome(workOrder) } : {}) });
   } catch (err) {
     console.error('[Enquiries] update error:', err);
     return res.status(500).json({ success: false, message: 'Failed to update enquiry' });
   }
 });
 
-// POST /api/enquiries/:id/lost — record why it didn't convert + schedule a re-offer
+/** What became of an enquiry's work order when it was closed (lib/crm-cycle.js closeEnquiryWorkOrder). */
+const workOrderOutcome = r => ({ work_order_number: r.workOrderNumber, cancelled: r.cancelled, kept_open: r.live });
+
+/**
+ * POST /api/enquiries/:id/lost — record why it didn't convert + schedule a re-offer.
+ * Its work order is cancelled ("Enquiry closed: <reason>") when nothing has
+ * happened on it yet — no job card, no customer approval; one with work on
+ * it stays open for the Service Advisor (work_order.kept_open).
+ */
 router.post('/:id/lost', async (req, res) => {
   try {
     const { lost_reason, lost_notes, follow_up_at } = req.body;
@@ -307,7 +337,9 @@ router.post('/:id/lost', async (req, res) => {
     const [row] = await query('SELECT * FROM enquiries WHERE id = ?', [req.params.id]);
     if (status === 'nurture') await onEnquiryNurture(row, req.user?.id);
     else await closeTasks({ workshopId: req.workshopId, relatedType: 'enquiry', relatedId: row.id, userId: req.user?.id, outcome: `Not converted: ${lost_reason}` });
-    return res.json({ success: true, data: row });
+    const reason = `${lost_reason}${lost_notes ? ` — ${String(lost_notes).replace(/\s+/g, ' ').trim().slice(0, 200)}` : ''}`;
+    const workOrder = await closeEnquiryWorkOrder({ workshopId: req.workshopId, enquiryId: row.id, reason, userId: req.user?.id });
+    return res.json({ success: true, data: row, work_order: workOrder ? workOrderOutcome(workOrder) : null });
   } catch (err) {
     console.error('[Enquiries] lost error:', err);
     return res.status(500).json({ success: false, message: 'Failed to record outcome' });
@@ -333,6 +365,7 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
     const info = {};
     const customerId = await customerForEnquiry(enq, { conn });
     const vehicleId = await vehicleForEnquiry(enq, customerId, { conn, info });
+    const [[enqWo]] = await conn.query("SELECT id FROM work_orders WHERE id = ? AND status NOT IN ('completed','cancelled')", [enq.work_order_id || 0]);
     await conn.commit();
     if (info.conflict) await notePlateConflict({ enq: { ...enq, customer_id: customerId }, conflict: info.conflict, userId: req.user?.id });
     const [customer] = await query(
@@ -341,6 +374,8 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
       success: true,
       data: { enquiry_id: enq.id, enquiry_number: enq.enquiry_number, customer, vehicle_id: vehicleId,
               payer_type: enq.payer_type, description: enq.description,
+              // The enquiry's work order (opened when it was submitted), for the estimate's intake_work_order_id.
+              work_order_id: enqWo?.id || null,
               vehicle_conflict: info.conflict || null },
     });
   } catch (err) {
@@ -353,7 +388,8 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
 });
 
 /**
- * POST /api/enquiries/:id/convert — turn an enquiry into a work order (job card).
+ * POST /api/enquiries/:id/convert — the lead is won: the enquiry's work order
+ * becomes the job.
  *
  * Body (all optional): customer_id, vehicle_id, service_bay_id, scheduled_at,
  *   complaint      — the reported issue, when the enquiry has none (or to correct it)
@@ -369,6 +405,12 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
  * skip the customer" path left job cards stuck at Step 1). The enquiry's
  * quoted amount stays on the enquiry as a reference — the job is priced on
  * the estimate after inspection, not by a figure given on the phone.
+ *
+ * The work order opened when the enquiry was submitted is filled in with
+ * the above and kept (200, reused: true); an enquiry from before that, or
+ * whose work order was cancelled, gets a new one (201). Its main job card
+ * opens at once for an internal customer; an external customer's waits for
+ * the physical inspection (lib/physical-inspection.js).
  *
  * One transaction with the enquiry row locked: two advisors converting the
  * same WhatsApp lead at the same moment get one job card and a 409.
@@ -443,7 +485,33 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
     const notes = info.conflict
       ? `Plate ${info.conflict.plate} from the enquiry is on file for ${info.conflict.owner_name || 'another customer'} — not attached; confirm the owner.` : null;
 
-    let workOrderId = null; let work_order_number = null;
+    // The enquiry's own work order (opened when it was submitted), still open.
+    const [[live]] = await conn.query(
+      `SELECT id, work_order_number FROM work_orders
+        WHERE workshop_id = ? AND status NOT IN ('completed','cancelled') AND (id = ? OR enquiry_id = ?)
+        ORDER BY id = ? DESC, id DESC LIMIT 1 FOR UPDATE`,
+      [req.workshopId, enq.work_order_id || 0, enq.id, enq.work_order_id || 0]);
+    let workOrderId = live?.id || null; let work_order_number = live?.work_order_number || null;
+    if (live) {
+      // Filled in with what the advisor confirmed. The Step 1 snapshot is
+      // taken again when the customer changed (it goes first: MySQL applies
+      // the SET list in order).
+      await conn.query(
+        `UPDATE work_orders
+            SET intake_customer_class = IF(customer_id <=> ?, intake_customer_class, NULL),
+                intake_customer_subcategory = IF(customer_id <=> ?, intake_customer_subcategory, NULL),
+                customer_id = ?, vehicle_id = COALESCE(?, vehicle_id), service_bay_id = COALESCE(?, service_bay_id),
+                customer_name = ?, customer_phone = ?, customer_email = ?, description = ?,
+                service_tier = COALESCE(service_tier, ?), payer_type = ?,
+                scheduled_at = COALESCE(?, scheduled_at), odometer_in = COALESCE(?, odometer_in),
+                notes = COALESCE(?, notes)
+          WHERE id = ? AND workshop_id = ?`,
+        [customerId, customerId, customerId, vehicleId || null, b.service_bay_id || null,
+         cust.full_name || enq.contact_name, realPhone(cust.phone) || enq.contact_phone || cust.phone || '',
+         cust.email || enq.contact_email || null, complaint.slice(0, 5000), enq.service_tier || null, payer,
+         b.scheduled_at ? String(b.scheduled_at).replace('T', ' ') : null, odometer, notes,
+         live.id, req.workshopId]);
+    }
     for (let attempt = 0; attempt < 6 && !workOrderId; attempt++) {
       const number = `WO-${today()}-${Math.floor(Math.random() * 9000) + 1000}`;
       try {
@@ -470,8 +538,8 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
     if (!workOrderId) throw new Error('Could not allocate a work order number');
 
     await conn.query(
-      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [workOrderId, 'pending', req.user?.id || null, `Created from enquiry ${enq.enquiry_number}`]);
+      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) SELECT id, status, ?, ? FROM work_orders WHERE id = ?',
+      [req.user?.id || null, live ? `Enquiry ${enq.enquiry_number} converted — the customer goes ahead` : `Created from enquiry ${enq.enquiry_number}`, workOrderId]);
     await snapshotIntakeClass(workOrderId, { conn });
     // Same monotonic guard as the counter: never wind a vehicle's mileage back.
     if (vehicleId && odometer != null) {
@@ -481,15 +549,23 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
     await conn.commit();
 
     // After the commit (as fleet-intake and check-in do): Step 3, the main
-    // job card, and the floor told a request was raised.
-    await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user?.id })
-      .catch(e => console.error('[Enquiries] main job card:', e.message));
+    // job card when the rule allows it (an internal customer), and the floor
+    // told a request was raised.
+    const jc = await openJobCardIfReady({ workOrderId, workshopId: req.workshopId, userId: req.user?.id || null })
+      .catch(e => { console.error('[Enquiries] main job card:', e.message); return null; });
     if (info.conflict) {
       await notePlateConflict({ enq: { ...enq, customer_id: customerId }, conflict: info.conflict, userId: req.user?.id });
     }
 
     const [wo] = await query('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
-    return res.status(201).json({ success: true, data: { work_order: wo, enquiry_id: enq.id, vehicle_conflict: info.conflict || null } });
+    return res.status(live ? 200 : 201).json({
+      success: true,
+      data: {
+        work_order: wo, enquiry_id: enq.id, vehicle_conflict: info.conflict || null, reused: !!live,
+        job_card_number: jc?.opened ? jc.jobCard.job_card_number : null,
+        physical_inspection_required: jc?.reason === 'PHYSICAL_INSPECTION_REQUIRED',
+      },
+    });
   } catch (err) {
     try { await conn.rollback(); } catch { /* connection gone */ }
     console.error('[Enquiries] convert error:', err);
@@ -499,13 +575,19 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
   }
 });
 
-// DELETE /api/enquiries/:id
+// DELETE /api/enquiries/:id — its work order is cancelled with it, unless
+// something has happened on it (then 409: close the job card instead).
 router.delete('/:id', async (req, res) => {
   try {
-    const [existing] = await query('SELECT converted_work_order_id FROM enquiries WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    const [existing] = await query('SELECT id, enquiry_number, converted_work_order_id FROM enquiries WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     if (!existing) return res.status(404).json({ success: false, message: 'Enquiry not found' });
     if (existing.converted_work_order_id) {
       return res.status(409).json({ success: false, message: 'Cannot delete a converted enquiry — it is linked to a work order' });
+    }
+    const wo = await closeEnquiryWorkOrder({ workshopId: req.workshopId, enquiryId: existing.id, reason: `${existing.enquiry_number} deleted`, userId: req.user?.id });
+    if (wo?.live) {
+      return res.status(409).json({ success: false, code: 'WORK_ORDER_STARTED',
+        message: `Its work order ${wo.workOrderNumber} has work on it — close the job card instead of deleting the enquiry.` });
     }
     await execute('DELETE FROM enquiries WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
     return res.json({ success: true, message: 'Enquiry deleted' });

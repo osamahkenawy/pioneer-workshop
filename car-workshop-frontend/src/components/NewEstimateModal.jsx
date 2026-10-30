@@ -12,10 +12,11 @@
  *
  * Process Steps 4–5: lines are grouped into JOBS ("AC compressor", "Brake
  * pads"), each with its labour line(s) and part line(s). The Service Advisor
- * prices labour; the Storekeeper prices every part line twice — Genuine and
- * After-Market — or marks a type N/A. So a part line has no price input here
- * unless the user is allowed to price parts; the server ignores an advisor's
- * part price anyway and notifies the Store.
+ * chooses the customer's parts preference (Genuine / After-Market / Used,
+ * any combination) and prices labour; the Storekeeper prices every part line
+ * in each category of the preference, or marks it not available. So a part
+ * line has no price input here unless the user is allowed to price parts;
+ * the server ignores an advisor's part price anyway and notifies the Store.
  *
  * Props:
  *   open, onClose, onSent        — as before (WorkOrders.jsx, Estimates.jsx)
@@ -26,8 +27,9 @@
  *   editEstimate                 — the GET /estimates/:id payload ({ estimate, lines }):
  *                                    edit mode (PUT), line ids sent back so Store prices carry over
  *
- * Also exports the pricing helpers and SendEstimatePanel (format + channel
- * picker) shared with pages/Estimates.jsx.
+ * Also exports the parts-category helpers and SendEstimatePanel (the
+ * preference with its totals + channel picker) shared with pages/Estimates.jsx
+ * and pages/Store.jsx.
  */
 import { useState, useEffect, useContext, useMemo } from 'react';
 import {
@@ -58,78 +60,139 @@ export function mayPriceLabour(u) {
   return !!u && (isManager(u) || u.role_slug === 'service_advisor' || u.role === 'service_advisor');
 }
 
-/* ── Pricing helpers (mirror routes/estimates.js + summariseEstimatePricing) ── */
+/* ── Parts categories (mirror lib/workflow.js, client changes D4) ────────
+ * The customer's parts preference is any combination of Genuine,
+ * After-Market and Used. The Store prices each part line in every category
+ * of the preference (available or not, price, expected delivery) and may
+ * offer an alternative category when a requested one is not available —
+ * it counts only once the customer approves it. No automatic fallback.
+ */
 const num = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
-/** *_available is 1 / 0 / null; 0 means "not available" (N/A). */
+/** *_available is 1 / 0 / null; 0 means "not available". */
 export const isNA = v => v !== null && v !== undefined && v !== '' && Number(v) === 0;
 
-/** The usable Genuine / After-Market price of a part line (null = none). */
-export function partPrices(l) {
-  const gNA = isNA(l.genuine_available);
-  const aNA = isNA(l.aftermarket_available);
-  return { g: gNA ? null : num(l.genuine_price), a: aNA ? null : num(l.aftermarket_price), gNA, aNA };
+export const PART_CATEGORIES = ['genuine', 'after_market', 'used'];
+export const DEFAULT_PREFERENCE = ['genuine', 'after_market'];
+const CATEGORY_EN = { genuine: 'Genuine', after_market: 'After-Market', used: 'Used' };
+/** A category's name on screen. */
+export const categoryLabel = (t, c) => t(`estimates.cat_${c}`, CATEGORY_EN[c] || c);
+/** "Genuine and Used" */
+export function categoryWords(t, pref) {
+  const names = (pref || []).map(c => categoryLabel(t, c));
+  return names.length > 1 ? t('estimates.cat_list', '{{a}} and {{b}}', { a: names.slice(0, -1).join(', '), b: names.at(-1) }) : names[0] || '';
+}
+const COL = { genuine: 'genuine', after_market: 'aftermarket', used: 'used' };
+/** The estimate_lines columns of a category. */
+export const catCols = c => ({ price: `${COL[c]}_price`, available: `${COL[c]}_available`, expected: `${COL[c]}_expected_date` });
+
+/** The estimate's parts preference (old estimates: from the format they were sent in). */
+export function preferenceOf(e) {
+  const raw = Array.isArray(e?.preference) ? e.preference : e?.parts_preference;
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [];
+  const pref = PART_CATEGORIES.filter(c => list.includes(c));
+  if (pref.length) return pref;
+  if (e?.estimate_format === 'genuine') return ['genuine'];
+  if (e?.estimate_format === 'after_market') return ['after_market'];
+  return DEFAULT_PREFERENCE;
 }
 
-/** A part line the Store has not priced yet (both types N/A counts as decided). */
-export function partUnpriced(l) {
+/** One category of a part line: price (null = none), available true/false/null, expected_date, decided, usable. */
+export function partCategory(l, c) {
+  const col = catCols(c);
+  const na = isNA(l[col.available]);
+  const price = na ? null : num(l[col.price]);
+  return { option: c, price, available: na ? false : price != null ? true : null,
+    expected_date: !na && l[col.expected] ? String(l[col.expected]).slice(0, 10) : null, decided: na || price != null, usable: price != null };
+}
+
+/** False for a line priced as one unit price before categories existed. */
+export function hasCategoryPricing(l) {
+  return PART_CATEGORIES.some(c => { const col = catCols(c); return (l[col.price] ?? null) !== null || (l[col.available] ?? null) !== null; });
+}
+
+/** The requested categories and the alternative (priced, outside the preference) of a part line. */
+export function partOptions(l, pref) {
+  const requested = pref.map(c => partCategory(l, c));
+  let alternative = null;
+  const alt = l.alternative_option;
+  if (alt && PART_CATEGORIES.includes(alt) && !pref.includes(alt)) {
+    const o = partCategory(l, alt);
+    if (o.usable) {
+      alternative = { ...o, alternative: true,
+        for: pref.includes(l.alternative_for) ? l.alternative_for : (requested.find(r => r.available === false)?.option || null),
+        approved: l.alternative_approved === null || l.alternative_approved === undefined ? null : Number(l.alternative_approved) === 1 };
+    }
+  }
+  return { requested, alternative };
+}
+
+/** The option a part line counts at: the customer's choice while on offer, else the first priced, available requested one. */
+export function effectiveOption(l, pref) {
+  const { requested, alternative } = partOptions(l, pref);
+  const usable = requested.filter(o => o.usable);
+  if (l.part_option) {
+    const chosen = usable.find(o => o.option === l.part_option) || (alternative?.option === l.part_option && alternative.approved ? alternative : null);
+    if (chosen) return chosen;
+  }
+  return usable[0] || null;
+}
+
+/** A part line the Store has still to price: a requested category neither priced nor marked not available. */
+export function partUnpriced(l, pref) {
   if (l.line_type !== 'parts') return false;
-  if (isNA(l.genuine_available) && isNA(l.aftermarket_available)) return false;
-  return num(l.genuine_price) == null && num(l.aftermarket_price) == null && !(Number(l.unit_price) > 0);
-}
-
-/** Which type a part line currently counts at: the customer's choice, else the format, else the fallback. */
-export function effectiveOption(l, format) {
-  const { g, a } = partPrices(l);
-  if (g == null && a == null) return null;
-  const want = l.part_option || (format === 'after_market' ? 'after_market' : 'genuine');
-  if (want === 'after_market') return a != null ? 'after_market' : 'genuine';
-  return g != null ? 'genuine' : 'after_market';
+  if (!hasCategoryPricing(l)) return !(Number(l.unit_price) > 0);
+  return partOptions(l, pref).requested.some(o => !o.decided);
 }
 
 /** The grouping key the server uses for a job. */
 export const jobKeyOf = l => String(l.job_name || l.description || 'Job').trim() || 'Job';
 
 /**
- * Per-job Genuine vs After-Market totals (before VAT). Same arithmetic as
- * lib/workflow.js summariseEstimatePricing — an N/A type falls back to the
- * other type's price.
+ * Per job and per category of the preference (before VAT) — the same
+ * arithmetic as lib/workflow.js summariseEstimatePricing: a part counts in
+ * a category only when priced and available in it (else the job is flagged
+ * na), alternatives are listed apart and in no total.
  */
-export function summarisePricing(lines) {
+export function summarisePricing(lines, pref = DEFAULT_PREFERENCE) {
   const jobs = new Map();
+  const alternatives = [];
   let unpricedParts = 0, unpricedLabour = 0, partLines = 0;
   for (const l of lines || []) {
     if (l.line_type === 'discount') continue;
     const key = jobKeyOf(l);
-    if (!jobs.has(key)) jobs.set(key, { job: key, labour: 0, genuine: 0, after_market: 0, other: 0, genuine_na: false, after_market_na: false, parts: 0, waiting: 0 });
+    if (!jobs.has(key)) jobs.set(key, { job: key, labour: 0, other: 0, parts: Object.fromEntries(pref.map(c => [c, 0])), na: {}, alternative: 0, partLines: 0, waiting: 0 });
     const j = jobs.get(key);
     const qty = Number(l.quantity) || 1;
     if (l.line_type === 'labour') {
       if (!(Number(l.unit_price) > 0)) unpricedLabour++;
       j.labour += qty * Number(l.unit_price || 0);
     } else if (l.line_type === 'parts') {
-      partLines++; j.parts++;
-      const { g, a, gNA, aNA } = partPrices(l);
-      const legacy = num(l.genuine_price) == null && num(l.aftermarket_price) == null && Number(l.unit_price) > 0 ? Number(l.unit_price) : null;
-      if (partUnpriced(l)) { unpricedParts++; j.waiting++; }
-      if (gNA) j.genuine_na = true;
-      if (aNA) j.after_market_na = true;
-      j.genuine += qty * (g ?? a ?? legacy ?? 0);
-      j.after_market += qty * (a ?? g ?? legacy ?? 0);
+      partLines++; j.partLines++;
+      if (partUnpriced(l, pref)) { unpricedParts++; j.waiting++; }
+      if (!hasCategoryPricing(l)) { for (const c of pref) j.parts[c] += qty * Number(l.unit_price || 0); continue; }
+      const { requested, alternative } = partOptions(l, pref);
+      for (const o of requested) {
+        if (o.usable) j.parts[o.option] += qty * o.price;
+        else if (o.available === false) j.na[o.option] = true;
+      }
+      if (alternative) {
+        j.alternative += qty * alternative.price;
+        alternatives.push({ line_id: l.id ?? null, job: key, description: l.description, ...alternative, quantity: qty, amount: qty * alternative.price });
+      }
     } else {
       j.other += qty * Number(l.unit_price || 0);
     }
   }
   const r2 = n => Math.round(n * 100) / 100;
   const out = [...jobs.values()].map(j => ({
-    job: j.job, labour: r2(j.labour), other: r2(j.other),
-    genuine_parts: r2(j.genuine), after_market_parts: r2(j.after_market),
-    total_genuine: r2(j.labour + j.genuine + j.other), total_after_market: r2(j.labour + j.after_market + j.other),
-    genuine_na: j.genuine_na, after_market_na: j.after_market_na, parts: j.parts, waiting: j.waiting,
+    job: j.job, labour: r2(j.labour), other: r2(j.other), part_lines: j.partLines, waiting: j.waiting, na: j.na,
+    parts: Object.fromEntries(pref.map(c => [c, r2(j.parts[c])])),
+    totals: Object.fromEntries(pref.map(c => [c, r2(j.labour + j.parts[c] + j.other)])),
+    alternative_parts: r2(j.alternative),
   }));
   return {
-    jobs: out,
-    total_genuine: r2(out.reduce((s, j) => s + j.total_genuine, 0)),
-    total_after_market: r2(out.reduce((s, j) => s + j.total_after_market, 0)),
+    preference: pref, jobs: out, alternatives,
+    totals: Object.fromEntries(pref.map(c => [c, r2(out.reduce((s, j) => s + j.totals[c], 0))])),
     unpricedParts, unpricedLabour, partLines,
   };
 }
@@ -139,9 +202,11 @@ const money = v => `AED ${Number(v || 0).toLocaleString('en-AE', { minimumFracti
 /* ── Form rows ────────────────────────────────────────────────────────── */
 let seq = 0;
 const uid = () => `r${++seq}`;
+const perCategory = v => Object.fromEntries(PART_CATEGORIES.map(c => [c, v]));
+// price / na: the Store's price and "not available" per category (only shown to whoever prices parts).
 const blankLine = () => ({
   key: uid(), id: null, description: '', quantity: 1, unit_price: '', part_number: '', urgency: 'now',
-  genuine_price: '', aftermarket_price: '', gNA: false, aNA: false, orig: null,
+  price: perCategory(''), na: perCategory(false), orig: null,
 });
 const blankJob = (name = '') => ({ key: uid(), name, labour: [blankLine()], parts: [blankLine()] });
 
@@ -156,21 +221,27 @@ function jobsFromLines(lines) {
     byName.get(name)[l.line_type].push({
       key: uid(), id: l.id, description: l.description || '', quantity: Number(l.quantity) || 1,
       unit_price: num(l.unit_price) ?? '', part_number: l.part_number || '', urgency: l.urgency || 'now',
-      genuine_price: num(l.genuine_price) ?? '', aftermarket_price: num(l.aftermarket_price) ?? '',
-      gNA: isNA(l.genuine_available), aNA: isNA(l.aftermarket_available), orig: l,
+      price: Object.fromEntries(PART_CATEGORIES.map(c => [c, num(l[catCols(c).price]) ?? ''])),
+      na: Object.fromEntries(PART_CATEGORIES.map(c => [c, isNA(l[catCols(c).available])])),
+      orig: l,
     });
   }
   const jobs = [...byName.values()];
   return { jobs: jobs.length ? jobs : [blankJob()], extras };
 }
 
-/** A form part row in the shape partUnpriced() reads. */
-const rowAsPart = r => ({
-  line_type: 'parts',
-  genuine_price: r.gNA ? null : r.genuine_price, genuine_available: r.gNA ? 0 : null,
-  aftermarket_price: r.aNA ? null : r.aftermarket_price, aftermarket_available: r.aNA ? 0 : null,
-  unit_price: num(r.genuine_price) == null && num(r.aftermarket_price) == null ? (r.orig?.unit_price || 0) : 0,
-});
+/** A form part row as an estimate line (the shape partUnpriced() reads): the saved line, with the form's prices when they can be edited here. */
+function rowAsPart(r, pref, editable) {
+  const l = { ...(r.orig || {}), line_type: 'parts', unit_price: r.orig?.unit_price || 0 };
+  if (editable) {
+    for (const c of pref) {
+      const col = catCols(c);
+      l[col.price] = r.na[c] ? null : r.price[c];
+      l[col.available] = r.na[c] ? 0 : num(r.price[c]) != null ? 1 : null;
+    }
+  }
+  return l;
+}
 
 // Fields this form doesn't edit, carried over on an existing line so the PUT keeps them.
 const CARRY = ['unit_cost', 'discount_pct', 'payer_direction', 'operation_id', 'insurance_ref', 'warranty_ref', 'customer_status', 'part_option'];
@@ -223,6 +294,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const manager = isManager(user);
   const [jobs, setJobs] = useState(() => [blankJob()]);
   const [extras, setExtras] = useState([]);
+  // The customer's parts preference: which categories the Store prices and the customer chooses from.
+  const [pref, setPref] = useState(DEFAULT_PREFERENCE);
   const [submitting, setSubmitting] = useState(null); // null | 'draft' | 'store' | 'send' | 'save'
   const [error, setError] = useState('');
   const [result, setResult] = useState(null); // { kind, estimateId, estimate_number, … }
@@ -232,6 +305,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   useEffect(() => {
     if (!open) return;
     setCustomer(null); setVehicles([]); setVehicleId(''); setCustomerType('retail_cash'); setTypeTouched(false); setKlass(null); setClaimRef('');
+    setPref(editE ? preferenceOf(editE) : DEFAULT_PREFERENCE);
     if (editEstimate?.lines) {
       const r = jobsFromLines(editEstimate.lines);
       setJobs(r.jobs); setExtras(r.extras);
@@ -321,16 +395,13 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const allLabour = jobs.flatMap(j => filled(j.labour));
   const allParts = jobs.flatMap(j => filled(j.parts));
   const labourTotal = allLabour.reduce((s, r) => s + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0), 0);
-  let genuineParts = 0, amParts = 0;
-  for (const r of allParts) {
-    const p = partPrices(rowAsPart(r));
-    const legacy = p.g == null && p.a == null ? Number(r.orig?.unit_price) || 0 : 0;
-    genuineParts += (Number(r.quantity) || 0) * (p.g ?? p.a ?? legacy);
-    amParts += (Number(r.quantity) || 0) * (p.a ?? p.g ?? legacy);
-  }
-  const partsWaiting = allParts.filter(r => partUnpriced(rowAsPart(r))).length;
+  // Parts per category of the preference — no fallback to another category.
+  const partsByCat = summarisePricing(allParts.map(r => ({ ...rowAsPart(r, pref, canParts), quantity: Number(r.quantity) || 0, job_name: 'all' })), pref);
+  const catParts = c => partsByCat.jobs[0]?.parts[c] || 0;
+  const partsWaiting = partsByCat.unpricedParts;
   const labourUnpriced = allLabour.filter(r => !(Number(r.unit_price) > 0)).length;
   const withVat = n => n * (1 + vatRate / 100);
+  const togglePref = c => setPref(p => (p.includes(c) ? (p.length > 1 ? p.filter(x => x !== c) : p) : PART_CATEGORIES.filter(x => x === c || p.includes(x))));
 
   function buildLines() {
     const out = [];
@@ -355,12 +426,15 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
           line.part_number = r.part_number.trim() || undefined;
           // Ignored by the server unless the user prices parts; kept for legacy single-price lines.
           line.unit_price = Number(o.unit_price) || 0;
-          const touched = r.gNA || r.aNA || num(r.genuine_price) != null || num(r.aftermarket_price) != null;
-          if (canParts && touched) {
-            line.genuine_price = r.gNA ? null : num(r.genuine_price);
-            line.genuine_available = r.gNA ? false : (num(r.genuine_price) != null ? true : null);
-            line.aftermarket_price = r.aNA ? null : num(r.aftermarket_price);
-            line.aftermarket_available = r.aNA ? false : (num(r.aftermarket_price) != null ? true : null);
+          // The categories of the preference only; a delivery date or an
+          // alternative set on the Estimates screen is kept by the server.
+          if (canParts) {
+            for (const c of pref) {
+              if (!r.na[c] && num(r.price[c]) == null) continue;
+              const col = catCols(c);
+              line[col.price] = r.na[c] ? null : num(r.price[c]);
+              line[col.available] = !r.na[c];
+            }
           }
         }
         out.push(line);
@@ -386,6 +460,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
       return t('estimates.err_internal_manager', 'This customer is External: only a manager can raise the estimate as Internal.');
     }
     if (!allLabour.length && !allParts.length) return t('estimates.err_no_lines', 'Add at least one labour or part line with a description.');
+    if (!pref.length) return t('estimates.err_pref', 'Choose the customer’s parts preference — at least one of Genuine, After-Market or Used.');
     for (const r of [...allLabour, ...allParts]) {
       if (!(Number(r.quantity) > 0)) return t('estimates.err_qty', '"{{d}}" needs a quantity above zero.', { d: r.description.trim() });
     }
@@ -394,8 +469,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     }
     if (canParts) {
       for (const r of allParts) {
-        if ((!r.gNA && r.genuine_price !== '' && !(Number(r.genuine_price) >= 0))
-          || (!r.aNA && r.aftermarket_price !== '' && !(Number(r.aftermarket_price) >= 0))) {
+        if (pref.some(c => !r.na[c] && r.price[c] !== '' && !(Number(r.price[c]) >= 0))) {
           return t('estimates.err_price', '"{{d}}" needs a valid price.', { d: r.description.trim() });
         }
       }
@@ -409,7 +483,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     setSubmitting(kind); setError('');
     try {
       if (isEdit) {
-        const res = await api.put(`/estimates/${editE.id}`, { lines: buildLines() });
+        const res = await api.put(`/estimates/${editE.id}`, { lines: buildLines(), parts_preference: pref });
         if (!res.success) { setError(res.message || t('estimates.err_save', 'Could not save the estimate.')); return; }
         onSaved?.({ estimateId: editE.id, estimate_number: editE.estimate_number, edited: true });
         onClose?.();
@@ -417,6 +491,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
       }
       const body = {
         vat_rate: 5,
+        parts_preference: pref,
         lines: buildLines(),
       };
       if (intakeWorkOrder) {
@@ -435,7 +510,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
       }
       const res = await api.post('/estimates', body);
       if (!res.success) { setError(res.message || t('estimates.err_save', 'Could not save the estimate.')); return; }
-      const base = { estimateId: res.estimateId, estimate_number: res.estimate_number, parts_to_price: Number(res.parts_to_price) || 0 };
+      const base = { estimateId: res.estimateId, estimate_number: res.estimate_number, parts_to_price: Number(res.parts_to_price) || 0, pref: res.parts_preference || pref };
       onSaved?.(base);
       // From here on the estimate exists: never show an error that invites a
       // retry from this form, which would create a second copy.
@@ -466,12 +541,12 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
               {isEdit ? t('estimates.edit_title', 'Edit estimate {{n}}', { n: editE.estimate_number }) : t('estimates.new_title', 'New Estimate')}
             </h2>
             {woNumber ? (
-              <p style={st.woChip}>{t('estimates.for_job_card', 'For job card {{wo}}', { wo: woNumber })}</p>
+              <p style={st.woChip}>{t('estimates.for_job_card', 'For work order {{wo}}', { wo: woNumber })}</p>
             ) : enquiry?.enquiry_number ? (
               <p style={st.woChip}>{t('estimates.for_enquiry', 'For enquiry {{n}}', { n: enquiry.enquiry_number })}</p>
             ) : (
               <p style={st.subtitle}>
-                {t('estimates.new_sub', 'Group the work into jobs — labour and parts for each. The Store prices the parts (Genuine and After-Market), then it goes to the customer for approval line by line.')}
+                {t('estimates.new_sub_pref', 'Group the work into jobs — labour and parts for each. The Store prices the parts in the customer’s parts preference, then it goes to the customer for approval line by line.')}
               </p>
             )}
           </div>
@@ -550,9 +625,28 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 </div>
               )}
 
+              <div style={st.prefBox}>
+                <div style={st.prefHead}>
+                  <span style={st.fieldLabel} id="est-pref-label">{t('estimates.pref_label', 'Customer’s parts preference')}</span>
+                  <span style={st.prefHint}>{t('estimates.pref_hint', 'The Store prices these for every part; the customer chooses between them. Pick at least one.')}</span>
+                </div>
+                <div style={st.prefChips} role="group" aria-labelledby="est-pref-label">
+                  {PART_CATEGORIES.map(c => {
+                    const on = pref.includes(c);
+                    return (
+                      <button key={c} type="button" aria-pressed={on} style={{ ...st.prefChip, ...(on ? st.prefChipOn : null) }}
+                        title={on && pref.length === 1 ? t('estimates.pref_keep_one', 'At least one category is needed') : undefined}
+                        onClick={() => togglePref(c)}>
+                        {on ? <Check width={14} height={14} /> : <Plus width={14} height={14} />} {categoryLabel(t, c)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               {jobs.map((j, ji) => (
                 <JobBlock
-                  key={j.key} t={t} job={j} index={ji} canRemove={jobs.length > 1}
+                  key={j.key} t={t} job={j} index={ji} canRemove={jobs.length > 1} pref={pref}
                   canParts={canParts} canLabour={canLabour}
                   onName={v => setJobName(j.key, v)}
                   onRemove={() => removeJob(j.key)}
@@ -573,19 +667,14 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 <Row label={t('estimates.labour', 'Labour')} value={money(labourTotal)} />
                 {allParts.length > 0 && (partsWaiting === allParts.length ? (
                   <Row label={t('estimates.parts', 'Parts')} value={t('estimates.priced_by_store', 'Priced by the Store')} muted />
-                ) : (
-                  <>
-                    <Row label={t('estimates.parts_genuine', 'Parts — Genuine')} value={money(genuineParts)} />
-                    <Row label={t('estimates.parts_am', 'Parts — After-Market')} value={money(amParts)} />
-                  </>
-                ))}
+                ) : pref.map(c => (
+                  <Row key={c} label={t('estimates.parts_cat', 'Parts — {{cat}}', { cat: categoryLabel(t, c) })} value={money(catParts(c))} />
+                )))}
                 <div style={st.totalDivider} />
-                {allParts.length > 0 && partsWaiting < allParts.length ? (
-                  <>
-                    <Row label={t('estimates.total_genuine_vat', 'Total with Genuine parts (incl. {{v}}% VAT)', { v: vatRate })} value={money(withVat(labourTotal + genuineParts))} strong />
-                    <Row label={t('estimates.total_am_vat', 'Total with After-Market parts (incl. {{v}}% VAT)', { v: vatRate })} value={money(withVat(labourTotal + amParts))} strong />
-                  </>
-                ) : (
+                {allParts.length > 0 && partsWaiting < allParts.length ? pref.map(c => (
+                  <Row key={c} label={t('estimates.total_cat_vat', 'Total with {{cat}} parts (incl. {{v}}% VAT)', { cat: categoryLabel(t, c), v: vatRate })}
+                    value={money(withVat(labourTotal + catParts(c)))} strong />
+                )) : (
                   <Row label={allParts.length ? t('estimates.labour_vat', 'Labour (incl. {{v}}% VAT)', { v: vatRate }) : t('estimates.total_vat', 'Estimate total (incl. {{v}}% VAT)', { v: vatRate })}
                     value={money(withVat(labourTotal))} strong />
                 )}
@@ -593,8 +682,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                   <p style={st.waitNote}>
                     <Label width={14} height={14} style={{ flexShrink: 0 }} />
                     {canParts
-                      ? t('estimates.parts_unpriced_self', '{{n}} part line(s) have no price yet — enter Genuine / After-Market or mark N/A.', { n: partsWaiting })
-                      : t('estimates.parts_to_store', '{{n}} part line(s) will go to the Store for Genuine / After-Market pricing when you save.', { n: partsWaiting })}
+                      ? t('estimates.parts_unpriced_self_cat', '{{n}} part line(s) have no price yet — enter {{cats}} or mark it not available.', { n: partsWaiting, cats: categoryWords(t, pref) })
+                      : t('estimates.parts_to_store_cat', '{{n}} part line(s) will go to the Store for pricing ({{cats}}) when you save.', { n: partsWaiting, cats: categoryWords(t, pref) })}
                   </p>
                 )}
               </div>
@@ -637,18 +726,13 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
 }
 
 /* ── One job: name + labour lines + part lines ─────────────────────────── */
-function JobBlock({ t, job, index, canRemove, canParts, canLabour, onName, onRemove, onLine, onAdd, onDel }) {
+function JobBlock({ t, job, index, canRemove, pref, canParts, canLabour, onName, onRemove, onLine, onAdd, onDel }) {
   const lab = job.labour.filter(r => r.description.trim());
   const par = job.parts.filter(r => r.description.trim());
   const labour = lab.reduce((s, r) => s + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0), 0);
-  let g = 0, a = 0, waiting = 0;
-  for (const r of par) {
-    const p = partPrices(rowAsPart(r));
-    if (partUnpriced(rowAsPart(r))) waiting++;
-    const legacy = p.g == null && p.a == null ? Number(r.orig?.unit_price) || 0 : 0;
-    g += (Number(r.quantity) || 0) * (p.g ?? p.a ?? legacy);
-    a += (Number(r.quantity) || 0) * (p.a ?? p.g ?? legacy);
-  }
+  const sum = summarisePricing(par.map(r => ({ ...rowAsPart(r, pref, canParts), quantity: Number(r.quantity) || 0, job_name: 'job' })), pref);
+  const waiting = sum.unpricedParts;
+  const parts = c => sum.jobs[0]?.parts[c] || 0;
   return (
     <div style={st.jobCard}>
       <div style={st.jobHead}>
@@ -703,13 +787,14 @@ function JobBlock({ t, job, index, canRemove, canParts, canLabour, onName, onRem
           </div>
           {canParts ? (
             <div style={st.priceRow}>
-              <PriceInput t={t} label={t('estimates.genuine', 'Genuine')} value={r.genuine_price} na={r.gNA}
-                onValue={v => onLine('parts', r.key, 'genuine_price', v)} onNA={v => onLine('parts', r.key, 'gNA', v)} />
-              <PriceInput t={t} label={t('estimates.after_market', 'After-Market')} value={r.aftermarket_price} na={r.aNA}
-                onValue={v => onLine('parts', r.key, 'aftermarket_price', v)} onNA={v => onLine('parts', r.key, 'aNA', v)} />
+              {pref.map(c => (
+                <PriceInput key={c} t={t} label={categoryLabel(t, c)} value={r.price[c]} na={r.na[c]}
+                  onValue={v => onLine('parts', r.key, 'price', { ...r.price, [c]: v })}
+                  onNA={v => onLine('parts', r.key, 'na', { ...r.na, [c]: v })} />
+              ))}
             </div>
           ) : r.orig ? (
-            <div style={st.priceReadonly}><StorePrices t={t} line={r.orig} /></div>
+            <div style={st.priceReadonly}><StorePrices t={t} line={r.orig} pref={pref} /></div>
           ) : null}
         </div>
       ))}
@@ -720,10 +805,9 @@ function JobBlock({ t, job, index, canRemove, canParts, canLabour, onName, onRem
           <span>{t('estimates.labour', 'Labour')} <b>{money(labour)}</b></span>
           {par.length > 0 && (waiting === par.length
             ? <span>{t('estimates.parts', 'Parts')} <b style={{ color: '#b45309' }}>{t('estimates.waiting_store', 'Waiting for the Store')}</b></span>
-            : <>
-                <span>{t('estimates.total_genuine', 'Total Genuine')} <b>{money(labour + g)}</b></span>
-                <span>{t('estimates.total_am', 'Total After-Market')} <b>{money(labour + a)}</b></span>
-              </>)}
+            : pref.map(c => (
+              <span key={c}>{t('estimates.total_cat', 'Total {{cat}}', { cat: categoryLabel(t, c) })} <b>{money(labour + parts(c))}</b></span>
+            )))}
         </div>
       )}
     </div>
@@ -735,24 +819,28 @@ function PriceInput({ t, label, value, na, onValue, onNA }) {
     <div style={st.priceCell}>
       <span style={st.priceLbl}>{label}</span>
       <input style={{ ...st.input, width: 104, background: na ? '#f1f5f9' : '#fff' }} type="number" min="0" step="0.01"
-        placeholder={na ? t('estimates.na', 'N/A') : 'AED'} disabled={na}
+        placeholder={na ? t('estimates.not_available_short', 'Not available') : 'AED'} disabled={na} aria-label={label}
         value={na ? '' : value} onChange={e => onValue(e.target.value)} />
       <label style={st.naToggle}>
-        <input type="checkbox" checked={na} onChange={e => onNA(e.target.checked)} /> {t('estimates.na', 'N/A')}
+        <input type="checkbox" checked={na} onChange={e => onNA(e.target.checked)} /> {t('estimates.not_available_short', 'Not available')}
       </label>
     </div>
   );
 }
 
-/** Read-only Genuine / After-Market prices of an existing part line. */
-function StorePrices({ t, line }) {
-  if (partUnpriced(line)) return <span style={{ color: '#b45309', fontWeight: 600 }}>{t('estimates.waiting_store', 'Waiting for the Store')}</span>;
-  const { g, a, gNA, aNA } = partPrices(line);
-  const show = (p, na) => (na ? t('estimates.na', 'N/A') : p != null ? money(p) : '—');
-  if (g == null && a == null && !gNA && !aNA) return <span>{money(line.unit_price)}</span>;
+/** Read-only Store prices of an existing part line, per category of the preference, and its alternative. */
+function StorePrices({ t, line, pref }) {
+  if (partUnpriced(line, pref)) return <span style={{ color: '#b45309', fontWeight: 600 }}>{t('estimates.waiting_store', 'Waiting for the Store')}</span>;
+  if (!hasCategoryPricing(line)) return <span>{money(line.unit_price)}</span>;
+  const { requested, alternative } = partOptions(line, pref);
   return (
     <span>
-      {t('estimates.genuine', 'Genuine')} <b>{show(g, gNA)}</b> · {t('estimates.after_market', 'After-Market')} <b>{show(a, aNA)}</b>
+      {requested.map((o, i) => (
+        <span key={o.option}>{i > 0 ? ' · ' : ''}{categoryLabel(t, o.option)} <b>{o.usable ? money(o.price) : t('estimates.not_available_short', 'Not available')}</b></span>
+      ))}
+      {alternative && (
+        <span> · {t('estimates.alt_short', 'Alternative')}: {categoryLabel(t, alternative.option)} <b>{money(alternative.price)}</b></span>
+      )}
     </span>
   );
 }
@@ -793,7 +881,7 @@ function ResultView({ t, result, sendData, onClose, onSendDone, onSendCancel }) 
       ) : result.kind === 'held' ? (
         <p>{result.heldMsg || t('estimates.held_msg', 'Saved. A supervisor or workshop manager has to approve it before it goes to the customer — they have been notified.')} {t('estimates.held_where', 'It is waiting under Estimates → Needs approval.')}</p>
       ) : result.kind === 'store' ? (
-        <p>{t('estimates.saved_store', 'Saved. {{n}} part line(s) are with the Store for Genuine / After-Market pricing — the Storekeeper has been notified. You will be notified when they are priced; then send it to the customer from Estimates.', { n: result.parts_to_price })}</p>
+        <p>{t('estimates.saved_store_cat', 'Saved. {{n}} part line(s) are with the Store for pricing ({{cats}}) — the Storekeeper has been notified. You will be notified when they are priced; then send it to the customer from Estimates.', { n: result.parts_to_price, cats: categoryWords(t, result.pref) })}</p>
       ) : result.kind === 'labour' ? (
         <p>{t('estimates.saved_labour', 'Saved. The labour still needs a price from the Service Advisor before it can be sent to the customer.')}</p>
       ) : (
@@ -811,7 +899,7 @@ function ResultView({ t, result, sendData, onClose, onSendDone, onSendCancel }) 
   );
 }
 
-/* ── Send: format (1 Genuine / 2 After-Market / 3 Both) + channel ──────── */
+/* ── Send: the parts preference with its totals + channel ─────────────── */
 
 /** Plain-words explanation of a failed POST /estimates/:id/send. */
 export function sendErrorText(t, res) {
@@ -819,7 +907,7 @@ export function sendErrorText(t, res) {
     case 'PARTS_NOT_PRICED':
       return {
         title: t('estimates.err_parts_title', 'The Store has not priced every part yet'),
-        body: `${res.message || ''} ${t('estimates.err_parts_body', 'Each part needs a Genuine and After-Market price (or N/A) before the customer can see it.')}`.trim(),
+        body: `${res.message || ''} ${t('estimates.err_parts_body_cat', 'Each part needs a price, or “not available”, in every category the customer asked for before they can see it.')}`.trim(),
       };
     case 'LABOUR_NOT_PRICED':
       return {
@@ -861,13 +949,11 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
   const { t } = useTranslation();
   const e = data.estimate;
   const lines = useMemo(() => data.lines || [], [data.lines]);
-  const summary = useMemo(() => summarisePricing(lines), [lines]);
+  const pref = useMemo(() => preferenceOf(e), [e]);
+  const summary = useMemo(() => summarisePricing(lines, pref), [lines, pref]);
   const parts = lines.filter(l => l.line_type === 'parts');
-  const anyBoth = parts.some(l => { const p = partPrices(l); return p.g != null && p.a != null; });
   const vat = Number(e.vat_rate ?? 5);
 
-  const [format, setFormat] = useState(() =>
-    ['genuine', 'after_market', 'both'].includes(e.estimate_format) ? e.estimate_format : (anyBoth ? 'both' : 'genuine'));
   const [channel, setChannel] = useState(() => (!e.customer_email && e.customer_phone ? 'whatsapp' : 'email'));
   const [email, setEmail] = useState(e.customer_email || '');
   const [phone, setPhone] = useState(e.customer_phone || '');
@@ -876,12 +962,9 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
 
   const needsSignOff = !!e.needs_internal_approval && !data.can_approve;
   const blocked = summary.unpricedParts > 0 || summary.unpricedLabour > 0;
-
-  const FORMATS = [
-    { key: 'genuine', n: 1, label: t('estimates.fmt_genuine', 'Genuine'), sub: t('estimates.fmt_genuine_sub', 'Genuine parts only'), amount: money(summary.total_genuine) },
-    { key: 'after_market', n: 2, label: t('estimates.fmt_am', 'After-Market'), sub: t('estimates.fmt_am_sub', 'After-Market parts only'), amount: money(summary.total_after_market) },
-    { key: 'both', n: 3, label: t('estimates.fmt_both', 'Both'), sub: t('estimates.fmt_both_sub', 'Side by side — the customer chooses per part'), amount: `${money(summary.total_genuine)} / ${money(summary.total_after_market)}` },
-  ];
+  // Parts with nothing on offer in the preference and no alternative: the customer can only reject them.
+  const unavailable = parts.filter(l => hasCategoryPricing(l) && !partUnpriced(l, pref)
+    && !partOptions(l, pref).requested.some(o => o.usable) && !partOptions(l, pref).alternative).length;
 
   async function send() {
     setBusy(true); setErr(null);
@@ -890,8 +973,8 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
     let win = null;
     if (channel === 'whatsapp' && !needsSignOff) { try { win = window.open('', '_blank'); } catch { win = null; } }
     try {
+      // The estimate goes out in its parts preference (set when it was raised; Edit changes it).
       const res = await api.post(`/estimates/${e.id}/send`, {
-        format: parts.length ? format : 'genuine',
         channel,
         email: channel === 'email' ? (email.trim() || undefined) : undefined,
         phone: channel === 'whatsapp' ? (phone.trim() || undefined) : undefined,
@@ -927,7 +1010,7 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
       {summary.unpricedParts > 0 && (
         <div style={{ ...sp.note, ...sp.noteBad }}>
           <Label width={16} height={16} style={{ flexShrink: 0 }} />
-          <span>{t('estimates.send_parts_waiting', '{{n}} part line(s) are still waiting for the Store’s Genuine / After-Market price.', { n: summary.unpricedParts })}</span>
+          <span>{t('estimates.send_parts_waiting_cat', '{{n}} part line(s) are still waiting for the Store’s price ({{cats}}).', { n: summary.unpricedParts, cats: categoryWords(t, pref) })}</span>
         </div>
       )}
       {summary.unpricedLabour > 0 && (
@@ -939,19 +1022,25 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
 
       {parts.length > 0 && (
         <>
-          <div style={sp.h}>{t('estimates.send_format', 'Estimate format')}</div>
-          <div style={sp.formats} role="radiogroup">
-            {FORMATS.map(f => (
-              <button key={f.key} type="button" role="radio" aria-checked={format === f.key}
-                style={{ ...sp.fmt, ...(format === f.key ? sp.fmtOn : null) }} onClick={() => setFormat(f.key)}>
-                <span style={sp.fmtN}>{t('estimates.format_n', 'Format {{n}}', { n: f.n })}</span>
-                <span style={sp.fmtLabel}>{f.label}</span>
-                <span style={sp.fmtSub}>{f.sub}</span>
-                <span style={sp.fmtAmt}>{f.amount}</span>
-              </button>
+          <div style={sp.h}>{t('estimates.send_pref', 'Customer’s parts preference')}</div>
+          <div style={sp.formats}>
+            {pref.map(c => (
+              <div key={c} style={sp.fmt}>
+                <span style={sp.fmtLabel}>{categoryLabel(t, c)}</span>
+                <span style={sp.fmtSub}>{pref.length > 1 ? t('estimates.send_cat_sub_choose', 'The customer chooses per part') : t('estimates.send_cat_sub_only', 'Every part in this category')}</span>
+                <span style={sp.fmtAmt}>{money(summary.totals[c])}</span>
+              </div>
             ))}
           </div>
-          <p style={sp.vatNote}>{t('estimates.excl_vat_note', 'Amounts before {{v}}% VAT. Where a type is N/A the other type’s price is used.', { v: vat })}</p>
+          {summary.alternatives.length > 0 && (
+            <p style={sp.altNote}>
+              {t('estimates.send_alternatives', '{{n}} part(s) not available as asked: the Store offered an alternative. The customer sees it as “Alternative — needs your approval”; it is in no total until they choose it.', { n: summary.alternatives.length })}
+            </p>
+          )}
+          {unavailable > 0 && (
+            <p style={sp.altNote}>{t('estimates.send_unavailable', '{{n}} part(s) are not available in any category asked for — the customer can only reject them.', { n: unavailable })}</p>
+          )}
+          <p style={sp.vatNote}>{t('estimates.excl_vat_note_cat', 'Amounts before {{v}}% VAT. A part not available in a category is left out of that total — it is never swapped for another type.', { v: vat })} {t('estimates.send_pref_edit', 'To change the preference, use Edit.')}</p>
         </>
       )}
 
@@ -1043,6 +1132,12 @@ const st = {
   field: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 },
   fieldLabel: { fontSize: 12, fontWeight: 700, color: '#475569' },
   input: { border: '1.5px solid #e2e8f0', borderRadius: 10, padding: '9px 11px', fontSize: 13.5, outline: 'none', color: '#1e293b', background: '#fff', fontFamily: 'inherit', minWidth: 0, boxSizing: 'border-box' },
+  prefBox: { border: '1.5px solid #fed7aa', background: '#fffaf5', borderRadius: 14, padding: '12px 14px', marginBottom: 14 },
+  prefHead: { display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 10 },
+  prefHint: { fontSize: 12, color: '#64748b', lineHeight: 1.4 },
+  prefChips: { display: 'flex', flexWrap: 'wrap', gap: 8 },
+  prefChip: { display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: 36, padding: '6px 14px', borderRadius: 999, borderWidth: 1.5, borderStyle: 'solid', borderColor: '#e2e8f0', background: '#fff', color: '#475569', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' },
+  prefChipOn: { borderColor: ORANGE, background: '#fff7ed', color: '#c2410c' },
   jobCard: { border: '1.5px solid #e2e8f0', borderRadius: 14, padding: '12px 14px 14px', marginBottom: 12, background: '#fff' },
   jobHead: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' },
   jobNo: { fontSize: 11, fontWeight: 800, color: '#fff', background: NAVY, borderRadius: 999, padding: '3px 10px', textTransform: 'uppercase', letterSpacing: '0.05em', flexShrink: 0 },
@@ -1079,12 +1174,11 @@ const sp = {
   wrap: { display: 'flex', flexDirection: 'column' },
   h: { fontSize: 11.5, fontWeight: 800, color: NAVY, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '6px 0 8px' },
   formats: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8 },
-  fmt: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, textAlign: 'left', padding: '11px 12px', borderRadius: 12, border: '1.5px solid #e2e8f0', background: '#fff', cursor: 'pointer', fontFamily: 'inherit' },
-  fmtOn: { borderColor: ORANGE, background: '#fff7ed', boxShadow: '0 0 0 3px rgba(249,115,22,.12)' },
-  fmtN: { fontSize: 10.5, fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' },
+  fmt: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, textAlign: 'start', padding: '11px 12px', borderRadius: 12, border: `1.5px solid ${ORANGE}`, background: '#fff7ed' },
   fmtLabel: { fontSize: 14.5, fontWeight: 800, color: '#1e293b' },
   fmtSub: { fontSize: 12, color: '#64748b', lineHeight: 1.35 },
   fmtAmt: { fontSize: 12.5, fontWeight: 700, color: NAVY, marginTop: 4, fontVariantNumeric: 'tabular-nums' },
+  altNote: { fontSize: 12.5, color: '#92400e', background: '#fdf4e5', border: '1px solid #f3d9a8', borderRadius: 10, padding: '8px 10px', margin: '8px 0 0', lineHeight: 1.45 },
   vatNote: { fontSize: 11.5, color: '#94a3b8', margin: '6px 0 8px' },
   channels: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 },
   chan: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, padding: '10px 12px', borderRadius: 10, border: '1.5px solid #e2e8f0', background: '#fff', color: '#334155', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' },

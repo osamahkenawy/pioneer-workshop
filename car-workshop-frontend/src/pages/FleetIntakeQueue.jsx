@@ -8,7 +8,9 @@
  *
  * The important screen here is the detail panel's discrepancy list: where
  * our record of a vehicle and the fleet's own paperwork disagree. That is
- * the bit a human has to decide, and it is why nothing auto-converts.
+ * the bit a human has to decide, and it is why booking in stays a person's
+ * step — although each request has its work order from the moment it was
+ * sent (backend routes/fleet-intake.js): booking in confirms the car on it.
  *
  * Accepting, rejecting, booking in and issuing links is intake work (Step 2:
  * job.open — Service Advisor, Supervisor, managers); other roles only read.
@@ -232,7 +234,9 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
       service_category: category,
       ...(createVehicle && needsMakeModel ? { make: veh.make.trim(), model: veh.model.trim(), ...(veh.year ? { year: Number(veh.year) } : {}) } : {}),
     }),
-    (res) => t('fleetIntake.converted', 'Job card {{n}} created', { n: res.data.work_order_number })
+    (res) => (res.reused
+      ? t('fleetIntake.booked_in_on', 'Booked in on job card {{n}}', { n: res.data.work_order_number })
+      : t('fleetIntake.converted', 'Job card {{n}} created', { n: res.data.work_order_number }))
   );
 
   const review = (decision) => act(
@@ -277,6 +281,11 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
         {rejected && (
           <div className="fq-banner fq-bannerBad">
             {t('fleetIntake.rejected', 'Rejected')}{detail.review_note ? ` — ${detail.review_note}` : ''}.
+          </div>
+        )}
+        {!done && !rejected && detail.work_order_number && (
+          <div className="fq-banner">
+            {t('fleetIntake.wo_opened', 'Work order {{n}} was opened when the request came in. Booking in confirms the vehicle on it — no second job card.', { n: detail.work_order_number })}
           </div>
         )}
 
@@ -447,7 +456,8 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
                   </button>
                 )}
                 <button className="fq-btn" onClick={convert} disabled={busy || blocked}>
-                  <Check width={16} height={16} /> {busy ? t('fleetIntake.working', 'Working…') : t('fleetIntake.create_jc', 'Create job card')}
+                  <Check width={16} height={16} /> {busy ? t('fleetIntake.working', 'Working…')
+                    : detail.work_order_number ? t('fleetIntake.book_in', 'Book in') : t('fleetIntake.create_jc', 'Create job card')}
                 </button>
               </>
             )}

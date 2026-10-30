@@ -47,7 +47,8 @@ import { dispatchWebhook, workOrderStatusToEvent } from '../lib/webhook-dispatch
 import { createInvoiceFromWorkOrder } from './invoices.js';
 import { getFinancialConfig, computeWorkOrderFinancials, recordMechanicEarning } from '../lib/financial.js';
 import { syncJobCardBilling, getInvoiceForWorkOrder, isInvoiceLocked, computeJobCardTotals, resolveVatRate } from '../lib/job-card-billing.js';
-import { ensureMainJobCard, announceMainJobCard, departmentFor, JC_QC_PASSED, onTechnicianAssigned, onWorkApproved } from '../lib/workflow.js';
+import { announceMainJobCard, fulfilReminders, departmentFor, JC_QC_PASSED, onTechnicianAssigned, onWorkApproved } from '../lib/workflow.js';
+import { openJobCardIfReady, jobCardGate, awaitingPhysicalInspection, AWAITING_PHYSICAL_SQL, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
 import { requireCapability, can, isManagerRole } from '../lib/roles.js';
 import { woLabel, woDisplayKey, WO_DISPLAY_KEYS } from '../lib/status-labels.js';
 import {
@@ -61,6 +62,7 @@ import { stripMarkupFields, clampTextFields } from '../lib/sanitize.js';
 import { issueSurveyOnClosure } from '../lib/survey-trigger.js';
 import { createTask } from '../lib/crm-cycle.js';
 import { scheduleNextReminder } from './crm-reminders.js';
+import { ASSIGN_WHERE } from '../lib/floor-queues.js';
 
 // SR-01/SR-16 — sanitise at the write boundary. Identity fields can never
 // legitimately contain markup, so it is stripped; free text is stored verbatim
@@ -230,7 +232,7 @@ const phoneOf = (customer, given) => (/\d/.test(String(customer.phone || '')) ? 
 /** A vehicle of this workshop, owned by the customer when one is given. */
 async function loadVehicle(id, workshopId, customerId) {
   const [v] = await query(
-    'SELECT id, customer_id, vin, plate_number, mileage FROM vehicles WHERE id = ? AND workshop_id = ?',
+    'SELECT id, customer_id, vin, plate_number, mileage, year, make, model FROM vehicles WHERE id = ? AND workshop_id = ?',
     [id, workshopId]
   );
   if (!v) throw new InputError('Vehicle not found.', 'VEHICLE_NOT_FOUND');
@@ -257,6 +259,13 @@ const stamp = v => (v == null ? '' : String(v).replace('T', ' ').slice(0, 19));
 async function intakeLockReason(wo, workshopId) {
   if (!['pending', 'confirmed', 'estimate_approved'].includes(wo.status)) return `the job is already at "${woLabel(wo)}"`;
   if (wo.customer_approved_at) return 'the customer has already approved it';
+  // The customer signed (or the advisor completed) the walk-around of this car.
+  const [ins] = await query(
+    `SELECT signed_at FROM vehicle_inspections
+      WHERE work_order_id = ? AND workshop_id = ? AND inspection_type = 'intake' AND (status = 'completed' OR signed_at IS NOT NULL) LIMIT 1`,
+    [wo.id, workshopId]
+  );
+  if (ins) return ins.signed_at ? 'the customer has signed the vehicle inspection' : 'the vehicle inspection has been completed';
   const [est] = await query(
     `SELECT estimate_number FROM service_estimates
       WHERE workshop_id = ? AND (intake_work_order_id = ? OR work_order_id = ?) AND status NOT IN ('rejected','expired') LIMIT 1`,
@@ -372,7 +381,10 @@ router.get('/stats', async (req, res) => {
        GROUP BY c.id ORDER BY total_work_orders DESC LIMIT 5`,
       [req.workshopId]
     );
-    return res.json({ success: true, data: { ...counts, by_type: byType, by_payment: byPayment, top_customers: topCustomers } });
+    // "To assign": the Team Board's queue — approved, with a live job card (an
+    // external job's opens at the physical inspection), no technician yet.
+    const [assign] = await query(`SELECT COUNT(*) AS n FROM work_orders wo WHERE ${ASSIGN_WHERE}`, [req.workshopId]);
+    return res.json({ success: true, data: { ...counts, to_assign: Number(assign?.n || 0), by_type: byType, by_payment: byPayment, top_customers: topCustomers } });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: 'Failed to fetch work order stats' });
@@ -427,6 +439,7 @@ router.get('/', async (req, res) => {
               (SELECT jc.job_card_number FROM job_cards jc
                 WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL AND jc.status <> 'cancelled'
                 ORDER BY jc.id LIMIT 1) AS main_job_card_number,
+              ${AWAITING_PHYSICAL_SQL} AS awaiting_physical_inspection,
               wo.scheduled_at,
               COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at) AS assigned_at
        FROM work_orders wo
@@ -733,6 +746,7 @@ router.get('/:id', async (req, res) => {
               v.make as vehicle_make, v.model as vehicle_model, v.year as vehicle_year,
               v.plate_number as vehicle_plate_number, v.vin as vehicle_vin, v.color as vehicle_color,
               ua.full_name AS customer_approved_by_name,
+              ${AWAITING_PHYSICAL_SQL} AS awaiting_physical_inspection,
               wo.scheduled_at,
               COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at) AS assigned_at
        FROM work_orders wo
@@ -1202,8 +1216,10 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
       });
     }
 
-    // Step 3: open the main job card, in the same transaction.
-    await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id, db: conn });
+    // Step 3: an internal customer's main job card opens with the job, in
+    // the same transaction. An external customer's waits for the physical
+    // inspection: it opens when they acknowledge it (lib/physical-inspection.js).
+    const { opened: jobCardOpened } = await openJobCardIfReady({ workOrderId, workshopId: req.workshopId, userId: req.user.id, db: conn });
 
     await conn.commit();
     conn.release(); conn = null;
@@ -1211,7 +1227,8 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
     // Opening the job card tells the Supervisor, Foreman and Team Leader a
     // request has been raised (Step 4) — or, when the customer already
     // agreed at the counter, that the work is approved and ready to assign.
-    await announceMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id, notify: !approvalChannel });
+    if (jobCardOpened) await announceMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id, notify: !approvalChannel });
+    else fulfilReminders({ workshopId: req.workshopId, workOrderId });
     if (approvalChannel) {
       await onWorkApproved({ workOrderId, workshopId: req.workshopId, userId: req.user.id, how: `${approvalChannel.replace('_', ' ')}, at the counter` });
       await logAudit({
@@ -1388,8 +1405,14 @@ router.patch('/:id/status', async (req, res) => {
  * for a work order that has job cards, "ready for pickup" needs every job
  * card through the quality check (Step 7.1), and "completed" — closing the
  * job — needs the final gate pass (Step 7.2). Imported legacy work orders
- * have no job cards and are not held to either.
+ * have no job cards and are not held to either. An external customer's job
+ * whose main job card has not opened yet (it waits for the physical
+ * inspection, lib/physical-inspection.js) cannot be moved on to work, the
+ * quality check or collection at all — it would skip both.
  */
+/** Statuses past the customer's decision: the work, the quality check, collection. */
+const NEEDS_JOB_CARD = ['assigned', 'accepted', 'in_progress', 'inspection', 'ready_for_pickup', 'completed'];
+
 export async function applyStatusChange({ workOrderId, workshopId, userId, status, note = null, lat = null, lng = null, skipGates = false }) {
     const validStatuses = ['pending','confirmed','assigned','accepted','in_progress','inspection','ready_for_pickup','completed','cancelled'];
     if (!validStatuses.includes(status)) {
@@ -1419,6 +1442,16 @@ export async function applyStatusChange({ workOrderId, workshopId, userId, statu
     if (status === 'in_progress' && workOrder.status !== 'in_progress'
         && await customerApprovalMissing(workOrder.id, workshopId)) {
       return { ok: false, http: 409, ...CUSTOMER_APPROVAL_REQUIRED };
+    }
+
+    if (!skipGates && workOrder.status !== status && NEEDS_JOB_CARD.includes(status)) {
+      const gate = await jobCardGate({ workOrderId: workOrder.id, workshopId });
+      if (!gate.jobCardOpen && !gate.internal) {
+        // Opened before the workshop's first job card: an import, as on the Vehicle Status Board.
+        const [first] = await query('SELECT MIN(created_at) AS at FROM job_cards WHERE workshop_id = ?', [workshopId]);
+        const imported = !!first?.at && new Date(workOrder.created_at) < new Date(first.at);
+        if (!imported) return { ok: false, http: 409, ...PHYSICAL_INSPECTION_REQUIRED };
+      }
     }
 
     if (!skipGates && workOrder.status !== status && ['ready_for_pickup', 'completed'].includes(status)) {
@@ -1599,6 +1632,11 @@ router.patch('/:id/assign-mechanic', requireCapability('job.assign'), async (req
       [req.params.id, req.workshopId]
     );
     if (!workOrder) return res.status(404).json({ success: false, message: 'Work order not found' });
+    // An external customer's job has no job card to work on until they
+    // acknowledge the physical inspection (Step 3).
+    if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
+      return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
+    }
 
     const [mechanic] = await query(
       'SELECT id, full_name FROM mechanics WHERE id = ? AND workshop_id = ?',
@@ -1626,8 +1664,11 @@ router.patch('/:id/assign-mechanic', requireCapability('job.assign'), async (req
       [req.params.id, 'assigned', req.user.id, `Assigned to mechanic: ${mechanic.full_name}`]
     );
 
-    // AUTO-GENERATE INVOICE WHEN WORK ORDER BECOMES CONFIRMED
-    if (workOrder.status === 'pending') {
+    // AUTO-GENERATE INVOICE WHEN THE JOB GOES TO THE FLOOR. As the Team Board
+    // does: a job still waiting (pending, or confirmed by the physical
+    // inspection — which moves it there without the status route that raises
+    // the invoice — or opened by an approved estimate) gets it now. Once only.
+    if (['pending', 'confirmed', 'estimate_approved'].includes(workOrder.status)) {
       try {
         const invoice = await createInvoiceFromWorkOrder(req.params.id, req.workshopId, req.user.id);
         if (invoice) {
@@ -1765,7 +1806,7 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     if (customerChanged || vehicleChanged) {
       const why = await intakeLockReason(current, req.workshopId);
       if (why) {
-        throw new InputError(`The ${customerChanged ? 'customer' : 'vehicle'} can't be changed any more: ${why}. Raise a new job card for the other ${customerChanged ? 'customer' : 'vehicle'} instead.`,
+        throw new InputError(`The ${customerChanged ? 'customer' : 'vehicle'} can't be changed any more: ${why}. Open a new work order for the other ${customerChanged ? 'customer' : 'vehicle'} instead.`,
           'LOCKED_AFTER_ESTIMATE', 409);
       }
     }
@@ -1871,6 +1912,17 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     if (jcSet.length) {
       await conn.query(`UPDATE job_cards SET ${jcSet.join(', ')} WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('billed','cancelled')`,
         [...jcVals, current.id, req.workshopId]);
+    }
+    // A draft inspection follows them too (a completed or signed one locks the change above).
+    const insSet = [], insVals = [];
+    if (customerChanged) { insSet.push('customer_id = ?', 'customer_name = ?', 'customer_phone = ?', 'customer_email = ?'); insVals.push(customerId, name, phone, email); }
+    if (vehicleChanged) {
+      insSet.push('vehicle_id = ?', 'vehicle_year = ?', 'vehicle_make = ?', 'vehicle_model = ?', 'vin = ?', 'plate_number = ?', 'odometer = ?');
+      insVals.push(vehicleId, vehicle?.year || null, vehicle?.make || null, vehicle?.model || null, vehicle?.vin || null, vehicle?.plate_number || null, odometer ?? null);
+    }
+    if (insSet.length) {
+      await conn.query(`UPDATE vehicle_inspections SET ${insSet.join(', ')} WHERE work_order_id = ? AND workshop_id = ? AND status = 'draft' AND signed_at IS NULL`,
+        [...insVals, current.id, req.workshopId]);
     }
     if (serviceCategory !== current.service_category) {
       await conn.query(

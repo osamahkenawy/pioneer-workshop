@@ -8,13 +8,14 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const out = []; const expect = (w, ok, d) => out.push(`${ok ? 'PASS' : 'FAIL'}  ${w}${d ? '  — ' + d : ''}`);
 const call = async (method, path, headers, body) => {
   const r = await fetch(API + path, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined });
   let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j };
 };
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {}; for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 try {
   const pw = 'Qa' + crypto.randomBytes(8).toString('hex') + '1';
@@ -34,6 +35,18 @@ try {
   const wo = created.json?.data;
   expect('create work order via API (was a 500 on every call)', created.status === 201 && wo?.id, `HTTP ${created.status} ${created.json?.message || ''}`);
   expect('API job card is priced by the server (80 + 150 + VAT 11.50 = 241.50)', Number(wo?.total_amount) === 241.5 && wo?.items?.length === 1, `total ${wo?.total_amount}`);
+  // The job card rule holds on the API too (client, 2026-10-29): an external
+  // customer's main job card waits for the physical inspection; an internal one's opens with the job.
+  const cardOf = async id => (await q("SELECT job_card_number FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL AND status <> 'cancelled'", [id || 0]))[0];
+  const { insertId: internalId } = await q("INSERT INTO customers (workshop_id, full_name, phone, email, customer_class, customer_subcategory) VALUES (1, 'QA API Internal Fleet', '+971500000445', 'qa-api-fleet@example.invalid', 'internal', 'fleet')");
+  const inner = (await call('POST', '/v1/work_orders', H, { customer_id: internalId, customer_name: 'QA API Internal Fleet', customer_phone: '+971500000445', description: 'QA API fleet service' })).json?.data;
+  const [{ intake_channel: apiChannel }] = await q('SELECT intake_channel FROM work_orders WHERE id = ?', [wo?.id || 0]);
+  expect('API work order (Received via API): no main job card for an external customer — it waits for the physical inspection; an internal customer\'s opens with it',
+    apiChannel === 'api' && !(await cardOf(wo?.id)) && !!(await cardOf(inner?.id)), `${apiChannel}; external ${(await cardOf(wo?.id))?.job_card_number || 'none'}, internal ${(await cardOf(inner?.id))?.job_card_number || 'none'}`);
+  const ve = await call('POST', '/v1/enquiries', H, { reference: `QA-API-${Date.now()}`, service: 'Brake check', customer: { name: 'QA API Lead', phone: '+971500000446', email: 'qa-api-lead@example.invalid' } });
+  const [veWo] = await q('SELECT wo.intake_channel, wo.status, wo.enquiry_id, e.id AS enq_id FROM work_orders wo JOIN enquiries e ON e.work_order_id = wo.id WHERE wo.id = ?', [ve.json?.data?.workOrder?.id || 0]);
+  expect('API enquiry → its work order at once (Received via API), linked both ways', ve.status === 201 && veWo?.intake_channel === 'api' && veWo.status === 'pending' && veWo.enquiry_id === veWo.enq_id,
+    `HTTP ${ve.status} ${JSON.stringify(ve.json?.data?.workOrder)} ${veWo?.intake_channel || ''}`);
   const bad = await call('POST', '/v1/work_orders', H, { customer_name: 'x' });
   expect('missing fields give a 400', bad.status === 400, `HTTP ${bad.status}`);
   const list = await call('GET', '/v1/work_orders?limit=2', H);

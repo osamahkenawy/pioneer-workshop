@@ -8,18 +8,20 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
+const ORIGIN = API.replace(/\/api\/?$/, ''); // the same server, for the static '/uploads' and full '/api/…' paths
 const out = [];
 const expect = (what, ok, detail) => out.push(`${ok ? 'PASS' : 'FAIL'}  ${what}${detail ? '  — ' + detail : ''}`);
 const call = async (method, path, token, body) => {
   // '/uploads/…' is the static file server; '/api/…' is a full API path (for /api/uploads, which would otherwise read as static).
-  const r = await fetch((path.startsWith('/uploads') || path.startsWith('/api/') ? 'http://localhost:4000' : API) + path, { method,
+  const r = await fetch((path.startsWith('/uploads') || path.startsWith('/api/') ? ORIGIN : API) + path, { method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: body ? JSON.stringify(body) : undefined });
   let j = null; try { j = await r.json(); } catch {}
   return { status: r.status, json: j };
 };
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {};
 for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 const ownerBefore = (await q('SELECT id, role, password FROM users WHERE is_owner = 1 LIMIT 1'))[0];
@@ -86,6 +88,14 @@ try {
   expect('"start trip" (batch start, no time booked) is retired', trip.status === 410 && trip.json?.code === 'MOVED', `HTTP ${trip.status}`);
   const proof = await call('POST', `/api/uploads/work-orders/${anyWo.id}/proof`, mech, {});
   expect("technician cannot upload proof on someone else's job", proof.status === 404, `HTTP ${proof.status}`);
+  // The physical inspection opens an external customer's job card (client,
+  // 2026-10-29): a technician does not reach it, and opening the job card
+  // without it is a manager's. A work order that does not exist: a broken
+  // guard answers 404 and changes nothing.
+  const techInsp = await call('POST', '/vehicle-inspections', mech, { work_order_id: 999999999, inspection_type: 'intake' });
+  const storeOverride = await call('POST', '/workflow/work-orders/999999999/job-card', store, { override_reason: 'QA probe' });
+  expect('technician cannot reach the physical inspection; Storekeeper cannot open a job card without it (403)', techInsp.status === 403 && storeOverride.status === 403,
+    `HTTP ${techInsp.status} / ${storeOverride.status}`);
 
   // 2c. staff need the capability for the status they set through the QR/token tool
   const sa = await call('PATCH', `/service-status/${closedWo.t}/status`, advisor, { status: 'ready_for_pickup' });

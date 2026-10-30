@@ -5,8 +5,10 @@
  *
  * Sent from POST /api/vehicle-inspections/:id/share by WhatsApp or e-mail once
  * the walk-around is completed. The customer sees what was recorded at the car
- * — the damage marked on the diagram, or the uploaded paper form — and, if they
- * did not sign at the car, signs here (once).
+ * — the damage marked on the diagram and the photos, or the uploaded paper
+ * form — and, if they did not sign at the car, signs here (once). Signing the
+ * physical inspection (drop-off) is their acknowledgement of the vehicle's
+ * condition: it opens an external customer's job card (lib/physical-inspection.js).
  *
  * Anonymous: anyone holding the link can open it, and links get forwarded. So
  * nothing here carries the customer's phone or e-mail, prices, or staff names,
@@ -20,8 +22,9 @@ import { query, execute } from '../lib/database.js';
 import { inspectionLinkLimiter } from '../lib/rate-limits.js';
 import { createInAppNotification } from '../lib/notify.js';
 import { notifyGroups } from '../lib/workflow.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { saveBase64Signature } from './uploads.js';
-import { DAMAGE_CODES, readDocs, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
+import { DAMAGE_CODES, readDocs, readPhotos, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
 import { IMAGE_COORD } from '../lib/inspection-marks.js';
 
 const router = express.Router();
@@ -32,6 +35,8 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{32,64}$/;
 // The paper form's pages, when that is how the inspection was recorded. Files
 // left over from switching to the on-screen form are not the customer's copy.
 const docsOf = row => (row.entry_mode === 'document' ? readDocs(row) : []);
+// The vehicle photos, taken with the on-screen form.
+export const photosOf = row => (row.entry_mode === 'document' ? [] : readPhotos(row));
 
 async function loadByToken(token, res) {
   const [row] = TOKEN_RE.test(token || '') ? await query(
@@ -96,6 +101,7 @@ export function publicView(row) {
       service_recommended: row.service_recommended,
       notes: row.notes,
       documents: docsOf(row).map(d => ({ id: d.id, name: d.name, type: d.type })),
+      photos: photosOf(row).map(p => ({ id: p.id, name: p.name, type: p.type })),
       signature: signatureOf(row),
       can_sign: canSign(row),
       job_closed: row.wo_status === 'completed',
@@ -124,6 +130,18 @@ router.get('/:token/documents/:docId', async (req, res) => {
   } catch (err) {
     console.error('GET /public/inspections/:token/documents/:docId error:', err);
     res.status(500).json({ success: false, message: 'Failed to load the document' });
+  }
+});
+
+// GET /api/public/inspections/:token/photos/:photoId — a vehicle photo.
+router.get('/:token/photos/:photoId', async (req, res) => {
+  try {
+    const row = await loadByToken(req.params.token, res);
+    if (!row) return;
+    return sendDocument(res, photosOf(row).find(p => p.id === req.params.photoId));
+  } catch (err) {
+    console.error('GET /public/inspections/:token/photos/:photoId error:', err);
+    res.status(500).json({ success: false, message: 'Failed to load the photo' });
   }
 });
 
@@ -165,7 +183,9 @@ router.post('/:token/sign', async (req, res) => {
       return res.status(409).json({ success: false, code: 'ALREADY_SIGNED', message: 'This inspection has already been signed.' });
     }
 
-    await notifySigned(row, name);
+    // The drop-off inspection acknowledged: an external customer's job card opens.
+    const jobCard = await openPhysicalJobCard(row);
+    await notifySigned(row, name, jobCard);
     const [signed] = await query('SELECT signature_url, signed_at, signed_via, signed_by_name FROM vehicle_inspections WHERE id = ?', [row.id]);
     res.json({ success: true, signature: signatureOf(signed) });
   } catch (err) {
@@ -174,15 +194,33 @@ router.post('/:token/sign', async (req, res) => {
   }
 });
 
+/**
+ * The customer signed the physical inspection (drop-off): open the job's main
+ * job card if that was what it waited for (the floor is told). Returns the
+ * card when one is open, else null. Never throws — the signature is saved.
+ * Shared with the customer portal's sign-off.
+ */
+export async function openPhysicalJobCard(row) {
+  if (row.inspection_type !== 'intake') return null;
+  try {
+    const r = await openJobCardIfReady({ workOrderId: row.work_order_id, workshopId: row.workshop_id });
+    return r.opened ? { ...r.jobCard, opened_now: r.reason === null } : null;
+  } catch (err) {
+    console.error('[PublicInspections] job card after signing failed:', err.message);
+    return null;
+  }
+}
+
 /** Nobody at the workshop sees this land, so tell whoever did the walk-around
  *  and the job's estimate advisor through the in-app feed — the Service
  *  Advisors as a group when neither is known. */
-async function notifySigned(row, name) {
+async function notifySigned(row, name, jobCard = null) {
   try {
     const handover = row.inspection_type === 'joint';
     const payload = {
       title: `Inspection signed by the customer: ${row.work_order_number}`,
-      body: `${name} signed the ${handover ? 'handover' : 'intake'} inspection from the link.`,
+      body: `${name} signed the ${handover ? 'handover' : 'physical'} inspection from the link.`
+        + (jobCard?.opened_now ? ` Job card ${jobCard.job_card_number} is open — the technical inspection is next.` : ''),
       link: `/work-orders/${row.work_order_id}/inspection${handover ? '?type=joint' : ''}`,
       orderId: row.work_order_id, type: 'inspection_signed', icon: '✍️',
     };

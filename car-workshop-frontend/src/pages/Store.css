@@ -179,6 +179,11 @@
 .st-est-no { font-weight: 800; font-size: 14.5px; color: #15294a; }
 .st-est-meta { font-size: 13px; color: #64748b; margin-top: 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 .st-est-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+/* the customer's parts preference on an estimate to price */
+.st-est-pref { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-block-start: 5px; font-size: 11.5px; color: #64748b; }
+.st-cat { font-size: 11px; font-weight: 700; padding-block: 1px; padding-inline: 7px; border-radius: 6px; background: #eef2f8; color: #1e3a6b; }
+.st-cat-after_market { background: #fff7ed; color: #c2410c; }
+.st-cat-used { background: #eef7f1; color: #16794a; }
 .st-est-date { font-size: 11.5px; color: #94a3b8; }
 .st-est-arrow { color: #cbd5e1; flex-shrink: 0; }
 [dir='rtl'] .st-est-arrow, [dir='rtl'] .st-wo svg { transform: scaleX(-1); }

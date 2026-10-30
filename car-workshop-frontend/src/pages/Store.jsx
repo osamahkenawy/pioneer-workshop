@@ -1,7 +1,8 @@
 /**
  * Store — the storekeeper's queue (Step 6, materials).
  *
- *   GET   /api/workflow/store/queue            requisition lines + estimates to price
+ *   GET   /api/workflow/store/queue            requisition lines
+ *   GET   /api/estimates?view=parts_to_price   estimates with part lines to price
  *   PATCH /api/workflow/requisition-items/:id  { availability: 'available', unit_cost? }
  *                                              { availability: 'not_available', expected_date }
  *
@@ -10,7 +11,11 @@
  * expected delivery date is recorded, the floor is alerted 24 h before it,
  * and on (or after) that date the line comes back here as "Re-check now".
  *
- * Parts to price: draft estimates with part lines that have no price yet.
+ * Parts to price: draft estimates with a part line the Store has still to
+ * price — a category of the customer's parts preference (Genuine /
+ * After-Market / Used) neither priced nor marked not available. Each shows
+ * the categories asked for; the pricing itself (availability, price,
+ * quantity, delivery, an alternative) is done on the estimate.
  */
 import { useState, useEffect, useCallback, useContext, useMemo } from 'react';
 import { Link } from 'react-router-dom';
@@ -21,6 +26,7 @@ import {
 } from 'iconoir-react';
 import api from '../lib/api';
 import Toast, { useToast } from '../components/Toast';
+import { categoryLabel, preferenceOf } from '../components/NewEstimateModal';
 import { AuthContext } from '../context/AuthContext';
 import './Store.css';
 
@@ -91,10 +97,13 @@ export default function Store() {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.get('/workflow/store/queue');
+      const [res, est] = await Promise.all([
+        api.get('/workflow/store/queue'),
+        api.get('/estimates?view=parts_to_price&limit=100').catch(() => null),
+      ]);
       if (res.success) {
         setItems(res.data?.items || []);
-        setEstimates(res.data?.estimates || []);
+        setEstimates(est?.success ? est.estimates || [] : []);
         setLoadError('');
       } else {
         setLoadError(res.message || t('store.load_failed', 'Could not load the Store queue.'));
@@ -465,13 +474,17 @@ export default function Store() {
                   <div className="st-est-main">
                     <div className="st-est-no">{e.estimate_number}</div>
                     <div className="st-est-meta">
-                      {e.customer_name || t('store.no_customer', 'No customer name')}
-                      {e.vehicle_plate && <span className="st-plate st-plate-sm">{e.vehicle_plate}</span>}
+                      {e.customer_full_name || e.customer_name || t('store.no_customer', 'No customer name')}
+                      {(e.plate_number || e.vehicle_plate) && <span className="st-plate st-plate-sm">{e.plate_number || e.vehicle_plate}</span>}
+                    </div>
+                    <div className="st-est-pref">
+                      <span>{t('store.customer_asked', 'Customer asked for')}</span>
+                      {preferenceOf(e).map(c => <span key={c} className={`st-cat st-cat-${c}`}>{categoryLabel(t, c)}</span>)}
                     </div>
                   </div>
                   <div className="st-est-side">
                     <span className="st-badge st-badge-check">
-                      {t('store.part_lines', { count: Number(e.part_lines) || 0, defaultValue: '{{count}} part line(s) to price' })}
+                      {t('store.part_lines', { count: Number(e.unpriced_parts) || 0, defaultValue: '{{count}} part line(s) to price' })}
                     </span>
                     <span className="st-est-date">{fmtStamp(e.created_at, lang)}</span>
                   </div>

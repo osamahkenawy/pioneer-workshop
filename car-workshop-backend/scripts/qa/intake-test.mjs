@@ -12,7 +12,7 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME, dateStrings: true });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const out = []; let section = '';
 const expect = (what, ok, detail) => out.push(`${ok ? 'PASS' : 'FAIL'}  [${section}] ${what}${detail !== undefined && detail !== '' ? '  — ' + detail : ''}`);
 const call = async (method, path, token, body) => {
@@ -27,6 +27,15 @@ const chk = (d, n, key) => d?.steps?.[n - 1]?.checks?.find(c => c.key === key);
 const rnd = n => String(crypto.randomInt(0, 10 ** n)).padStart(n, '0');
 const phone = () => `+971500${rnd(6)}`;
 const vin = () => `ZZXNT${rnd(12)}`; // 17 characters, never I, O or Q
+const mainOf = async woId => (await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId]))[0];
+// A 1×1 PNG: the signature pad's image, and a photo of the paper inspection form.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const upload = async (tok, path, name, dataUrl) => {
+  const fd = new FormData();
+  fd.append('files', new Blob([Buffer.from(dataUrl.split(',')[1], 'base64')], { type: 'image/png' }), name);
+  const r = await fetch(API + path, { method: 'POST', headers: { Authorization: `Bearer ${tok}` }, body: fd });
+  let j = null; try { j = await r.json(); } catch {} return { status: r.status, json: j || {} };
+};
 
 try {
   const pw = 'Qa' + crypto.randomBytes(8).toString('hex') + '1';
@@ -105,8 +114,25 @@ try {
   expect('classification snapshot external / walk-in, payer self_pay (C5i, C5j)', w1?.intake_customer_class === 'external' && w1?.intake_customer_subcategory === 'walkin' && w1?.payer_type === 'self_pay',
     `${w1?.intake_customer_class}/${w1?.intake_customer_subcategory}/${w1?.payer_type}`);
   expect('mechanic_id ignored at create (C5m)', w1?.mechanic_id == null && w1?.status === 'pending', `${w1?.mechanic_id} ${w1?.status}`);
-  const [jc1] = await q('SELECT department, vehicle_plate FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [w1.id]);
-  expect('main job card opened in the same create, department from the category (bodywork → body_paint)', jc1?.department === 'body_paint' && jc1?.vehicle_plate === vA.plate_number, JSON.stringify(jc1));
+  // External walk-in: the main job card waits for the customer's acknowledgement
+  // of the physical inspection (client, 2026-10-29). Here the customer is not at
+  // the car and signs from the link.
+  expect('external walk-in: no main job card at create — it waits for the physical inspection', !(await mainOf(w1.id)), '');
+  const i1 = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: w1.id, inspection_type: 'intake' })).json?.data;
+  const c1 = await call('PATCH', `/vehicle-inspections/${i1?.id}/complete`, advisor, { customer_present: false });
+  const sh1 = await call('POST', `/vehicle-inspections/${i1?.id}/share`, advisor, { channel: 'link' });
+  const linkToken = String(sh1.json?.url || '').split('/').pop();
+  let d1 = await wf(advisor, w1.id);
+  expect('completed without the customer: still no job card; Step 3 waits for the signature (next await_acknowledgement)',
+    c1.status === 200 && c1.json?.job_card?.waiting_for_signature === true && !(await mainOf(w1.id)) && sh1.status === 200 && d1.current_step === 3 && d1.next?.key === 'await_acknowledgement',
+    `${c1.status} ${JSON.stringify(c1.json?.job_card)} share ${sh1.status} step ${d1.current_step} next ${d1.next?.key}`);
+  const noName = await call('POST', `/public/inspections/${linkToken}/sign`, null, { signature: PNG });
+  const s1 = await call('POST', `/public/inspections/${linkToken}/sign`, null, { name: 'QA Intake Walk-in A', signature: PNG });
+  const jc1 = await mainOf(w1.id);
+  const [log1] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [w1.id]);
+  expect('the customer signs from the link (name required) → the main job card opens, logged as signed from the link',
+    noName.status === 400 && s1.status === 200 && !!jc1 && /signed by the customer from the link/.test(log1?.note || ''), `${noName.status}/${s1.status} ${log1?.note}`);
+  expect('…department from the category (bodywork → body_paint), with the plate', jc1?.department === 'body_paint' && jc1?.vehicle_plate === vA.plate_number, JSON.stringify(jc1 && { department: jc1.department, plate: jc1.vehicle_plate }));
   r = await create(advisor, { odometer_in: 40000 });
   const w2 = r.json.data;
   const codes = (r.json.warnings || []).map(w => w.code);
@@ -125,9 +151,12 @@ try {
   r = await create(manager, { items: [{ name: 'Wiper blades', quantity: 1, unit_price: 40 }] });
   const w5 = r.json.data;
   expect('a manager may price an external job at the counter', r.status === 201, `${r.status} ${r.json.code || ''}`);
-  const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => create(advisor, { customer_id: walkB.id, vehicle_id: vB.id, odometer_in: 70000 + i })));
-  expect('12 creates at once all get a job card number (no duplicate-number failures, C5g)', burst.every(b => b.status === 201),
-    burst.map(b => b.status === 201 ? b.status : `${b.status} ${b.json.code || b.json.message || ''}`).join(','));
+  // An internal customer's job card opens with the job, so this races the job card numbers too.
+  const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => create(advisor, { customer_id: internal.id, vehicle_id: vI.id, odometer_in: 70000 + i })));
+  const burstCards = await q('SELECT DISTINCT job_card_number FROM job_cards WHERE parent_job_card_id IS NULL AND work_order_id IN (?)', [burst.map(b => b.json.data?.id || 0)]);
+  expect('12 creates at once (internal customer: job card with the job) all get a work order and a distinct job card number (no duplicate-number failures, C5g)',
+    burst.every(b => b.status === 201) && burstCards.length === 12,
+    `${burstCards.length} job cards; ${burst.map(b => b.status === 201 ? b.status : `${b.status} ${b.json.code || b.json.message || ''}`).join(',')}`);
 
   // ── C6 edit ────────────────────────────────────────────────────────
   section = 'C6 edit';
@@ -142,17 +171,62 @@ try {
   const e1 = r.json.data;
   expect('odometer saved; notes, drop-off, vehicle and channel kept when not sent', r.status === 200 && e1.odometer_in === 71000 && e1.notes === 'QA intake note' && e1.dropoff_address === 'QA intake drop-off'
     && e1.vehicle_id === vA.id && e1.intake_channel === 'whatsapp', `${r.status} ${e1?.odometer_in} ${e1?.notes} ${e1?.vehicle_id}`);
+  // w1's customer has signed the walk-around of this car: car and customer are fixed.
   r = await put(w1.id, { vehicle_id: vA2.id, odometer_in: 52000, expected_updated_at: e1.updated_at });
-  const [jcV] = await q('SELECT vehicle_id, vehicle_plate FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [w1.id]);
-  expect('vehicle change at intake: the job card follows (plate too)', r.status === 200 && jcV.vehicle_id === vA2.id && jcV.vehicle_plate === vA2.plate_number, `${r.status} ${JSON.stringify(jcV)}`);
-  cur = await get(w1.id);
-  r = await put(w1.id, { customer_id: walkB.id, expected_updated_at: cur.updated_at });
+  const rc1 = await put(w1.id, { customer_id: walkB.id, vehicle_id: vB.id, expected_updated_at: e1.updated_at });
+  expect('after the customer signed the inspection, vehicle and customer are locked (409, says why)',
+    r.status === 409 && r.json.code === 'LOCKED_AFTER_ESTIMATE' && /signed the vehicle inspection/.test(r.json.message || '') && rc1.status === 409,
+    `${r.status} ${r.json.code} ${r.json.message || ''} / ${rc1.status}`);
+  // Before that, they can change: an internal job (its job card opens with the job) …
+  const vI2 = await mkVeh(internal.id, `QAIN${rnd(3)}J`);
+  const wI = (await create(advisor, { customer_id: internal.id, vehicle_id: vI.id })).json.data;
+  cur = await get(wI.id);
+  r = await put(wI.id, { vehicle_id: vI2.id, odometer_in: 52000, expected_updated_at: cur.updated_at });
+  const [jcV] = await q('SELECT vehicle_id, vehicle_plate FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [wI.id]);
+  expect('vehicle change at intake: the job card follows (plate too)', r.status === 200 && jcV?.vehicle_id === vI2.id && jcV.vehicle_plate === vI2.plate_number, `${r.status} ${JSON.stringify(jcV)}`);
+  cur = await get(wI.id);
+  r = await put(wI.id, { customer_id: walkB.id, expected_updated_at: cur.updated_at });
   expect("customer change keeping the old customer's car → 400", r.status === 400 && r.json.code === 'VEHICLE_NOT_CUSTOMERS', `${r.status} ${r.json.code}`);
-  r = await put(w1.id, { customer_id: walkB.id, vehicle_id: vB.id, odometer_in: 72000, expected_updated_at: cur.updated_at });
-  const [jcC] = await q('SELECT customer_id, vehicle_id FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [w1.id]);
-  expect('customer change at intake: customer_id, name / phone snapshot and job card all follow', r.status === 200 && r.json.data.customer_id === walkB.id && r.json.data.customer_name === walkB.full_name && jcC.customer_id === walkB.id && jcC.vehicle_id === vB.id,
+  r = await put(wI.id, { customer_id: walkB.id, vehicle_id: vB.id, odometer_in: 72000, expected_updated_at: cur.updated_at });
+  const [jcC] = await q('SELECT customer_id, vehicle_id FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [wI.id]);
+  expect('customer change at intake: customer_id, name / phone snapshot and job card all follow', r.status === 200 && r.json.data.customer_id === walkB.id && r.json.data.customer_name === walkB.full_name && jcC?.customer_id === walkB.id && jcC.vehicle_id === vB.id,
     `${r.status} ${r.json.data?.customer_id} ${r.json.data?.customer_name} ${JSON.stringify(jcC)}`);
-  const est = await call('POST', '/estimates', advisor, { intake_work_order_id: w2.id, lines: [{ job_name: 'Brakes', line_type: 'labour', description: 'Brake labour', quantity: 1, unit_price: 100 }] });
+  // … and an external job whose walk-around is still a draft: the draft follows.
+  const vF2 = await mkVeh(extFleet.id, `QAIN${rnd(3)}G`);
+  const wX = (await create(advisor, { customer_id: extFleet.id, vehicle_id: vF.id })).json.data;
+  const iX = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: wX.id, inspection_type: 'intake' })).json?.data;
+  cur = await get(wX.id);
+  r = await put(wX.id, { vehicle_id: vF2.id, expected_updated_at: cur.updated_at });
+  const [insX] = await q('SELECT vehicle_id, plate_number, vin FROM vehicle_inspections WHERE id = ?', [iX?.id || 0]);
+  expect('vehicle change with a draft inspection: the draft follows (car, plate, VIN)',
+    r.status === 200 && insX?.vehicle_id === vF2.id && insX.plate_number === vF2.plate_number && insX.vin === vF2.vin, `${r.status} ${JSON.stringify(insX)}`);
+  // Who records the inspection: the roles that open job cards (Service Advisor,
+  // Supervisor, managers). The Storekeeper and Team Leader may read one.
+  const viewS = await call('POST', '/vehicle-inspections', store, { work_order_id: w1.id, inspection_type: 'intake' });
+  const putS = await call('PUT', `/vehicle-inspections/${iX?.id}`, store, { notes: 'QA store edit' });
+  const photoS = await upload(store, `/vehicle-inspections/${iX?.id}/photos`, 'car.png', PNG);
+  const sigL = await call('PATCH', `/vehicle-inspections/${iX?.id}/signature`, leader, { signature: PNG, name: 'QA Leader' });
+  const doneL = await call('PATCH', `/vehicle-inspections/${iX?.id}/complete`, leader, { customer_present: false });
+  const newL = await call('POST', '/vehicle-inspections', leader, { work_order_id: w2.id, inspection_type: 'joint' });
+  const putV = await call('PUT', `/vehicle-inspections/${iX?.id}`, supervisor, { notes: 'QA supervisor note' });
+  expect('Storekeeper / Team Leader: read an inspection, but not edit, add photos, sign, complete or start one (403); the Supervisor may',
+    viewS.status === 200 && viewS.json.reused === true && [putS, photoS, sigL, doneL, newL].every(x => x.status === 403) && newL.json.code === 'NOT_STARTED' && putV.status === 200,
+    `${viewS.status} ${[putS, photoS, sigL, doneL, newL].map(x => x.status).join('/')} ${newL.json.code} sup ${putV.status}`);
+  const estLines = [{ job_name: 'Brakes', line_type: 'labour', description: 'Brake labour', quantity: 1, unit_price: 100 }];
+  const early = await call('POST', '/estimates', advisor, { intake_work_order_id: w2.id, lines: estLines });
+  expect('an external job\'s estimate waits for the acknowledgement (409 PHYSICAL_INSPECTION_REQUIRED)', early.status === 409 && early.json.code === 'PHYSICAL_INSPECTION_REQUIRED', `${early.status} ${early.json.code}`);
+  // Paper mode: the walk-around on the paper form, which carries the signature.
+  const i2 = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: w2.id, inspection_type: 'intake' })).json?.data;
+  const empty = await call('PATCH', `/vehicle-inspections/${i2?.id}/complete`, advisor, {});
+  await call('PUT', `/vehicle-inspections/${i2?.id}`, advisor, { entry_mode: 'document' });
+  const noDoc = await call('PATCH', `/vehicle-inspections/${i2?.id}/complete`, advisor, {});
+  const up = await upload(advisor, `/vehicle-inspections/${i2?.id}/documents`, 'paper-form.png', PNG);
+  const c2 = await call('PATCH', `/vehicle-inspections/${i2?.id}/complete`, advisor, {});
+  const [log2] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [w2.id]);
+  expect('paper form: not without the upload (DOCUMENT_REQUIRED); uploaded and completed → the main job card opens, logged as the paper form',
+    empty.json.code === 'SIGNATURE_REQUIRED' && noDoc.status === 400 && noDoc.json.code === 'DOCUMENT_REQUIRED' && up.status === 201 && c2.status === 200 && c2.json.job_card?.opened_now === true
+    && !!(await mainOf(w2.id)) && /paper form uploaded/.test(log2?.note || ''), `${empty.json.code} ${noDoc.status} ${noDoc.json.code} upload ${up.status} complete ${c2.status} ${log2?.note}`);
+  const est = await call('POST', '/estimates', advisor, { intake_work_order_id: w2.id, lines: estLines });
   cur = await get(w2.id);
   r = await put(w2.id, { vehicle_id: vA2.id, odometer_in: 52000, expected_updated_at: cur.updated_at });
   expect('after an estimate the vehicle is locked (409 LOCKED_AFTER_ESTIMATE)', est.status === 201 && r.status === 409 && r.json.code === 'LOCKED_AFTER_ESTIMATE', `${est.status} ${r.status} ${r.json.code}`);
@@ -174,8 +248,13 @@ try {
 
   // ── C7 workflow ────────────────────────────────────────────────────
   section = 'C7 workflow';
-  let d = await wf(advisor, w2.id);
-  expect('new job: Steps 1–3 done (snapshot, complaint + odometer + VIN)', d.steps.slice(0, 3).every(s => s.state === 'done') && chk(d, 2, 'vin')?.done, d.steps.map(s => `${s.n}:${s.state}`).join(' '));
+  let d = await wf(advisor, pf.id);
+  expect('new external job: Steps 1–2 done; Step 3 "Physical inspection & job card" current, the acknowledgement open',
+    d.steps.slice(0, 2).every(s => s.state === 'done') && d.current_step === 3 && d.steps[2].title === 'Physical inspection & job card' && chk(d, 3, 'physical_ack')?.done === false
+    && d.steps[3].title === 'Technical inspection & pricing' && d.next?.key === 'physical_inspection', `${d.steps.map(s => `${s.n}:${s.state}`).join(' ')} next ${d.next?.key}`);
+  d = await wf(advisor, w2.id);
+  expect('acknowledged on paper: Steps 1–3 done (snapshot, complaint + odometer + VIN, "Paper form uploaded")',
+    d.steps.slice(0, 3).every(s => s.state === 'done') && chk(d, 2, 'vin')?.done && chk(d, 3, 'physical_ack')?.detail === 'Paper form uploaded', `${d.steps.map(s => `${s.n}:${s.state}`).join(' ')} ${chk(d, 3, 'physical_ack')?.detail}`);
   r = await call('PUT', `/customers/${walkA.id}`, manager, { customer_class: 'external', customer_subcategory: 'fleet' });
   d = await wf(advisor, w2.id);
   expect('reclassifying the customer does not rewrite the job\'s Step 1', r.status === 200 && d.work_order.customer_subcategory === 'walkin', `${r.status} ${d.work_order.customer_subcategory}`);
@@ -229,8 +308,77 @@ try {
   expect('Service Advisor can cancel and reopen (job.open)', advCancel === 200 && advReopen === 200, `${advCancel}/${advReopen}`);
   r = await call('PATCH', `/work-orders/${pn.id}/customer-approval`, advisor, { channel: 'in_person' });
   expect('approval on a job with nothing priced → 409 NOTHING_TO_APPROVE', r.status === 409 && r.json.code === 'NOTHING_TO_APPROVE', `${r.status} ${r.json.code}`);
+
+  // ── C10 approved before the physical inspection ────────────────────
+  // An external job priced and agreed at the counter (a manager) before the
+  // walk-around: approved, but no job card — nothing for the floor yet.
+  section = 'C10 inspection first';
+  r = await create(manager, { customer_id: extIns.id, vehicle_id: vN.id, items: [{ name: 'Wiper blades', quantity: 1, unit_price: 40 }], customer_approval_channel: 'in_person' });
+  const w6 = r.json.data;
+  const flag = (await call('GET', `/work-orders/${w6?.id}`, advisor)).json.data;
+  const listed = (await call('GET', `/work-orders?search=${encodeURIComponent(w6?.work_order_number || '')}`, advisor)).json.data?.find(x => x.id === w6?.id);
+  expect('approved at the counter, no job card: marked awaiting_physical_inspection on the job and in the list ("Approved — physical inspection first")',
+    r.status === 201 && !!w6.customer_approved_at && !(await mainOf(w6.id)) && Number(flag?.awaiting_physical_inspection) === 1 && Number(listed?.awaiting_physical_inspection) === 1
+    && Number((await call('GET', `/work-orders/${w4.id}`, advisor)).json.data?.awaiting_physical_inspection) === 0,
+    `${r.status} ${r.json.code || ''} flag ${flag?.awaiting_physical_inspection}/${listed?.awaiting_physical_inspection}`);
+  const [floorNote] = await q("SELECT body FROM user_notifications WHERE user_id = ? AND work_order_id = ? AND title LIKE 'Approved:%'", [users.leader.id, w6.id]);
+  expect('the floor is told the job card opens after the acknowledgement (not "ready to assign")', /opens once the customer has acknowledged the physical inspection/.test(floorNote?.body || '') && !/Ready for the Team Leader/.test(floorNote?.body || ''), floorNote?.body);
+  const asg1 = await call('PATCH', `/work-orders/${w6.id}/assign-mechanic`, leader, { mechanic_id: mech });
+  const asg2 = await call('POST', '/team-leader/assign', leader, { work_order_id: w6.id, mechanic_id: mech });
+  const asg3 = await call('POST', '/job-assignment/assign', manager, { work_order_id: w6.id, mechanic_id: mech });
+  const conf = await call('PATCH', `/work-orders/${w6.id}/status`, manager, { status: 'confirmed', note: 'QA intake' });
+  const start = await call('PATCH', `/work-orders/${w6.id}/status`, manager, { status: 'in_progress', note: 'QA intake' });
+  const [w6row] = await q('SELECT status, mechanic_id FROM work_orders WHERE id = ?', [w6.id]);
+  expect('no technician can be assigned (job card, Team Board, Job Assignment) and work cannot start: 409 PHYSICAL_INSPECTION_REQUIRED; nothing changed',
+    [asg1, asg2, asg3, start].every(x => x.status === 409 && x.json.code === 'PHYSICAL_INSPECTION_REQUIRED') && conf.status === 200 && w6row.mechanic_id == null && w6row.status === 'confirmed',
+    `${[asg1, asg2, asg3, start].map(x => `${x.status} ${x.json.code || ''}`).join(' / ')} · ${w6row.status} ${w6row.mechanic_id}`);
+  const leaderTasks = (await call('GET', '/workflow/my-tasks', leader)).json.data;
+  const advTasks = (await call('GET', '/workflow/my-tasks', advisor)).json.data;
+  expect('"Your tasks": not in the Team Leader\'s "Assign a technician"; in the Service Advisor\'s "Physical inspection"',
+    !(leaderTasks?.groups.find(g => g.kind === 'assign')?.items || []).some(i => i.id === w6.id)
+    && (advTasks?.groups.find(g => g.kind === 'physical_inspection')?.items || []).some(i => i.id === w6.id), '');
+  const i6 = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: w6.id, inspection_type: 'intake' })).json?.data;
+  await call('PATCH', `/vehicle-inspections/${i6?.id}/signature`, advisor, { signature: PNG, name: 'QA Intake Insurer' });
+  const c6 = await call('PATCH', `/vehicle-inspections/${i6?.id}/complete`, advisor, {});
+  const asg4 = await call('PATCH', `/work-orders/${w6.id}/assign-mechanic`, leader, { mechanic_id: mech });
+  const jc6 = await mainOf(w6.id);
+  expect('acknowledged at the car → the job card opens; now the technician can be assigned, and the job card follows', c6.json.job_card?.opened_now === true && asg4.status === 200 && jc6?.mechanic_id === mech,
+    `${c6.status} ${JSON.stringify(c6.json.job_card)} assign ${asg4.status} ${asg4.json.code || asg4.json.message || ''}`);
+
+  // ── C11 the fleet coordinator link ─────────────────────────────────
+  // The work order opens when the coordinator submits (Received via the fleet
+  // link); "Book in" works on that one. An internal fleet skips the physical inspection.
+  section = 'C11 fleet link';
+  const fleetJob = async (customer, plate) => {
+    const v = await mkVeh(customer.id, plate);
+    const link = await call('POST', '/fleet-intake/links', advisor, { customer_id: customer.id, label: 'QA intake fleet link' });
+    const sub = await call('POST', `/public/fleet-intake/${link.json.data?.token}`, null, { plate_number: v.plate_number, vin: v.vin, odometer: 81000, complaint: 'QA fleet: brakes grinding' });
+    const [req] = await q('SELECT id, work_order_id FROM fleet_intake_requests WHERE id = ?', [sub.json.data?.id || 0]);
+    const [w] = await q('SELECT id, intake_channel, status, customer_id, vehicle_id FROM work_orders WHERE id = ?', [req?.work_order_id || 0]);
+    return { v, link, sub, req, w };
+  };
+  const ef = await fleetJob(extFleet, `QAIN${rnd(3)}G`);
+  expect('external fleet: the submission opens its work order (Received via the fleet link, on the fleet\'s car); no job card yet',
+    ef.link.status === 201 && ef.sub.status === 201 && ef.w?.intake_channel === 'fleet_link' && ef.w.status === 'pending' && ef.w.customer_id === extFleet.id && ef.w.vehicle_id === ef.v.id && !(await mainOf(ef.w.id)),
+    `link ${ef.link.status} submit ${ef.sub.status} ${ef.sub.json.message || ''} · ${ef.w?.intake_channel} ${ef.w?.status}`);
+  await call('POST', `/fleet-intake/${ef.req.id}/review`, advisor, { decision: 'accepted' });
+  const bookIn = await call('POST', `/fleet-intake/${ef.req.id}/convert`, advisor, {});
+  const [{ n: efWos }] = await q('SELECT COUNT(*) n FROM work_orders WHERE vehicle_id = ?', [ef.v.id]);
+  expect('"Book in" reuses that work order (200 reused) — no second one; the physical inspection is next',
+    bookIn.status === 200 && bookIn.json.reused === true && bookIn.json.data?.work_order_id === ef.w.id && Number(efWos) === 1 && (await wf(advisor, ef.w.id))?.next?.key === 'physical_inspection',
+    `HTTP ${bookIn.status} reused ${bookIn.json.reused} · ${efWos} work order(s)`);
+  const inf = await fleetJob(internal, `QAIN${rnd(3)}H`);
+  expect('internal fleet: the submission\'s work order has its main job card at once (no physical inspection)', inf.sub.status === 201 && inf.w?.intake_channel === 'fleet_link' && !!(await mainOf(inf.w?.id)),
+    `submit ${inf.sub.status} ${inf.sub.json.message || ''} · ${inf.w?.intake_channel}`);
 } catch (e) { out.push('ERROR ' + e.stack); }
 finally {
+  // Files of the inspections made here: signature images and the uploaded paper form.
+  for (const row of await q('SELECT signature_url, documents, photos FROM vehicle_inspections WHERE id > ?', [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(row.signature_url || '')) fs.rmSync(BE + row.signature_url, { force: true });
+    for (const f of [row.documents, row.photos].flatMap(j => { try { return (typeof j === 'string' ? JSON.parse(j) : j) || []; } catch { return []; } })) {
+      if (/^[\w.-]+$/.test(f?.file || '')) fs.rmSync(`${BE}/private-uploads/inspections/${f.file}`, { force: true });
+    }
+  }
   await q('SET FOREIGN_KEY_CHECKS = 0'); const removed = {};
   for (const t of idTables) { const r = await q(`DELETE FROM \`${t}\` WHERE id > ?`, [baseline[t]]); if (r.affectedRows) removed[t] = r.affectedRows; }
   await q('SET FOREIGN_KEY_CHECKS = 1'); await db.end();

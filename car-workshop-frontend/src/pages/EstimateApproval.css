@@ -72,8 +72,8 @@
 .ea-banner-warn  { background: var(--ea-orange-bg); color: #9a3412; border: 1px solid #fed7aa; }
 .ea-banner-info  { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
 
-/* ── Genuine vs After-Market comparison (Format 3) ── */
-.ea-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+/* ── Totals per category of the preference (Genuine / After-Market / Used) ── */
+.ea-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-block-end: 16px; }
 .ea-compare-tile {
   display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 14px;
   background: #f8fafc; border: 1px solid var(--ea-line);
@@ -127,26 +127,36 @@
 .ea-tag-type { background: #f1f5f9; color: var(--ea-muted); }
 .ea-tag-genuine { background: #eaeefb; color: #34468c; }
 .ea-tag-after_market { background: var(--ea-orange-bg); color: #c2410c; }
+.ea-tag-used { background: #eef7f1; color: #16794a; }
 .ea-tag-muted { background: #f8fafc; color: #94a3b8; }
 .ea-tag-urgent { background: var(--ea-red-bg); color: var(--ea-red); }
 
-/* Genuine / After-Market radio cards */
-.ea-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+/* Part-type radio cards: the requested categories, then the alternative */
+.ea-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-block-start: 12px; }
 .ea-opt {
   position: relative; display: flex; flex-direction: column; gap: 2px;
-  padding: 12px 12px 12px 40px; border-radius: 12px; border: 1.5px solid var(--ea-line);
+  padding-block: 12px; padding-inline: 40px 12px; border-radius: 12px; border: 1.5px solid var(--ea-line);
   background: #fff; cursor: pointer; min-height: 64px; justify-content: center;
   -webkit-tap-highlight-color: transparent; transition: border-color .15s, background .15s, box-shadow .15s;
 }
 .ea-opt input { position: absolute; opacity: 0; pointer-events: none; }
 .ea-opt-radio {
-  position: absolute; left: 13px; top: 50%; margin-top: -10px; width: 20px; height: 20px;
+  position: absolute; inset-inline-start: 13px; inset-block-start: 50%; margin-block-start: -10px; inline-size: 20px; block-size: 20px;
   border-radius: 50%; border: 2px solid #cbd5e1; background: #fff;
 }
 .ea-opt-label { font-size: 13px; font-weight: 700; color: var(--ea-muted); }
 .ea-opt-price { font-size: 16.5px; font-weight: 800; color: var(--ea-ink); font-variant-numeric: tabular-nums; }
 .ea-opt-each { font-size: 11.5px; color: #94a3b8; }
 .ea-opt-unavail { font-size: 13px; font-weight: 700; color: #94a3b8; }
+.ea-opt-when { font-size: 11.5px; font-weight: 600; color: var(--ea-muted); }
+/* The Store's alternative: never preselected, says it needs the customer's approval */
+.ea-opt-alt { grid-column: 1 / -1; border-style: dashed; border-color: #f3c27a; background: #fffbf3; }
+.ea-opt-flag {
+  align-self: flex-start; font-size: 10.5px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase;
+  color: #92400e; background: #fdf0d9; border-radius: 999px; padding-block: 2px; padding-inline: 8px; margin-block-end: 2px;
+}
+.ea-opt-alt.ea-opt-on { border-style: solid; }
+.ea-line-note { margin-block: 10px 0; font-size: 13px; color: #9a3412; background: var(--ea-orange-bg); border-radius: 10px; padding-block: 8px; padding-inline: 10px; line-height: 1.45; }
 .ea-opt-on { border-color: var(--ea-orange); background: var(--ea-orange-bg); box-shadow: 0 0 0 3px rgba(249,115,22,.14); }
 .ea-opt-on .ea-opt-radio { border-color: var(--ea-orange); background: radial-gradient(circle, var(--ea-orange) 0 5px, #fff 6px); }
 .ea-opt-on .ea-opt-label { color: #c2410c; }
@@ -203,8 +213,8 @@
   .ea-line { padding: 13px 12px; }
   .ea-line-actions { display: grid; grid-template-columns: 1fr 1.4fr; }
   .ea-btn { width: 100%; padding: 12px 10px; }
-  .ea-opt { padding-left: 36px; }
-  .ea-opt-radio { left: 11px; }
+  .ea-opt { padding-inline-start: 36px; }
+  .ea-opt-radio { inset-inline-start: 11px; }
   .ea-compare-amt { font-size: 17px; }
   .ea-sticky { border-radius: 0; }
 }

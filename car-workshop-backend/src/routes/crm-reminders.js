@@ -25,7 +25,7 @@ import { Router } from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { stripMarkup, clampText } from '../lib/sanitize.js';
-import { onEnquiryCreated } from '../lib/crm-cycle.js';
+import { onEnquiryCreated, openEnquiryWorkOrder } from '../lib/crm-cycle.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -516,7 +516,10 @@ router.post('/:id/send', async (req, res) => {
 
    The customer replied to the reminder (or called in): open an enquiry for
    the car with the reminder as its source, so it gets quoted and booked like
-   any other lead and counts in conversion by channel.
+   any other lead and counts in conversion by channel. Like every submitted
+   enquiry it gets its work order (the visit) at once (lib/crm-cycle.js
+   openEnquiryWorkOrder): work_order { id, work_order_number, created }, or
+   null if it could not be opened (the enquiry is kept; Convert opens it).
    ═══════════════════════════════════════════════════════════ */
 router.post('/:id/enquiry', async (req, res) => {
   try {
@@ -550,7 +553,11 @@ router.post('/:id/enquiry', async (req, res) => {
       [ins.insertId, id]);
     const [enq] = await query('SELECT * FROM enquiries WHERE id = ?', [ins.insertId]);
     await onEnquiryCreated(enq, req.user?.id);
-    return res.status(201).json({ success: true, data: { enquiry_id: ins.insertId, enquiry_number: enquiryNumber } });
+    const wo = await openEnquiryWorkOrder({ enquiryId: ins.insertId, workshopId: req.workshopId, userId: req.user?.id || null });
+    return res.status(201).json({
+      success: true, data: { enquiry_id: ins.insertId, enquiry_number: enquiryNumber },
+      work_order: wo ? { id: wo.workOrderId, work_order_number: wo.workOrderNumber, created: wo.created } : null,
+    });
   } catch (err) {
     console.error('[CRMReminders] reply→enquiry error:', err.message);
     return res.status(500).json({ success: false, message: 'Could not open the enquiry' });

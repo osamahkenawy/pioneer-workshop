@@ -7,9 +7,9 @@
  *
  * It is the customer's copy of what was recorded at the car — the damage
  * marked on the diagram (drawn read-only with the staff form's
- * CarDamageDiagram) or the uploaded paper form — and, when they did not sign
- * at the car, where they sign. Signing is once only; the server refuses a
- * second, and a cancelled job's link closes (410).
+ * CarDamageDiagram) and the vehicle photos, or the uploaded paper form — and,
+ * when they did not sign at the car, where they sign. Signing is once only;
+ * the server refuses a second, and a cancelled job's link closes (410).
  *
  * Words: t('inspectionLink.*', 'English default'); the damage codes and view
  * names are the staff form's (inspection.code.*, inspection.view.*), and the
@@ -88,6 +88,8 @@ export default function InspectionLink() {
   const docs = insp.documents || [];
   const markedViews = [...new Set(marks.map(m => m.view))];
   const docUrl = d => `${API_BASE}/public/inspections/${token}/documents/${d.id}`;
+  const photos = insp.photos || [];
+  const photoUrl = p => `${API_BASE}/public/inspections/${token}/photos/${p.id}`;
   const vehicleName = [v.make, v.model, v.year].filter(Boolean).join(' ');
 
   return (
@@ -176,6 +178,22 @@ export default function InspectionLink() {
                 </ol>
               </>
             )}
+          </section>
+        )}
+
+        {/* ── Vehicle photos taken at the car (on-screen form) ── */}
+        {insp.entry_mode !== 'document' && photos.length > 0 && (
+          <section className="il-section">
+            <h2>{t('inspectionLink.photos_n', 'Photos ({{n}})', { n: photos.length })}</h2>
+            <ul className="il-docs il-photos">
+              {photos.map(p => (
+                <li key={p.id} className="il-doc il-doc-img">
+                  <a href={photoUrl(p)} target="_blank" rel="noopener noreferrer">
+                    <img src={photoUrl(p)} alt={p.name || t('inspectionLink.photo', 'Vehicle photo')} loading="lazy" />
+                  </a>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 

@@ -48,8 +48,9 @@ function rolesFrom(capabilities = []) {
 }
 /** The capability the "next" action needs (to mark it "your turn"). */
 const NEXT_CAP = {
-  classify: 'job.open', intake: 'job.open', intake_missing: 'job.open', open_job_card: 'job.open', counter_needs_estimate: 'estimate.raise', create_estimate: 'estimate.raise', create_estimate_from_inspection: 'estimate.raise', price_labour: 'estimate.raise',
-  send_estimate: 'estimate.raise', price_parts: 'estimate.price_parts', approve_estimate: 'estimate.approve', record_approval: 'customer.approval',
+  classify: 'job.open', intake: 'job.open', intake_missing: 'job.open', open_job_card: 'job.open',
+  physical_inspection: 'job.open', finish_physical_inspection: 'job.open', send_inspection_link: 'estimate.raise', counter_needs_estimate: 'estimate.raise', create_estimate: 'estimate.raise', create_estimate_from_inspection: 'estimate.raise', price_labour: 'estimate.raise',
+  send_estimate: 'estimate.raise', price_parts: 'estimate.price_parts', price_parts_categories: 'estimate.price_parts', approve_estimate: 'estimate.approve', record_approval: 'customer.approval',
   assign: 'job.assign', parts_waiting: 'store.issue', work: 'time.book', qc_failed: 'job.assign', qc: 'qc.perform',
   contact: 'delivery.handover', payment: 'delivery.handover', gate_pass: 'delivery.handover', close: 'delivery.handover', rejected_all: 'customer.approval',
 };
@@ -197,11 +198,9 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
   /** The next-step bar's Go: open the page the step needs, or point at it here. */
   const goNext = () => {
     const action = data.next?.action;
-    if (action === 'create_estimate' && roles.estimate) {
-      const intake = data.inspections.find(i => i.inspection_type === 'intake');
-      if (intake?.status !== 'completed') { navigate(`/work-orders/${wo.id}/inspection?type=intake`); return; }
-      if (!data.estimate) { navigate(`/estimates?new=1&wo=${wo.id}`); return; }
-    }
+    // Step 3: the physical inspection (walk-around, photos, the customer's signature, the link).
+    if (action === 'inspect') { navigate(`/work-orders/${wo.id}/inspection?type=intake`); return; }
+    if (action === 'create_estimate' && roles.estimate && !data.estimate) { navigate(`/estimates?new=1&wo=${wo.id}`); return; }
     if (action === 'open_estimate' && data.estimate?.id && hasModule(user, 'estimates')) {
       navigate(`/estimates?id=${data.estimate.id}`);
       return;
@@ -218,7 +217,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
           <h3 className="wf-title">
             {wo.status === 'cancelled' ? t('workflow.cancelled', 'Job closed — no work carried out')
               : wo.status === 'completed' ? t('workflow.closed', 'Job closed')
-              : data.current_step ? `${t('workflow.step', 'Step')} ${data.current_step} · ${t(`workflow.steps.${steps[data.current_step - 1].key}`, steps[data.current_step - 1].title)}` : ''}
+              : data.current_step ? `${t('workflow.step', 'Step')} ${data.current_step} · ${stepTitle(t, steps[data.current_step - 1])}` : ''}
           </h3>
         </div>
         <div className="wf-meter" title={`${doneCount}/7`}>
@@ -236,7 +235,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
               <button onClick={() => setSelected(s.n)} aria-current={s.state === 'current' ? 'step' : undefined}>
                 <span className="wf-dot">{s.state === 'done' ? <Check width={16} height={16} strokeWidth={2.4} /> : s.state === 'stopped' ? <Xmark width={15} height={15} /> : <Icon width={15} height={15} />}</span>
                 <span className="wf-step-n">{s.n}</span>
-                <span className="wf-step-title">{t(`workflow.steps.${s.key}`, s.title)}</span>
+                <span className="wf-step-title">{stepTitle(t, s)}</span>
                 <span className="wf-step-sum">{tx(s.summary_i18n, s.summary)}</span>
               </button>
             </li>
@@ -260,13 +259,13 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
       <div className="wf-panel" key={step.n} ref={panelRef}>
         <div className="wf-panel-head">
           <span className={`wf-chip is-${step.state}`}>{stateLabel(step.state, t)}</span>
-          <h4>{step.n}. {t(`workflow.steps.${step.key}`, step.title)}</h4>
+          <h4>{step.n}. {stepTitle(t, step)}</h4>
         </div>
         <ul className="wf-checks">
           {step.checks.map(c => (
             <li key={c.key || c.label} className={c.done ? 'ok' : ''}>
               <span className="wf-check-ico">{c.done ? <Check width={13} height={13} strokeWidth={2.6} /> : null}</span>
-              <span className="wf-check-label">{t(`workflow.chk.${c.key}`, c.label)}</span>
+              <span className="wf-check-label">{t(`workflow.chk.${c.label_key || c.key}`, c.label)}</span>
               {c.detail && <span className="wf-check-detail">{tx(c.detail_i18n, c.detail)}</span>}
             </li>
           ))}
@@ -278,18 +277,14 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
           onEditWizard={() => navigate(`/work-orders?edit=${wo.id}`)}
           onSaved={(msg, partial) => { if (!partial) setToast({ kind: 'good', text: msg }); load(true); onChanged?.(); }} />}
         {step.key === 'job_card' && (
-          <JobCardList data={data} t={t} compact>
-            {!data.job_cards.length && !closed && roles.open && (
-              <button className="wf-btn primary" disabled={busy === 'open'} onClick={() => act('open', () => api.post(`/workflow/work-orders/${wo.id}/job-card`), t('workflow.jc_opened', 'Main job card opened'))}>
-                <Plus width={15} height={15} /> {t('workflow.open_jc', 'Open the main job card')}
-              </button>
-            )}
-          </JobCardList>
+          <PhysicalBody data={data} t={t} closed={closed} mayOpen={roles.open} canOverride={!!data.you?.can_override_job_card}
+            busy={busy} onInspect={() => navigate(`/work-orders/${wo.id}/inspection?type=intake`)}
+            onOpen={() => act('open', () => api.post(`/workflow/work-orders/${wo.id}/job-card`), t('workflow.jc_opened', 'Main job card opened'))}
+            onOverride={() => setModal({ type: 'override' })} />
         )}
         {(step.key === 'inspection_pricing' || step.key === 'estimate') && (
           <EstimateBody data={data} t={t} money={money} closed={closed} step={step.key} canRaise={roles.estimate}
             canOpen={hasModule(user, 'estimates')}
-            onInspect={() => navigate(`/work-orders/${wo.id}/inspection?type=intake`)}
             onNew={() => navigate(`/estimates?new=1&wo=${wo.id}`)}
             onOpen={id => navigate(`/estimates?id=${id}`)} />
         )}
@@ -304,6 +299,9 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
 
       {toast && <div className={`wf-toast ${toast.kind}`} role="status">{toast.text}</div>}
 
+      {modal?.type === 'override' && <OverrideModal t={t} onClose={() => setModal(null)}
+        onSave={reason => act('override', () => api.post(`/workflow/work-orders/${wo.id}/job-card`, { override_reason: reason }),
+          t('workflow.pi_override_done', 'Main job card opened without the customer\'s acknowledgement')).then(r => r?.success !== false && setModal(null))} />}
       {modal?.type === 'classify' && <ClassifyModal t={t} wo={wo} manager={isManager(user)} onClose={() => setModal(null)}
         onSave={(cls, sub) => act('classify', () => api.put(`/customers/${wo.customer_id}`,
           // A non-manager only fills in the missing subcategory (the class stays as it is).
@@ -327,8 +325,13 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
   );
 }
 
+/** A step's title: the server's title_key names the translation when a step was renamed (its key stays). */
+function stepTitle(t, s) {
+  return t(`workflow.steps.${s.title_key || s.key}`, s.title);
+}
+
 function actionStep(action, current) {
-  return ({ classify: 1, edit: 2, open_job_card: 3, create_estimate: 4, price_parts: 4, open_estimate: 5, record_approval: 6, assign: 6, parts: 6, time: 6,
+  return ({ classify: 1, edit: 2, open_job_card: 3, inspect: 3, create_estimate: 4, price_parts: 4, open_estimate: 5, record_approval: 6, assign: 6, parts: 6, time: 6,
     qc: 7, contact: 7, invoice: 7, gate_pass: 7, close: 7 })[action] || current || 1;
 }
 function stateLabel(s, t) {
@@ -554,6 +557,72 @@ function IntakeFix({ t, wo, full, missing, lastKm, mayFix, onEditWizard, onSaved
 }
 
 /* ── Step 3 ─────────────────────────────────────────────────────────── */
+/** "Signed at the car by Sara · 29 Oct, 10:42" — how the customer acknowledged the physical inspection. */
+function ackLine(t, p) {
+  const name = p.signed_by_name;
+  const when = p.signed_at ? ` · ${String(p.signed_at).replace('T', ' ').slice(0, 16)}` : '';
+  if (p.via === 'paper') return t('workflow.pi_paper', 'Acknowledged on the paper form (uploaded)');
+  const line = ({
+    on_site: name ? t('workflow.pi_on_site_by', 'Signed at the car by {{name}}', { name }) : t('workflow.pi_on_site', 'Signed at the car'),
+    link: name ? t('workflow.pi_link_by', 'Signed from the link by {{name}}', { name }) : t('workflow.pi_link', 'Signed from the link'),
+    portal: name ? t('workflow.pi_portal_by', 'Signed in the customer portal by {{name}}', { name }) : t('workflow.pi_portal', 'Signed in the customer portal'),
+  })[p.via] || t('workflow.pi_signed', 'Signed by the customer');
+  return line + when;
+}
+
+/**
+ * Step 3: the physical inspection with the customer, then the main job card.
+ * An external customer's card opens by itself when they acknowledge the
+ * inspection (signed at the car, from the link or in the portal, or the paper
+ * form); a manager may open it without that, giving a reason. An internal
+ * customer's opens with the job.
+ */
+function PhysicalBody({ data, t, closed, mayOpen, canOverride, busy, onInspect, onOpen, onOverride }) {
+  const p = data.physical_inspection || { needed: false, status: 'none' };
+  const hasCard = data.job_cards.length > 0;
+  const waiting = p.needed && !p.acknowledged && !p.override && !hasCard;
+  // An internal customer who did one anyway sees how it was signed.
+  const state = p.acknowledged ? ackLine(t, p)
+    : !p.needed ? t('workflow.pi_internal', 'Internal customer — no physical inspection needed; the job card opens with the job.')
+    : p.override ? t('workflow.pi_overridden', 'Job card opened by {{name}} without the customer\'s acknowledgement: {{reason}}', { name: p.override.by || t('workflow.a_manager', 'a manager'), reason: p.override.reason || '—' })
+    : hasCard ? t('workflow.pi_before_rule', 'The job card was opened before the acknowledgement was required.')
+    : p.status === 'none' ? t('workflow.pi_none', 'Not started. Walk round the car with the customer: its condition, any damage, photos — and their signature.')
+    : p.status === 'draft' ? t('workflow.pi_draft', 'In progress — finish it and ask the customer to sign.')
+    : p.shared_at ? t('workflow.pi_link_sent', 'Completed — waiting for the customer\'s signature (link sent {{when}}).', { when: String(p.shared_at).replace('T', ' ').slice(0, 16) })
+    : t('workflow.pi_unsigned', 'Completed, not signed yet — send the customer the link from the inspection page.');
+  // Only the roles that open job cards record it; the others may look once it has begun.
+  const inspectLabel = !mayOpen ? t('workflow.pi_view', 'View the physical inspection')
+    : p.status === 'none' ? t('workflow.pi_start', 'Start the physical inspection')
+    : p.status === 'draft' ? t('workflow.pi_continue', 'Continue the physical inspection')
+    : waiting ? t('workflow.pi_send', 'Send the link to sign')
+    : t('workflow.pi_view', 'View the physical inspection');
+  return (
+    <JobCardList data={data} t={t}>
+      <p className={waiting ? 'wf-warn' : 'wf-note'}>{state}</p>
+      {waiting && <p className="wf-note">{t('workflow.pi_opens_itself', 'The main job card opens by itself once the customer has acknowledged the inspection — the floor is told then.')}</p>}
+      {!closed && (
+        <div className="wf-row">
+          {(p.needed || p.status !== 'none') && (mayOpen || p.status !== 'none') && (
+            <button className={`wf-btn ${waiting && mayOpen ? 'primary' : 'ghost'}`} onClick={onInspect}>
+              <Search width={15} height={15} /> {inspectLabel}
+            </button>
+          )}
+          {!hasCard && mayOpen && !waiting && (
+            <button className="wf-btn primary" disabled={busy === 'open'} onClick={onOpen}>
+              <Plus width={15} height={15} /> {t('workflow.open_jc', 'Open the main job card')}
+            </button>
+          )}
+          {waiting && canOverride && (
+            <button className="wf-btn ghost" disabled={busy === 'override'} onClick={onOverride}>
+              <WarningTriangle width={15} height={15} /> {t('workflow.pi_override', 'Open without the acknowledgement…')}
+            </button>
+          )}
+        </div>
+      )}
+    </JobCardList>
+  );
+}
+
 function JobCardList({ data, t, children }) {
   return (
     <div className="wf-body">
@@ -578,31 +647,34 @@ function JobCardList({ data, t, children }) {
 }
 
 /* ── Steps 4–5 ──────────────────────────────────────────────────────── */
-function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onInspect, onNew, onOpen }) {
+function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, onOpen }) {
   const est = data.estimate;
-  const insp = data.inspections.find(i => i.inspection_type === 'intake');
   const counter = !est && data.job_cards.length && data.steps[3].done;
+  // The customer's parts preference and the totals per category (Genuine /
+  // After-Market / Used) come with the estimate itself (GET /estimates/:id,
+  // the same summary as lib/workflow.js); until it loads, the workflow's own.
+  const [full, setFull] = useState(null);
+  useEffect(() => {
+    if (!est?.id) { setFull(null); return undefined; }
+    let live = true;
+    api.get(`/estimates/${est.id}`).then(r => { if (live && r?.success) setFull(r); }).catch(() => {});
+    return () => { live = false; };
+  }, [est?.id, est?.status, est?.total_amount]);
+  const pricing = (full?.estimate?.id === est?.id && full?.pricing) || est?.pricing || null;
+  const pref = pricing?.preference || ['genuine', 'after_market'];
+  const CAT = { genuine: t('workflow.cat_genuine', 'Genuine'), after_market: t('workflow.cat_after_market', 'After-Market'), used: t('workflow.cat_used', 'Used') };
+  const catTotal = (row, c) => row?.totals?.[c] ?? (c === 'genuine' ? row?.total_genuine : c === 'after_market' ? row?.total_after_market : null);
+  const alternatives = pricing?.alternatives || [];
+  const hasParts = (pricing?.partLines || 0) > 0;
   return (
     <div className="wf-body">
-      {step === 'inspection_pricing' && (
+      {/* The physical inspection (walk-around, signature, link) is Step 3's; the
+          technical inspection's own fields are still to come from the client,
+          so Step 4 starts with the estimate and its findings. */}
+      {step === 'inspection_pricing' && !est && !closed && canRaise && (
         <div className="wf-row">
-          <button className="wf-btn ghost" onClick={onInspect}><Search width={15} height={15} /> {insp?.status === 'completed' ? t('workflow.view_inspection', 'View intake inspection') : t('workflow.do_inspection', 'Technical inspection')}</button>
-          {!est && !closed && canRaise && <button className="wf-btn primary" onClick={onNew}><Plus width={15} height={15} /> {t('workflow.raise_estimate', 'Raise the estimate')}</button>}
+          <button className="wf-btn primary" onClick={onNew}><Plus width={15} height={15} /> {t('workflow.raise_estimate', 'Raise the estimate')}</button>
         </div>
-      )}
-      {step === 'inspection_pricing' && insp?.status === 'completed' && (
-        <p className="wf-note">
-          {insp.signed_at
-            ? t('workflow.insp_signed', 'Signed by {{name}} ({{via}})', {
-              name: insp.signed_by_name || '—',
-              via: insp.signed_via === 'link' ? t('workflow.insp_via_link', 'from the link')
-                : insp.signed_via === 'portal' ? t('workflow.insp_via_portal', 'in the customer portal')
-                : t('workflow.insp_via_on_site', 'at the car'),
-            })
-            : insp.shared_at
-              ? t('workflow.insp_waiting_sig', 'Waiting for the customer’s signature (link sent)')
-              : t('workflow.insp_not_sent', 'Not signed yet — send the customer the link')}
-        </p>
       )}
       {counter ? <p className="wf-note">{t('workflow.counter_priced', 'This job card was priced at the counter when it was opened; no separate estimate.')}</p> : null}
       {est && (
@@ -610,40 +682,54 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onInspe
           <div className="wf-est-head">
             <div>
               <strong>{est.estimate_number}</strong>
-              <span className="wf-muted"> · {String(est.status).replace(/_/g, ' ')}{est.estimate_format ? ` · ${({ genuine: 'Format 1 — Genuine', after_market: 'Format 2 — After-Market', both: 'Format 3 — both' })[est.estimate_format]}` : ''}</span>
+              <span className="wf-muted"> · {String(est.status).replace(/_/g, ' ')}{hasParts ? ` · ${t('workflow.parts_pref', 'Parts: {{cats}}', { cats: pref.map(c => CAT[c]).join(', ') })}` : ''}</span>
             </div>
             {/* The Estimates page is a menu module (the Team Leader's role has none) */}
             {canOpen && <button className="wf-btn ghost sm" onClick={() => onOpen(est.id)}>{t('workflow.open_estimate', 'Open estimate')} <NavArrowRight width={14} height={14} /></button>}
           </div>
-          {est.pricing?.jobs?.length > 0 && (
+          {pricing?.jobs?.length > 0 && (
             <div className="wf-table-wrap">
+              {/* The total per category of the preference — a part not available in it is left out (N/A), never priced in another type */}
               <table className="wf-table">
                 <thead>
                   <tr>
                     <th>{t('workflow.job', 'Job')}</th><th>{t('workflow.labour', 'Labour')}</th>
-                    <th>{t('workflow.genuine', 'Genuine')}</th><th>{t('workflow.after_market', 'After-Market')}</th>
-                    <th>{t('workflow.total_genuine', 'Total Genuine')}</th><th>{t('workflow.total_am', 'Total After-Market')}</th>
+                    {pref.map(c => <th key={c}>{t('workflow.total_cat', 'Total {{cat}}', { cat: CAT[c] })}</th>)}
+                    {alternatives.length > 0 && <th>{t('workflow.alternative', 'Alternative')}</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {est.pricing.jobs.map(j => (
-                    <tr key={j.job}>
-                      <td>{j.job}</td>
-                      <td>{money(j.labour)}</td>
-                      <td>{j.genuine_na ? <span className="wf-na">N/A</span> : money(j.genuine_parts)}</td>
-                      <td>{j.after_market_na ? <span className="wf-na">N/A</span> : money(j.after_market_parts)}</td>
-                      <td className="b">{money(j.total_genuine)}</td>
-                      <td className="b">{money(j.total_after_market)}</td>
-                    </tr>
-                  ))}
+                  {pricing.jobs.map(j => {
+                    const alt = alternatives.filter(a => a.job === j.job);
+                    return (
+                      <tr key={j.job}>
+                        <td>{j.job}</td>
+                        <td>{money(j.labour)}</td>
+                        {pref.map(c => (
+                          <td key={c} className="b">{money(catTotal(j, c))}{(j.na?.[c] ?? (c === 'genuine' ? j.genuine_na : c === 'after_market' ? j.after_market_na : false))
+                            && <> <span className="wf-na" title={t('workflow.na_cat', 'A part is not available in {{cat}}', { cat: CAT[c] })}>N/A</span></>}</td>
+                        ))}
+                        {alternatives.length > 0 && (
+                          <td>{alt.length ? `${money(alt.reduce((s, a) => s + Number(a.amount || 0), 0))} · ${alt.map(a => CAT[a.option]).join(', ')}` : '—'}</td>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot>
-                  <tr><td colSpan={4}>{t('workflow.before_vat', 'Total before VAT')}</td><td className="b">{money(est.pricing.total_genuine)}</td><td className="b">{money(est.pricing.total_after_market)}</td></tr>
+                  <tr>
+                    <td colSpan={2}>{t('workflow.before_vat', 'Total before VAT')}</td>
+                    {pref.map(c => <td key={c} className="b">{money(catTotal(pricing, c))}</td>)}
+                    {alternatives.length > 0 && <td />}
+                  </tr>
                 </tfoot>
               </table>
             </div>
           )}
-          {est.pricing?.unpricedParts > 0 && <p className="wf-warn"><Box3dPoint width={14} height={14} /> {t('workflow.waiting_store', '{{n}} part line(s) waiting for the Storekeeper', { n: est.pricing.unpricedParts })}</p>}
+          {alternatives.length > 0 && (
+            <p className="wf-note">{t('workflow.alternatives_offered', '{{n}} part(s) not available as asked — the Store offered an alternative; it counts only if the customer approves it.', { n: alternatives.length })}</p>
+          )}
+          {pricing?.unpricedParts > 0 && <p className="wf-warn"><Box3dPoint width={14} height={14} /> {t('workflow.waiting_store', '{{n}} part line(s) waiting for the Storekeeper', { n: pricing.unpricedParts })}</p>}
           {est.customer_notes && <p className="wf-note">{t('workflow.customer_said', 'Customer')}: {est.customer_notes}</p>}
         </>
       )}
@@ -966,6 +1052,23 @@ function Modal({ title, onClose, children, footer }) {
         {footer && <div className="wf-modal-foot">{footer}</div>}
       </div>
     </div>
+  );
+}
+
+/** A manager opens an external job's card without the customer's acknowledgement — the reason goes in the job's history. */
+function OverrideModal({ t, onClose, onSave }) {
+  const [reason, setReason] = useState('');
+  return (
+    <Modal title={t('workflow.pi_override_title', 'Open the job card without the acknowledgement')} onClose={onClose}
+      footer={<><button className="wf-btn ghost" onClick={onClose}>{t('common.cancel', 'Cancel')}</button>
+        <button className="wf-btn primary" disabled={!reason.trim()} onClick={() => onSave(reason.trim())}>{t('workflow.open_jc', 'Open the main job card')}</button></>}>
+      <p className="wf-note" style={{ marginBottom: 10 }}>
+        {t('workflow.pi_override_hint', 'The customer has not acknowledged the physical inspection. Say why the job card has to open anyway — it is recorded in the job\'s history.')}
+      </p>
+      <label className="wf-label">{t('workflow.pi_override_reason', 'Reason')}
+        <textarea className="wf-input" rows={3} maxLength={500} autoFocus value={reason} onChange={e => setReason(e.target.value)} />
+      </label>
+    </Modal>
   );
 }
 

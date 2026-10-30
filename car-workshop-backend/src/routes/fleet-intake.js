@@ -18,11 +18,17 @@
  *      The token says which fleet is submitting, which is why the form never
  *      asks them to pick a customer — they could only get it wrong.
  *
- *   2. A submission is a request, not a work order. Some are duplicates of a
- *      car already in the bay, some are rejected. Writing them straight into
- *      work_orders would put rejected rows into every count, every dashboard
- *      and every month-end figure, so they live in their own table until a
- *      human converts them.
+ *   2. A submission is a request AND its work order. The client asked for
+ *      the work order to exist as soon as the enquiry is submitted (e-mail,
+ *      2026-10-29), so each submission opens one (Received via: Fleet
+ *      coordinator link), on the fleet's matched car or — a car we do not
+ *      hold yet — without one. The request row keeps what the coordinator
+ *      typed for the advisor's review: "Book in" (convert) attaches or adds
+ *      the car on that same work order and marks the request converted, and
+ *      a rejection cancels the work order while nothing has happened on it.
+ *      The main job card follows the usual rule: at once for an internal
+ *      fleet, after the physical inspection for an external one
+ *      (lib/physical-inspection.js).
  */
 
 import express from 'express';
@@ -32,10 +38,11 @@ import { authMiddleware } from '../middleware/auth.js';
 import { stripMarkupFields, clampTextFields } from '../lib/sanitize.js';
 import { logAudit } from '../lib/audit.js';
 import { notifyWorkOrderStatus, sendCustomNotification } from '../lib/notify.js';
-import { ensureMainJobCard, notifyGroups } from '../lib/workflow.js';
+import { notifyGroups, fulfilReminders } from '../lib/workflow.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { requireCapability } from '../lib/roles.js';
 import { serviceStatusToken } from '../lib/tokens.js';
-import { payerTypeForClass, snapshotIntakeClass } from '../lib/crm-cycle.js';
+import { payerTypeForClass, snapshotIntakeClass, cancelUnstartedWorkOrder } from '../lib/crm-cycle.js';
 
 const IDENTITY = [
   'plate_number', 'plate_code', 'plate_emirate', 'make', 'model', 'color',
@@ -190,6 +197,99 @@ function parseExpiry(raw) {
   return { value };
 }
 
+const VALID_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service',
+  'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
+const VALID_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
+const fleetRef = id => `FI-${String(id).padStart(6, '0')}`;
+
+/**
+ * The work order for a fleet request (`row`: the fleet_intake_requests row),
+ * on `conn` inside the caller's transaction: Received via the fleet link,
+ * the fleet account as the customer, the car when we hold it (`vehicleId`),
+ * the reading, the complaint with the fleet's own references, and who
+ * hears about the job. Returns { workOrderId, work_order_number }.
+ */
+async function insertFleetWorkOrder(conn, row, { customer, vehicleId = null, userId = null, category, type, scheduledAt = null }) {
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+
+  // Their own reference is kept in the description, not just in a column:
+  // it is the first thing the fleet quotes when they call to chase, and an
+  // advisor should see it without opening another panel.
+  const descParts = [row.complaint];
+  if (row.external_ref) descParts.push(`[Fleet ref: ${row.external_ref}]`);
+  if (row.work_type) descParts.push(`[Work type: ${row.work_type}]`);
+
+  const notesParts = [];
+  if (row.driver_name) notesParts.push(`Driver: ${row.driver_name}${row.driver_phone ? ` (${row.driver_phone})` : ''}`);
+  if (row.permit_id) notesParts.push(`Permit ID: ${row.permit_id}`);
+  if (row.submitted_by) notesParts.push(`Submitted by: ${row.submitted_by}`);
+  notesParts.push(`Fleet intake ${fleetRef(row.id)}`);
+
+  // Who hears about this job (the "order placed" message, the pickup call):
+  // the coordinator the link was issued to, else the account's own number
+  // when it has one (fleet accounts are often on file with '-'), else the
+  // driver the coordinator named.
+  const hasDigits = p => /\d{7,}/.test(String(p || '').replace(/\D/g, ''));
+  const [[link]] = row.link_id
+    ? await conn.query('SELECT contact_name, contact_phone FROM fleet_intake_links WHERE id = ?', [row.link_id]) : [[null]];
+  const contactPhone = [link?.contact_phone, customer.phone, row.driver_phone].find(hasDigits) || customer.phone || null;
+  if (link?.contact_name && hasDigits(link.contact_phone)) notesParts.push(`Coordinator: ${link.contact_name} (${link.contact_phone})`);
+
+  // Numbers are a random draw per day; a collision draws again.
+  let workOrderId = null; let work_order_number = null;
+  for (let attempt = 0; attempt < 6 && !workOrderId; attempt++) {
+    const number = `WO-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
+    try {
+      const [woIns] = await conn.query(
+        `INSERT INTO work_orders
+           (workshop_id, work_order_number, customer_id, vehicle_id, odometer_in,
+            intake_channel, fleet_intake_id, work_order_type, service_category,
+            customer_name, customer_phone, customer_email, payer_type,
+            description, scheduled_at, status, service_status_token, notes)
+         VALUES (?, ?, ?, ?, ?, 'fleet_link', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        [row.workshop_id, number, row.customer_id, vehicleId, row.odometer,
+         row.id, VALID_TYPES.includes(type) ? type : 'standard', VALID_CATEGORIES.includes(category) ? category : 'general_maintenance',
+         customer.full_name, contactPhone, customer.email || null,
+         // A fleet account is billed on account (Step 1 classification).
+         payerTypeForClass(customer.customer_class, customer.customer_subcategory),
+         descParts.join(' '),
+         scheduledAt || row.preferred_date || null,
+         serviceStatusToken(),
+         notesParts.join(' | ')]
+      );
+      workOrderId = woIns.insertId; work_order_number = number;
+    } catch (e) {
+      if (e.code !== 'ER_DUP_ENTRY' || !/work_order_number/.test(e.message)) throw e;
+    }
+  }
+  if (!workOrderId) throw new Error('Could not allocate a work order number');
+  await snapshotIntakeClass(workOrderId, { conn });
+  await conn.query(
+    'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
+    [workOrderId, 'pending', userId, `Created from fleet intake ${fleetRef(row.id)}`]
+  );
+  // Same monotonic guard as the counter path — a fleet submitting a reading
+  // lower than the last one we took must not wind the vehicle backwards.
+  if (vehicleId && row.odometer != null) {
+    await conn.query('UPDATE vehicles SET mileage = ? WHERE id = ? AND (mileage IS NULL OR mileage < ?)', [row.odometer, vehicleId, row.odometer]);
+  }
+  return { workOrderId, work_order_number };
+}
+
+/** After the commit: the job card when the rule allows (an internal fleet), and the "order placed" message. Never throws. */
+async function announceFleetWorkOrder({ workOrderId, workshopId, userId = null }) {
+  const jc = await openJobCardIfReady({ workOrderId, workshopId, userId })
+    .catch(e => { console.error('[FleetIntake] main job card:', e.message); return null; });
+  if (!jc?.opened) fulfilReminders({ workshopId, workOrderId });
+  const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
+  if (workOrder) {
+    notifyWorkOrderStatus({ order: workOrder, status: 'pending', workshopId, changedBy: userId })
+      .catch(e => console.error('[FleetIntake] Notify error:', e.message));
+  }
+  return jc;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    PUBLIC ROUTER — no login. Mounted at /api/public/fleet-intake
    ═══════════════════════════════════════════════════════════════════════ */
@@ -334,16 +434,27 @@ publicRouter.post('/:token', async (req, res) => {
       'UPDATE fleet_intake_links SET last_used_at = NOW(), submission_count = submission_count + 1 WHERE id = ?',
       [link.id]
     );
+
+    // The work order, now (see the top of this file): on the fleet's own car
+    // when we hold it; a car we do not is added when the request is booked in.
+    const [[request]] = await conn.query('SELECT * FROM fleet_intake_requests WHERE id = ?', [result.insertId]);
+    const [[account]] = await conn.query(
+      'SELECT id, full_name, phone, email, customer_class, customer_subcategory FROM customers WHERE id = ?', [link.customer_id]);
+    const { workOrderId, work_order_number } = await insertFleetWorkOrder(conn, request, {
+      customer: account, vehicleId: vehicle ? vehicle.id : null, category: 'general_maintenance', type: 'standard',
+    });
+    await conn.query('UPDATE fleet_intake_requests SET work_order_id = ? WHERE id = ?', [workOrderId, request.id]);
     await conn.commit();
 
-    const reference = `FI-${String(result.insertId).padStart(6, '0')}`;
+    const reference = fleetRef(result.insertId);
+    await announceFleetWorkOrder({ workOrderId, workshopId: link.workshop_id });
     // Step 2 → 3: the desk that books requests in is told one is waiting,
     // instead of it sitting unseen until someone opens the Fleet Intake page.
     // Fire and forget — a notification failure must not fail the fleet's submit.
     notifyGroups(link.workshop_id, ['service_advisor', 'manager'], {
       title: `Fleet request ${reference} · ${f.plate_number || f.fleet_code}`,
-      body: `${link.customer_name}: ${String(f.complaint).slice(0, 120)}`,
-      link: '/fleet-intake', icon: '🚚', type: 'fleet_intake_submitted',
+      body: `${link.customer_name}: ${String(f.complaint).slice(0, 120)} — work order ${work_order_number}${vehicle ? '' : ' (car not on file yet: confirm it when booking in)'}`,
+      link: '/fleet-intake', orderId: workOrderId, icon: '🚚', type: 'fleet_intake_submitted',
     }).catch(e => console.error('[FleetIntake] notify error:', e.message));
 
     // The reference is what the coordinator writes on their own paperwork,
@@ -608,9 +719,9 @@ router.get('/:id', async (req, res) => {
     }
     // The VIN is on another customer's car: for the advisor to settle.
     const vin_conflict = vehicle ? null : await findVinConflict(req.workshopId, row.customer_id, row.vin);
-    // The car is already with us on an open job card.
+    // The car is already with us on another open job card (not the request's own).
     const open_work_orders = vehicle && row.status !== 'converted'
-      ? await openWorkOrdersFor(req.workshopId, vehicle.id) : [];
+      ? (await openWorkOrdersFor(req.workshopId, vehicle.id)).filter(o => o.id !== row.work_order_id) : [];
 
     // Where our record and their form disagree. This is the part an advisor
     // actually needs to look at: overwriting silently is how a fleet's own
@@ -673,6 +784,12 @@ router.post('/:id/review', async (req, res) => {
       oldValue: { status: row.status },
       newValue: { status: decision, plate_number: row.plate_number, vin: row.vin },
     });
+    // Rejected: its work order goes too, while nothing has happened on it.
+    const workOrder = decision === 'rejected' && row.work_order_id
+      ? await cancelUnstartedWorkOrder({
+        workshopId: req.workshopId, workOrderId: row.work_order_id, userId: req.user.id,
+        note: `Fleet request ${fleetRef(row.id)} rejected: ${String(review_note).trim().slice(0, 300)}`,
+      }) : null;
 
     // The reason goes back to the coordinator who sent it, quoting their
     // reference — a rejection nobody at the fleet hears about fixes nothing.
@@ -690,7 +807,10 @@ router.post('/:id/review', async (req, res) => {
       }
     }
 
-    return res.json({ success: true, message: decision === 'accepted' ? 'Accepted' : `Rejected${told ? ' — the coordinator has been sent the reason' : ''}`, coordinator_notified: told });
+    return res.json({
+      success: true, message: decision === 'accepted' ? 'Accepted' : `Rejected${told ? ' — the coordinator has been sent the reason' : ''}`, coordinator_notified: told,
+      ...(workOrder ? { work_order: { work_order_number: workOrder.workOrderNumber, cancelled: workOrder.cancelled, kept_open: workOrder.live } } : {}),
+    });
   } catch (err) {
     console.error('[FleetIntake] Review error:', err);
     return res.status(500).json({ success: false, message: 'Failed to record the decision' });
@@ -698,7 +818,14 @@ router.post('/:id/review', async (req, res) => {
 });
 
 /**
- * POST /api/fleet-intake/:id/convert — turn a submission into a job card.
+ * POST /api/fleet-intake/:id/convert — book the request in.
+ *
+ * The request already has its work order (opened when it was submitted):
+ * booking in works on that one and never opens a second. When it has its
+ * car, this only marks the request converted and returns it (200,
+ * reused: true); when the car was not on file, the vehicle is matched or
+ * added here (the options below) and put on that work order. A request
+ * from before work orders were opened on submission gets one now (201).
  *
  * Body (all optional):
  *   vehicle_id        — confirm the match, or pick a different vehicle of
@@ -713,7 +840,8 @@ router.post('/:id/review', async (req, res) => {
  * Runs as one transaction. Half a conversion — a vehicle created but no job
  * card, or a job card with the request still showing as waiting — is worse
  * than a clean failure, because the queue then lies to whoever looks at it
- * next.
+ * next. The main job card follows the usual rule afterwards (internal fleet
+ * at once, external after the physical inspection).
  */
 router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
   // First transaction in the codebase — everything else runs statement by
@@ -746,6 +874,22 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
     if (row.status === 'rejected') {
       await conn.rollback();
       return res.status(409).json({ success: false, message: 'This request was rejected. Accept it first if you want to book it in.' });
+    }
+
+    // The work order opened when the request was submitted, while it is open.
+    const [[existingWo]] = await conn.query(
+      "SELECT id, work_order_number, vehicle_id FROM work_orders WHERE id = ? AND workshop_id = ? AND status NOT IN ('completed','cancelled') FOR UPDATE",
+      [row.work_order_id || 0, req.workshopId]);
+    if (existingWo?.vehicle_id) {
+      await conn.query(
+        "UPDATE fleet_intake_requests SET status = 'converted', vehicle_id = COALESCE(vehicle_id, ?), reviewed_by = ?, reviewed_at = NOW() WHERE id = ?",
+        [existingWo.vehicle_id, req.user.id, row.id]);
+      await conn.commit();
+      return res.json({
+        success: true, reused: true,
+        data: { work_order_id: existingWo.id, work_order_number: existingWo.work_order_number, vehicle_id: existingWo.vehicle_id },
+        message: `Booked in on job card ${existingWo.work_order_number}`,
+      });
     }
 
     const {
@@ -886,80 +1030,22 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'This request has no mileage reading. Add one before booking it in.' });
     }
 
-    /* ── The job card ── */
-    const VALID_CATEGORIES = ['oil_change', 'brake_repair', 'diagnostic', 'bodywork', 'tire_service',
-      'engine_repair', 'transmission', 'electrical', 'general_maintenance', 'other'];
-    const VALID_TYPES = ['standard', 'express', 'same_day', 'scheduled', 'warranty'];
-    const _cat = VALID_CATEGORIES.includes(service_category) ? service_category : 'general_maintenance';
-    const _type = VALID_TYPES.includes(work_order_type) ? work_order_type : 'standard';
-
-    const d = new Date();
-    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-
-    // Their own reference is kept in the description, not just in a column:
-    // it is the first thing the fleet quotes when they call to chase, and an
-    // advisor should see it without opening another panel.
-    const descParts = [row.complaint];
-    if (row.external_ref) descParts.push(`[Fleet ref: ${row.external_ref}]`);
-    if (row.work_type) descParts.push(`[Work type: ${row.work_type}]`);
-
-    const notesParts = [];
-    if (row.driver_name) notesParts.push(`Driver: ${row.driver_name}${row.driver_phone ? ` (${row.driver_phone})` : ''}`);
-    if (row.permit_id) notesParts.push(`Permit ID: ${row.permit_id}`);
-    if (row.submitted_by) notesParts.push(`Submitted by: ${row.submitted_by}`);
-    notesParts.push(`Fleet intake FI-${String(row.id).padStart(6, '0')}`);
-
-    // Who hears about this job (the "order placed" message, the pickup call):
-    // the coordinator the link was issued to, else the account's own number
-    // when it has one (fleet accounts are often on file with '-'), else the
-    // driver the coordinator named.
-    const hasDigits = p => /\d{7,}/.test(String(p || '').replace(/\D/g, ''));
-    const [[link]] = row.link_id
-      ? await conn.query('SELECT contact_name, contact_phone FROM fleet_intake_links WHERE id = ?', [row.link_id]) : [[null]];
-    const contactPhone = [link?.contact_phone, customer.phone, row.driver_phone].find(hasDigits) || customer.phone || null;
-    if (link?.contact_name && hasDigits(link.contact_phone)) notesParts.push(`Coordinator: ${link.contact_name} (${link.contact_phone})`);
-
-    // Numbers are a random draw per day; a collision draws again.
-    let workOrderId = null; let work_order_number = null;
-    for (let attempt = 0; attempt < 6 && !workOrderId; attempt++) {
-      const number = `WO-${stamp}-${Math.floor(Math.random() * 9000) + 1000}`;
-      try {
-        const [woIns] = await conn.query(
-          `INSERT INTO work_orders
-             (workshop_id, work_order_number, customer_id, vehicle_id, odometer_in,
-              intake_channel, fleet_intake_id, work_order_type, service_category,
-              customer_name, customer_phone, customer_email, payer_type,
-              description, scheduled_at, status, service_status_token, notes)
-           VALUES (?, ?, ?, ?, ?, 'fleet_link', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-          [req.workshopId, number, row.customer_id, vehId, row.odometer,
-           row.id, _type, _cat,
-           customer.full_name, contactPhone, customer.email || null,
-           // A fleet account is billed on account (Step 1 classification).
-           payerTypeForClass(customer.customer_class, customer.customer_subcategory),
-           descParts.join(' '),
-           /^\d{4}-\d{2}-\d{2}/.test(scheduled_at || '') ? scheduled_at : (row.preferred_date || null),
-           serviceStatusToken(),
-           notesParts.join(' | ')]
-        );
-        workOrderId = woIns.insertId; work_order_number = number;
-      } catch (e) {
-        if (e.code !== 'ER_DUP_ENTRY' || !/work_order_number/.test(e.message)) throw e;
-      }
+    /* ── The job card: the request's own work order gets the car; a request
+     * from before work orders were opened on submission gets one now. ── */
+    let workOrderId, work_order_number;
+    if (existingWo) {
+      workOrderId = existingWo.id; work_order_number = existingWo.work_order_number;
+      await conn.query('UPDATE work_orders SET vehicle_id = ? WHERE id = ?', [vehId, workOrderId]);
+      await conn.query('UPDATE vehicles SET mileage = ? WHERE id = ? AND (mileage IS NULL OR mileage < ?)', [row.odometer, vehId, row.odometer]);
+      await conn.query(
+        'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) SELECT id, status, ?, ? FROM work_orders WHERE id = ?',
+        [req.user.id, `Fleet intake ${fleetRef(row.id)} booked in — vehicle confirmed`, workOrderId]);
+    } else {
+      ({ workOrderId, work_order_number } = await insertFleetWorkOrder(conn, row, {
+        customer, vehicleId: vehId, userId: req.user.id, category: service_category, type: work_order_type,
+        scheduledAt: /^\d{4}-\d{2}-\d{2}/.test(scheduled_at || '') ? scheduled_at : null,
+      }));
     }
-    if (!workOrderId) throw new Error('Could not allocate a work order number');
-    await snapshotIntakeClass(workOrderId, { conn });
-
-    await conn.query(
-      'INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note) VALUES (?, ?, ?, ?)',
-      [workOrderId, 'pending', req.user.id, `Created from fleet intake FI-${String(row.id).padStart(6, '0')}`]
-    );
-
-    // Same monotonic guard as the counter path — a fleet submitting a reading
-    // lower than the last one we took must not wind the vehicle backwards.
-    await conn.query(
-      'UPDATE vehicles SET mileage = ? WHERE id = ? AND (mileage IS NULL OR mileage < ?)',
-      [row.odometer, vehId, row.odometer]
-    );
 
     await conn.query(
       `UPDATE fleet_intake_requests
@@ -980,17 +1066,15 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
       newValue: { work_order_number, vehicle_id: vehId, odometer_in: row.odometer },
     }).catch(e => console.error('[FleetIntake] Audit error:', e.message));
 
-    await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user.id })
+    // A new work order is announced as at submission; the request's own was then.
+    if (!existingWo) await announceFleetWorkOrder({ workOrderId, workshopId: req.workshopId, userId: req.user.id });
+    else await openJobCardIfReady({ workOrderId, workshopId: req.workshopId, userId: req.user.id })
       .catch(e => console.error('[FleetIntake] main job card:', e.message));
-    const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
-    notifyWorkOrderStatus({
-      order: workOrder, status: 'pending', workshopId: req.workshopId, changedBy: req.user.id,
-    }).catch(e => console.error('[FleetIntake] Notify error:', e.message));
 
-    return res.status(201).json({
-      success: true,
+    return res.status(existingWo ? 200 : 201).json({
+      success: true, reused: !!existingWo,
       data: { work_order_id: workOrderId, work_order_number, vehicle_id: vehId },
-      message: `Job card ${work_order_number} created`,
+      message: existingWo ? `Booked in on job card ${work_order_number}` : `Job card ${work_order_number} created`,
     });
   } catch (err) {
     try { await conn.rollback(); } catch { /* connection already gone */ }

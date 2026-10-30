@@ -27,6 +27,7 @@ import { createInvoiceFromWorkOrder } from './invoices.js';
 import { onTechnicianAssigned } from '../lib/workflow.js';
 import { can, capabilitiesOf, requireCapability } from '../lib/roles.js';
 import { customerApprovalMissing } from '../lib/job-card-approval.js';
+import { awaitingPhysicalInspection, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
 import {
   ASSIGN_WHERE, AWAITING_CUSTOMER_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE,
 } from '../lib/floor-queues.js';
@@ -427,6 +428,12 @@ router.post('/assign', requireCapability('job.assign'), async (req, res) => {
     if (await customerApprovalMissing(work_order_id, req.workshopId)) {
       return res.status(409).json({ success: false, code: 'CUSTOMER_APPROVAL_REQUIRED',
         message: `${workOrder.work_order_number} can't be assigned yet — the customer hasn't approved the work. It comes to the Team Leader after the customer's decision (Step 6).` });
+    }
+    // Step 3 first: an external customer's job has no job card until they
+    // acknowledge the physical inspection, so there is nothing to work on.
+    if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
+      return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED,
+        message: `${workOrder.work_order_number} can't be assigned yet — its job card opens once the customer has acknowledged the physical inspection.` });
     }
 
     // The board's queue is shared by every leader and it holds its refreshes

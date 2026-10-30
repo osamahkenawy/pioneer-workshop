@@ -6,10 +6,12 @@
  *   GET /   ?phase=&q=&class=&sub=&department=&team_leader_id=&late=1&include_legacy=1
  *
  * Which jobs: every open work order in the Steps 1–7 process, plus those
- * closed today. An open work order with no job card at all, opened before the
- * workshop's first job card (imported from the old system, never worked
- * here — lib/job-phase.js isLegacyJob), is hidden unless include_legacy=1;
- * counts.legacy_hidden says how many, data.process_live_since from when.
+ * closed today — an external customer's job without its job card yet (it
+ * waits for the physical inspection) in Reception. An open work order with
+ * no job card at all, opened before the workshop's first job card (imported
+ * from the old system, never worked here — lib/job-phase.js isLegacyJob), is
+ * hidden unless include_legacy=1; counts.legacy_hidden says how many,
+ * data.process_live_since from when.
  *
  * One SQL statement loads every row with its job cards, clock, estimate,
  * parts, invoice, pickup call, gate pass and booking (grouped joins over the
@@ -31,7 +33,7 @@ import { gzipSync } from 'zlib';
 import { query } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { effectiveRole, isManagerRole } from '../lib/roles.js';
-import { jobClassification, departmentFor, paymentSettled } from '../lib/workflow.js';
+import { jobClassification, departmentFor, paymentSettled, UNPRICED_PART_SQL } from '../lib/workflow.js';
 import { pauseReasonLabel } from '../lib/status-labels.js';
 import { extractStatusToken } from '../lib/customer-link.js';
 import {
@@ -82,10 +84,10 @@ const inList = list => list.map(s => `'${s}'`).join(',');
 /** Seconds between a DATETIME column and the database's NOW() (null stays null). */
 const ago = col => `TIMESTAMPDIFF(SECOND, ${col}, NOW())`;
 
-// Part lines the Storekeeper has still to price — the same rule as "Your
-// tasks" (routes/workflow.js).
-const UNPRICED_PART = `l.line_type = 'parts' AND l.genuine_price IS NULL AND l.aftermarket_price IS NULL
-  AND NOT (COALESCE(l.genuine_available, 1) = 0 AND COALESCE(l.aftermarket_available, 1) = 0) AND COALESCE(l.unit_price, 0) = 0`;
+// Part lines the Storekeeper has still to price in the customer's
+// categories — the same rule as "Your tasks" (lib/workflow.js UNPRICED_PART_SQL:
+// `l` the line, `e` its estimate).
+const UNPRICED_PART = UNPRICED_PART_SQL;
 
 function boardSql(withPauseReason) {
   return `
@@ -141,13 +143,15 @@ function boardSql(withPauseReason) {
            SUM(${UNPRICED_PART}) AS unpriced_parts,
            SUM(l.line_type = 'labour' AND (l.unit_price IS NULL OR l.unit_price <= 0)) AS unpriced_labour
       FROM estimate_lines l JOIN est ON est.id = l.estimate_id AND est.rn = 1
+      JOIN service_estimates e ON e.id = l.estimate_id
      GROUP BY l.estimate_id
   ),
   items AS (
     SELECT i.work_order_id, COUNT(*) AS n FROM work_order_items i JOIN board b ON b.id = i.work_order_id GROUP BY i.work_order_id
   ),
   insp AS (
-    SELECT vi.work_order_id, MAX(vi.status = 'completed') AS completed
+    SELECT vi.work_order_id, MAX(vi.status = 'completed') AS completed,
+           MAX(vi.status = 'completed' AND (vi.signed_at IS NOT NULL OR vi.entry_mode = 'document')) AS acknowledged
       FROM vehicle_inspections vi JOIN board b ON b.id = vi.work_order_id
      WHERE vi.inspection_type = 'intake'
      GROUP BY vi.work_order_id
@@ -195,6 +199,7 @@ function boardSql(withPauseReason) {
          est.approved_ago AS est_approved_ago,
          est_lines.line_count AS est_line_count, est_lines.unpriced_parts, est_lines.unpriced_labour,
          items.n AS item_count, insp.completed AS insp_completed, insp.work_order_id IS NOT NULL AS insp_exists,
+         insp.acknowledged AS insp_acknowledged, wo.inspection_override_at IS NOT NULL AS ack_override,
          parts.waiting AS parts_waiting, parts.eta AS parts_eta,
          inv.invoice_number, inv.status AS invoice_status, inv.total_amount AS invoice_total, inv.amount_paid AS invoice_paid,
          EXISTS (SELECT 1 FROM job_cards jx WHERE jx.work_order_id = wo.id) AS any_card,
@@ -272,6 +277,7 @@ function toItem(row, ctx) {
     || (!!estimate && ['approved', 'partially_approved', 'converted'].includes(estimate.status) && !!num(row.est_customer_approved));
 
   const invoice = row.invoice_number ? { status: row.invoice_status, total_amount: row.invoice_total, amount_paid: row.invoice_paid } : null;
+  const legacy = isLegacyJob({ anyCard: !!num(row.any_card), createdAgoSecs: row.created_ago, liveAgoSecs: ctx.liveAgo });
   const onAccount = cls.cls === 'internal' || ['fleet', 'insurance', 'corporate'].includes(row.payer_type);
   const paid = paymentSettled(invoice, { customerClass: cls.cls, payerType: row.payer_type });
 
@@ -291,6 +297,11 @@ function toItem(row, ctx) {
     classified: !!cls.cls && !!cls.sub,
     vehicleAndIssue: !!row.vehicle_id && !!String(row.description || '').trim(),
     inspection: num(row.insp_completed) || num(row.wo_inspected) ? 'completed' : num(row.insp_exists) ? 'draft' : 'none',
+    // Step 3: an external job's card waits for the physical inspection (lib/physical-inspection.js).
+    inProcess: !legacy,
+    anyCard: !!num(row.any_card),
+    physicalNeeded: cls.cls !== 'internal',
+    acknowledged: !!num(row.insp_acknowledged) || !!num(row.ack_override),
     pickupContacted: !!num(row.pickup_contacted),
     paid,
     gateReleased: !!num(row.gate_released),
@@ -355,7 +366,7 @@ function toItem(row, ctx) {
       balance: r2(Math.max(0, total - paidAmount)), on_account: onAccount, settled: paid,
     } : null,
     service_status_token: row.service_status_token || null,
-    legacy: isLegacyJob({ anyCard: !!num(row.any_card), createdAgoSecs: row.created_ago, liveAgoSecs: ctx.liveAgo }),
+    legacy,
     // for the filters below; not sent
     _mechanicIds: mechanicIds,
   };

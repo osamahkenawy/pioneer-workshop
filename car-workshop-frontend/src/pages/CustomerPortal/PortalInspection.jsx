@@ -3,8 +3,9 @@
  * portal, and where they sign it.
  *
  * The same content as the public inspection link (InspectionLink.jsx): the
- * damage marked on the diagram (read-only CarDamageDiagram) or the pages of
- * the paper form, what was recommended, and the signature. When the
+ * damage marked on the diagram (read-only CarDamageDiagram) and the vehicle
+ * photos, or the pages of the paper form, what was recommended, and the
+ * signature. When the
  * walk-around was finished without the customer at the car, they sign here:
  * their name, the pad, and the confirmation sentence, then
  * POST /customer-portal/inspections/:id/sign. Once only — the server refuses
@@ -33,6 +34,43 @@ async function openDocument(inspectionId, doc) {
   }
 }
 
+/** The vehicle photos: fetched with the customer's login and shown from memory. */
+function PortalPhotos({ inspectionId, photos }) {
+  const { t } = useTranslation();
+  const [urls, setUrls] = useState({});
+  const ids = photos.map(p => p.id).join(',');
+  useEffect(() => {
+    let live = true;
+    const made = [];
+    (async () => {
+      for (const p of photos) {
+        try {
+          const res = await api.raw(`/customer-portal/inspections/${inspectionId}/photos/${p.id}`);
+          if (!res.ok) continue;
+          const url = URL.createObjectURL(await res.blob());
+          made.push(url);
+          if (live) setUrls(u => ({ ...u, [p.id]: url }));
+        } catch { /* the rest still show */ }
+      }
+    })();
+    return () => { live = false; made.forEach(u => URL.revokeObjectURL(u)); };
+  }, [inspectionId, ids]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <section className="cpi-section">
+      <h4>{t('portal.inspection.photos_n', 'Photos ({{n}})', { n: photos.length })}</h4>
+      <ul className="cpi-photos">
+        {photos.map(p => (
+          <li key={p.id}>
+            {urls[p.id]
+              ? <a href={urls[p.id]} target="_blank" rel="noopener noreferrer"><img src={urls[p.id]} alt={p.name || t('portal.inspection.photo', 'Vehicle photo')} /></a>
+              : <span className="cpi-photo-wait" aria-hidden="true" />}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function PortalInspection({ inspection, autoFocusSign = false, onSigned }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -42,6 +80,7 @@ export default function PortalInspection({ inspection, autoFocusSign = false, on
   const handover = insp.type === 'joint';
   const marks = insp.marks || [];
   const docs = insp.documents || [];
+  const photos = insp.entry_mode === 'document' ? [] : (insp.photos || []);
   const views = [...new Set(marks.map(m => m.view))];
   const v = insp.vehicle || {};
 
@@ -118,6 +157,8 @@ export default function PortalInspection({ inspection, autoFocusSign = false, on
           )}
         </section>
       )}
+
+      {photos.length > 0 && <PortalPhotos inspectionId={insp.id} photos={photos} />}
 
       {(insp.service_recommended || insp.notes) && (
         <section className="cpi-section">

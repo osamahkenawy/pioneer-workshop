@@ -6,18 +6,20 @@
  * unseen, and convert-to-job-card was never called from the UI.
  *
  * Organised around who has to act next (process steps 4–6):
- *   Parts to price  — the Store prices each part line Genuine and After-Market
- *                     (or marks a type N/A); only for users who may price parts
+ *   Parts to price  — the Store prices each part line in every category of
+ *                     the customer's parts preference (Genuine / After-Market
+ *                     / Used): available or not, price, quantity, delivery —
+ *                     and may offer an alternative; only for users who may
+ *                     price parts (GET /estimates?view=parts_to_price)
  *   Needs approval  — an external customer's estimate waiting for a
  *                     supervisor / workshop manager to sign it off
  *   With customer   — sent, waiting for the customer's line decisions
  *   To convert      — the customer approved some or all lines; open the job card
  * and the history: drafts, converted, rejected.
  *
- * The detail shows the price per job — labour, Genuine parts, After-Market
- * parts, Total Genuine, Total After-Market — and is sent in one of three
- * formats (1 Genuine, 2 After-Market, 3 both, customer chooses per part) by
- * email or WhatsApp.
+ * The detail shows the price per job — labour and the total in each category
+ * of the preference, with any alternative apart (it never replaces a
+ * requested category) — and is sent by email or WhatsApp.
  *
  * URLs: /estimates?id=<id> (notifications) · /estimates?new=1 (dashboard) ·
  * /estimates?new=1&wo=<workOrderId> (from a job card: the estimate for that visit).
@@ -31,8 +33,8 @@ import {
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import NewEstimateModal, {
-  mayPriceParts, summarisePricing, partPrices, partUnpriced, effectiveOption, jobKeyOf, isNA,
-  SendEstimatePanel, CopyButton,
+  mayPriceParts, summarisePricing, partUnpriced, effectiveOption, jobKeyOf, PART_CATEGORIES, categoryLabel, categoryWords,
+  catCols, preferenceOf, partOptions, hasCategoryPricing, SendEstimatePanel, CopyButton,
 } from '../components/NewEstimateModal';
 import './Estimates.css';
 import { canDo } from '../lib/permissions';
@@ -64,11 +66,16 @@ const STATUS_LABEL = {
 
 const TYPE_LABEL = { labour: 'Labour', parts: 'Parts', sublet: 'Sublet', consumable: 'Consumable', discount: 'Discount' };
 
-const FORMAT_LABEL = {
-  genuine: 'Format 1 — Genuine',
-  after_market: 'Format 2 — After-Market',
-  both: 'Format 3 — Both, customer chooses',
-};
+/** The customer's parts preference as small chips ("Genuine · Used"). */
+function PreferenceChips({ pref, t }) {
+  return (
+    <span className="es-prefChips" aria-label={t('estimates.pref_label', 'Customer’s parts preference')}>
+      {pref.map(c => <span key={c} className={`es-catChip es-cat-${c}`}>{categoryLabel(t, c)}</span>)}
+    </span>
+  );
+}
+
+const fmtDay = d => (d ? new Date(`${String(d).slice(0, 10)}T00:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '');
 
 const aed = n => `AED ${Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const lineTotal = l => Number(l.line_total ?? (Number(l.quantity) * Number(l.unit_price) * (1 - Number(l.discount_pct || 0) / 100)));
@@ -83,7 +90,6 @@ export default function Estimates() {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState([]);
   const [counts, setCounts] = useState({});
-  const [storeCount, setStoreCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
   const [showNew, setShowNew] = useState(false);
@@ -144,31 +150,16 @@ export default function Estimates() {
     const req = ++reqRef.current;
     setLoading(true);
     try {
-      if (view === 'parts_to_price') {
-        const [q, c] = await Promise.all([
-          api.get('/workflow/store/queue'),
-          api.get('/estimates?limit=1').catch(() => null),
-        ]);
-        if (req !== reqRef.current) return;
-        const list = q?.success ? (q.data?.estimates || []) : [];
-        setStoreCount(list.length);
-        const s = search.trim().toLowerCase();
-        setRows(s ? list.filter(r => [r.estimate_number, r.customer_name, r.vehicle_plate].some(v => String(v || '').toLowerCase().includes(s))) : list);
-        if (c?.success) setCounts(c.counts || {});
-      } else {
-        const q = new URLSearchParams({ view, limit: '100' });
-        if (search.trim()) q.set('search', search.trim());
-        const [res, sq] = await Promise.all([
-          api.get(`/estimates?${q}`),
-          canParts ? api.get('/workflow/store/queue').catch(() => null) : Promise.resolve(null),
-        ]);
-        if (req !== reqRef.current) return;
-        if (res.success) { setRows(res.estimates || []); setCounts(res.counts || {}); }
-        if (sq?.success) setStoreCount((sq.data?.estimates || []).length);
-      }
+      // Every tab, "Parts to price" included, is a view of GET /estimates;
+      // its counts carry each tab's number.
+      const q = new URLSearchParams({ view, limit: '100' });
+      if (search.trim()) q.set('search', search.trim());
+      const res = await api.get(`/estimates?${q}`);
+      if (req !== reqRef.current) return;
+      if (res.success) { setRows(res.estimates || []); setCounts(res.counts || {}); }
     } catch { /* the empty state covers it */ }
     finally { if (req === reqRef.current) setLoading(false); }
-  }, [view, search, canParts]);
+  }, [view, search]);
 
   useEffect(() => { const tm = setTimeout(load, search ? 300 : 0); return () => clearTimeout(tm); }, [load, search]);
 
@@ -179,7 +170,7 @@ export default function Estimates() {
 
   const open = id => setParams(id ? { id: String(id) } : {});
   const views = VIEWS.filter(v => !v.store || canParts);
-  const countOf = key => (key === 'parts_to_price' ? storeCount : counts[key]) ?? 0;
+  const countOf = key => counts[key] ?? 0;
 
   return (
     <>
@@ -187,7 +178,7 @@ export default function Estimates() {
         <header className="es-head">
           <div>
             <h1 className="es-title">{t('estimates.title', 'Estimates')}</h1>
-            <p className="es-sub">{t('estimates.subtitle', 'Quotes for the customer to approve line by line. The Store prices parts in Genuine and After-Market; an approved estimate becomes the job card.')}</p>
+            <p className="es-sub">{t('estimates.subtitle_pref', 'Quotes for the customer to approve line by line. The Store prices parts in the customer’s parts preference (Genuine, After-Market, Used); the approved lines go onto the job card.')}</p>
           </div>
           <div className="es-headActions">
             <button className="es-btn es-btnGhost" onClick={load}><Refresh width={16} height={16} /> {t('estimates.refresh', 'Refresh')}</button>
@@ -219,11 +210,12 @@ export default function Estimates() {
               <button key={r.id} className="es-row" onClick={() => open(r.id)}>
                 <div className="es-rowRef">{r.estimate_number}</div>
                 <div className="es-rowMain">
-                  <div className="es-rowName">{r.customer_name || '—'}</div>
-                  <div className="es-rowMeta">{r.vehicle_plate || t('estimates.no_vehicle', 'No vehicle')}</div>
+                  <div className="es-rowName">{r.customer_full_name || r.customer_name || '—'}</div>
+                  <div className="es-rowMeta">{r.plate_number || r.vehicle_plate || t('estimates.no_vehicle', 'No vehicle')}</div>
                 </div>
                 <div className="es-rowLines es-rowStore">
-                  <Label width={14} height={14} /> {t('estimates.n_parts_to_price', '{{n}} part(s) to price', { n: Number(r.part_lines) || 0 })}
+                  <Label width={14} height={14} /> {t('estimates.n_parts_to_price', '{{n}} part(s) to price', { n: Number(r.unpriced_parts) || 0 })}
+                  <PreferenceChips pref={preferenceOf(r)} t={t} />
                 </div>
                 <div className="es-rowTotal" />
                 <div className="es-rowRight">
@@ -331,8 +323,9 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
     () => api.patch(`/estimates/${e.id}/lines/${lineId}/approve`, { customer_status: status, ...(partOption ? { part_option: partOption } : {}) }),
     r => (r.work_order_number ? t('estimates.all_approved_jc', 'All lines approved — job card {{n}} opened.', { n: r.work_order_number }) : null));
 
-  const format = e.estimate_format || null;
-  const summary = summarisePricing(lines);
+  const pref = preferenceOf(e);
+  // The server's per-job, per-category numbers (lib/workflow.js); the same arithmetic here as a fallback.
+  const summary = data.pricing?.totals ? data.pricing : summarisePricing(lines, pref);
   const groups = groupByJob(lines);
   const showGroupRows = groups.length > 1 || lines.some(l => l.job_name);
   const vatRate = Number(e.vat_rate || 0);
@@ -354,9 +347,11 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
   // already out (to resend it, or to open it at the counter).
   const link = sent?.approval_url
     || (e.approval_token && e.status === 'sent_to_customer' ? `${window.location.origin}/estimate-approval/${e.approval_token}` : '');
-  const waText = link && encodeURIComponent(`Your estimate ${e.estimate_number} from Pioneer Car Service Center is ready. Please review and approve each item here: ${link}`);
-  const hiG = format === 'genuine' || format === 'both';
-  const hiA = format === 'after_market' || format === 'both';
+  const hasCatParts = lines.some(l => l.line_type === 'parts' && hasCategoryPricing(l));
+  const waText = link && encodeURIComponent(`Your estimate ${e.estimate_number} from Pioneer Car Service Center is ready`
+    + `${hasCatParts ? ` (parts priced in ${pref.map(c => categoryLabel(t, c)).join(' / ')})` : ''}`
+    + `${summary.alternatives?.length ? `; ${summary.alternatives.length} part(s) offered as an alternative for your approval` : ''}. Please review and approve each item here: ${link}`);
+  const altByJob = job => (summary.alternatives || []).filter(a => a.job === job);
 
   const sendLabel = e.needs_internal_approval
     ? (can_approve ? t('estimates.approve_send_btn', 'Approve & send…') : t('estimates.ask_approval_btn', 'Ask for approval…'))
@@ -372,9 +367,9 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
             <p className="es-mSub">
               {[e.plate_number || e.vehicle_plate, [e.make, e.model, e.year].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || t('estimates.no_vehicle', 'No vehicle')}
               <span className={`es-class ${e.is_external ? 'es-classExt' : 'es-classInt'}`}>{e.is_external ? t('estimates.external', 'External') : t('estimates.internal', 'Internal')}</span>
-              {format && <span className="es-fmtChip">{t(`estimates.format_label_${format}`, FORMAT_LABEL[format])}</span>}
+              {lines.some(l => l.line_type === 'parts') && <PreferenceChips pref={pref} t={t} />}
               {e.intake_work_order_id && !e.work_order_id && (
-                <Link to={`/work-orders/${e.intake_work_order_id}`} className="es-woLink">{t('estimates.for_wo_number', 'For job card {{n}}', { n: e.intake_work_order_number || `#${e.intake_work_order_id}` })}</Link>
+                <Link to={`/work-orders/${e.intake_work_order_id}`} className="es-woLink">{t('estimates.for_wo_number', 'For work order {{n}}', { n: e.intake_work_order_number || `#${e.intake_work_order_id}` })}</Link>
               )}
             </p>
           </div>
@@ -388,7 +383,7 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
               <div>
                 <b>{t('estimates.parts_waiting_n', '{{n}} part(s) waiting for the Store.', { n: summary.unpricedParts })}</b>{' '}
                 {canParts
-                  ? t('estimates.parts_waiting_store', 'Enter the Genuine and After-Market price for each below, or mark a type N/A.')
+                  ? t('estimates.parts_waiting_store_cat', 'For each part below: {{cats}} — available or not, price and delivery.', { cats: categoryWords(t, pref) })
                   : t('estimates.parts_waiting_other', 'The Storekeeper has been notified — it can be sent once every part is priced.')}
               </div>
             </div>
@@ -429,50 +424,60 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
             <section className="es-section">
               <div className="es-h3">{t('estimates.price_by_job', 'Price by job')}</div>
               <div className="es-scroll">
+                {/* One column per category of the preference (parts, then the total with labour); an alternative apart. */}
                 <table className="es-jobs">
                   <thead>
                     <tr>
                       <th>{t('estimates.col_job', 'Job')}</th>
                       <th className="es-num">{t('estimates.col_labour', 'Labour')}</th>
-                      <th className="es-num">{t('estimates.col_genuine_parts', 'Genuine parts')}</th>
-                      <th className="es-num">{t('estimates.col_am_parts', 'After-Market parts')}</th>
-                      <th className={`es-num es-colTot${hiG ? ' es-colHi' : ''}`}>{t('estimates.col_total_genuine', 'Total Genuine')}</th>
-                      <th className={`es-num es-colTot${hiA ? ' es-colHi' : ''}`}>{t('estimates.col_total_am', 'Total After-Market')}</th>
+                      {pref.map(c => <th key={c} className="es-num es-colTot es-colHi">{t('estimates.col_total_cat', 'Total {{cat}}', { cat: categoryLabel(t, c) })}</th>)}
+                      {summary.alternatives?.length > 0 && <th className="es-num">{t('estimates.col_alternative', 'Alternative')}</th>}
                     </tr>
                   </thead>
                   <tbody>
-                    {summary.jobs.map(j => (
-                      <tr key={j.job}>
-                        <td>
-                          <span className="es-jobName">{j.job}</span>
-                          {j.waiting > 0 && <span className="es-badge es-badgeWait">{t('estimates.n_waiting_store', '{{n}} waiting for Store', { n: j.waiting })}</span>}
-                        </td>
-                        <td className="es-num">{aed(j.labour)}</td>
-                        <td className="es-num">
-                          {!j.parts ? <span className="es-dash">—</span>
-                            : j.waiting === j.parts ? <span className="es-waitTxt">{t('estimates.waiting_short', 'Waiting')}</span>
-                            : <>{aed(j.genuine_parts)}{j.genuine_na && <NABadge t={t} title={t('estimates.na_genuine_tip', 'Not available in Genuine — the After-Market price is used for that part')} />}</>}
-                        </td>
-                        <td className="es-num">
-                          {!j.parts ? <span className="es-dash">—</span>
-                            : j.waiting === j.parts ? <span className="es-waitTxt">{t('estimates.waiting_short', 'Waiting')}</span>
-                            : <>{aed(j.after_market_parts)}{j.after_market_na && <NABadge t={t} title={t('estimates.na_am_tip', 'Not available in After-Market — the Genuine price is used for that part')} />}</>}
-                        </td>
-                        <td className={`es-num es-colTot${hiG ? ' es-colHi' : ''}`}>{aed(j.total_genuine)}</td>
-                        <td className={`es-num es-colTot${hiA ? ' es-colHi' : ''}`}>{aed(j.total_after_market)}</td>
-                      </tr>
-                    ))}
+                    {summary.jobs.map(j => {
+                      const alts = altByJob(j.job);
+                      return (
+                        <tr key={j.job}>
+                          <td>
+                            <span className="es-jobName">{j.job}</span>
+                            {j.waiting > 0 && <span className="es-badge es-badgeWait">{t('estimates.n_waiting_store', '{{n}} waiting for Store', { n: j.waiting })}</span>}
+                          </td>
+                          <td className="es-num">{aed(j.labour)}</td>
+                          {pref.map(c => (
+                            <td key={c} className="es-num es-colTot es-colHi">
+                              {aed(j.totals?.[c])}
+                              {j.part_lines > 0 && (
+                                <span className="es-subAmt">
+                                  {j.waiting === j.part_lines ? <span className="es-waitTxt">{t('estimates.waiting_short', 'Waiting')}</span>
+                                    : t('estimates.parts_amt', 'parts {{a}}', { a: aed(j.parts?.[c]) })}
+                                  {j.na?.[c] && <NABadge t={t} title={t('estimates.na_cat_tip', 'A part of this job is not available in {{cat}} — it is not in this total, and no other type is used instead', { cat: categoryLabel(t, c) })} />}
+                                </span>
+                              )}
+                            </td>
+                          ))}
+                          {summary.alternatives?.length > 0 && (
+                            <td className="es-num">
+                              {alts.length ? (
+                                <>{aed(alts.reduce((s, a) => s + Number(a.amount || 0), 0))}
+                                  <span className="es-subAmt">{alts.map(a => categoryLabel(t, a.option)).join(', ')} · {t('estimates.needs_customer_ok', 'customer approves')}</span></>
+                              ) : <span className="es-dash">—</span>}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                   <tfoot>
                     <tr>
-                      <td colSpan={4}>{t('estimates.total_excl_vat', 'Total (excl. VAT)')}</td>
-                      <td className={`es-num es-colTot${hiG ? ' es-colHi' : ''}`}>{aed(summary.total_genuine)}</td>
-                      <td className={`es-num es-colTot${hiA ? ' es-colHi' : ''}`}>{aed(summary.total_after_market)}</td>
+                      <td colSpan={2}>{t('estimates.total_excl_vat', 'Total (excl. VAT)')}</td>
+                      {pref.map(c => <td key={c} className="es-num es-colTot es-colHi">{aed(summary.totals?.[c])}</td>)}
+                      {summary.alternatives?.length > 0 && <td />}
                     </tr>
                     <tr className="es-jobsVat">
-                      <td colSpan={4}>{t('estimates.total_incl_vat', 'Total incl. {{v}}% VAT', { v: vatRate })}</td>
-                      <td className={`es-num es-colTot${hiG ? ' es-colHi' : ''}`}>{aed(summary.total_genuine * (1 + vatRate / 100))}</td>
-                      <td className={`es-num es-colTot${hiA ? ' es-colHi' : ''}`}>{aed(summary.total_after_market * (1 + vatRate / 100))}</td>
+                      <td colSpan={2}>{t('estimates.total_incl_vat', 'Total incl. {{v}}% VAT', { v: vatRate })}</td>
+                      {pref.map(c => <td key={c} className="es-num es-colTot es-colHi">{aed(Number(summary.totals?.[c] || 0) * (1 + vatRate / 100))}</td>)}
+                      {summary.alternatives?.length > 0 && <td />}
                     </tr>
                   </tfoot>
                 </table>
@@ -496,7 +501,7 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
                 <tbody key={job}>
                   {showGroupRows && <tr className="es-groupRow"><td colSpan={5}>{job}</td></tr>}
                   {ls.map(l => (
-                    <LineRow key={l.id} t={t} estimateId={e.id} line={l} format={format}
+                    <LineRow key={l.id} t={t} estimateId={e.id} line={l} pref={pref}
                       canDecide={canDecideInPerson} busy={busy} onDecide={decide}
                       pricingOpen={pricingOpen && l.line_type === 'parts' && l.customer_status === 'pending'}
                       onPriced={res => {
@@ -517,7 +522,9 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
             <div><span>{t('estimates.vat_n', 'VAT ({{v}}%)', { v: vatRate })}</span><span>{aed(e.vat_amount)}</span></div>
             <div className="es-totalGrand"><span>{t('estimates.quoted_total', 'Quoted total')}</span><span>{aed(e.total_amount)}</span></div>
             {decided > 0 && <div className="es-totalApproved"><span>{t('estimates.approved_total', 'Approved by customer (incl. VAT)')}</span><span>{aed(approvedTotal)}</span></div>}
-            {format === 'both' && <p className="es-totNote">{t('estimates.both_note', 'Parts count at the Genuine price until the customer chooses.')}</p>}
+            {hasCatParts && pref.length > 1 && (
+              <p className="es-totNote">{t('estimates.pref_note', 'Parts count at the first available of {{cats}} until the customer chooses; an alternative counts only once they approve it.', { cats: categoryWords(t, pref) })}</p>
+            )}
           </div>
 
           {e.customer_notes && (
@@ -618,9 +625,9 @@ function NABadge({ t, title }) {
 }
 
 /** One estimate line, plus the Store's pricing editor under a part line. */
-function LineRow({ t, estimateId, line: l, format, canDecide, busy, onDecide, pricingOpen, onPriced }) {
+function LineRow({ t, estimateId, line: l, pref, canDecide, busy, onDecide, pricingOpen, onPriced }) {
   const isPart = l.line_type === 'parts';
-  const waiting = isPart && partUnpriced(l);
+  const waiting = isPart && partUnpriced(l, pref);
   const [editOpen, setEditOpen] = useState(waiting);
   return (
     <>
@@ -628,7 +635,7 @@ function LineRow({ t, estimateId, line: l, format, canDecide, busy, onDecide, pr
         <td>
           <div className="es-lineDesc">{l.description}</div>
           <div className="es-lineType">{t(`estimates.type_${l.line_type}`, TYPE_LABEL[l.line_type] || l.line_type)}{l.part_number ? ` · ${l.part_number}` : ''}</div>
-          {isPart && <OptionPills t={t} line={l} format={format} />}
+          {isPart && <OptionPills t={t} line={l} pref={pref} />}
           {pricingOpen && !editOpen && (
             <button type="button" className="es-linkBtn" onClick={() => setEditOpen(true)}>
               <Label width={13} height={13} /> {t('estimates.edit_store_price', 'Edit Store price')}
@@ -638,12 +645,12 @@ function LineRow({ t, estimateId, line: l, format, canDecide, busy, onDecide, pr
         <td className="es-num">{Number(l.quantity)}</td>
         <td className="es-num">{waiting ? <span className="es-dash">—</span> : aed(l.unit_price)}</td>
         <td className="es-num">{waiting ? <span className="es-dash">—</span> : aed(lineTotal(l))}</td>
-        <td><DecisionCell t={t} line={l} format={format} canDecide={canDecide} busy={busy} onDecide={onDecide} /></td>
+        <td><DecisionCell t={t} line={l} pref={pref} canDecide={canDecide} busy={busy} onDecide={onDecide} /></td>
       </tr>
       {pricingOpen && editOpen && (
         <tr className="es-priceRow">
           <td colSpan={5}>
-            <PartPricingEditor t={t} estimateId={estimateId} line={l}
+            <PartPricingEditor t={t} estimateId={estimateId} line={l} pref={pref}
               onSaved={res => { setEditOpen(false); onPriced(res); }}
               onCancel={waiting ? null : () => setEditOpen(false)} />
           </td>
@@ -653,49 +660,74 @@ function LineRow({ t, estimateId, line: l, format, canDecide, busy, onDecide, pr
   );
 }
 
-/** Genuine / After-Market prices of a part line; the one it counts at is highlighted. */
-function OptionPills({ t, line, format }) {
-  if (partUnpriced(line)) {
+/** When a priced category can be had: in stock, or the expected date. */
+const whenText = (t, o) => (o.expected_date ? t('estimates.expected_on', 'expected {{d}}', { d: fmtDay(o.expected_date) }) : t('estimates.in_stock', 'in stock'));
+
+/**
+ * A part's price in each category of the preference (the one it counts at
+ * highlighted) or "not available", and the Store's alternative — shown
+ * apart, with whether the customer took it.
+ */
+function OptionPills({ t, line, pref }) {
+  if (partUnpriced(line, pref)) {
     return <div className="es-opts"><span className="es-badge es-badgeWait"><Label width={12} height={12} /> {t('estimates.waiting_store', 'Waiting for the Store')}</span></div>;
   }
-  const { g, a, gNA, aNA } = partPrices(line);
-  if (g == null && a == null && !gNA && !aNA) return null; // priced before Genuine / After-Market existed
-  const eff = effectiveOption(line, format);
-  const pill = (label, price, na, on) => (
-    <span className={`es-opt${on ? ' es-optOn' : ''}${na ? ' es-optNA' : ''}`}>
-      {label} <b>{na ? t('estimates.na', 'N/A') : price != null ? aed(price) : '—'}</b>
-    </span>
-  );
+  if (!hasCategoryPricing(line)) return null; // priced as one price before categories existed
+  const { requested, alternative } = partOptions(line, pref);
+  const eff = effectiveOption(line, pref);
   return (
     <div className="es-opts">
-      {pill(t('estimates.genuine', 'Genuine'), g, gNA, eff === 'genuine')}
-      {pill(t('estimates.after_market', 'After-Market'), a, aNA, eff === 'after_market')}
-      {gNA && aNA && <span className="es-badge es-badgeBad">{t('estimates.not_available', 'Not available')}</span>}
+      {requested.map(o => (
+        <span key={o.option} className={`es-opt${eff?.option === o.option ? ' es-optOn' : ''}${o.usable ? '' : ' es-optNA'}`}>
+          {categoryLabel(t, o.option)} <b>{o.usable ? aed(o.price) : t('estimates.not_available_short', 'Not available')}</b>
+          {o.usable && <span className="es-optWhen"> · {whenText(t, o)}</span>}
+        </span>
+      ))}
+      {alternative && (
+        <span className={`es-opt es-optAlt${eff?.alternative ? ' es-optOn' : ''}`}>
+          {alternative.for
+            ? t('estimates.alt_for', 'Alternative to {{cat}}', { cat: categoryLabel(t, alternative.for) })
+            : t('estimates.alt_short', 'Alternative')}: {categoryLabel(t, alternative.option)} <b>{aed(alternative.price)}</b>
+          <span className="es-optWhen"> · {whenText(t, alternative)} · {alternative.approved === true ? t('estimates.alt_approved', 'approved by the customer')
+            : alternative.approved === false ? t('estimates.alt_not_taken', 'not taken') : t('estimates.alt_needs_ok', 'needs the customer’s approval')}</span>
+        </span>
+      )}
+      {!requested.some(o => o.usable) && !alternative && <span className="es-badge es-badgeBad">{t('estimates.not_available', 'Not available')}</span>}
     </div>
   );
 }
 
-/** Customer column: the decision, or in-person Approve / Reject (Format 3 parts: pick the type). */
-function DecisionCell({ t, line: l, format, canDecide, busy, onDecide }) {
-  const isPart = l.line_type === 'parts';
-  const p = isPart ? partPrices(l) : { g: null, a: null };
-  const choose = isPart && format === 'both' && p.g != null && p.a != null;
-  const [opt, setOpt] = useState(l.part_option === 'after_market' ? 'after_market' : 'genuine');
+/**
+ * Customer column: the decision, or in-person Approve / Reject. A part is
+ * approved in one of the categories on offer; the alternative only when
+ * picked — it is never preselected.
+ */
+function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
+  const isPart = l.line_type === 'parts' && hasCategoryPricing(l);
+  const { requested, alternative } = isPart ? partOptions(l, pref) : { requested: [], alternative: null };
+  const choices = [...requested.filter(o => o.usable), ...(alternative ? [alternative] : [])];
+  const eff = isPart ? effectiveOption(l, pref) : null;
+  const [opt, setOpt] = useState(() => (eff && !eff.alternative ? eff.option : null));
+  const showChoice = isPart && (choices.length > 1 || choices[0]?.alternative);
 
   if (l.customer_status === 'pending' && canDecide) {
     return (
       <div className="es-decideWrap">
-        {choose && (
+        {showChoice && (
           <div className="es-seg" role="radiogroup" aria-label={t('estimates.part_type', 'Part type')}>
-            <button type="button" role="radio" aria-checked={opt === 'genuine'} className={opt === 'genuine' ? 'es-segOn' : ''}
-              title={`${t('estimates.genuine', 'Genuine')} ${aed(p.g)}`} onClick={() => setOpt('genuine')}>{t('estimates.genuine', 'Genuine')}</button>
-            <button type="button" role="radio" aria-checked={opt === 'after_market'} className={opt === 'after_market' ? 'es-segOn' : ''}
-              title={`${t('estimates.after_market', 'After-Market')} ${aed(p.a)}`} onClick={() => setOpt('after_market')}>{t('estimates.after_market_short', 'After-Mkt')}</button>
+            {choices.map(o => (
+              <button key={o.option} type="button" role="radio" aria-checked={opt === o.option} className={`${opt === o.option ? 'es-segOn' : ''}${o.alternative ? ' es-segAlt' : ''}`}
+                title={`${categoryLabel(t, o.option)} ${aed(o.price)}${o.alternative ? ` — ${t('estimates.alt_needs_ok', 'needs the customer’s approval')}` : ''}`}
+                onClick={() => setOpt(o.option)}>
+                {o.alternative ? `${t('estimates.alt_prefix', 'Alt.')} ` : ''}{categoryLabel(t, o.option)}
+              </button>
+            ))}
           </div>
         )}
+        {isPart && !choices.length && <span className="es-dec es-dec-rejected">{t('estimates.reject_only', 'Not available — reject it')}</span>}
         <div className="es-decide">
-          <button className="es-mini es-miniOk" disabled={!!busy} onClick={() => onDecide(l.id, 'approved', choose ? opt : undefined)}
-            title={t('estimates.approved_in_person_tip', 'Customer approved in person')}>
+          <button className="es-mini es-miniOk" disabled={!!busy || (isPart && !opt)} onClick={() => onDecide(l.id, 'approved', isPart ? opt : undefined)}
+            title={isPart && !opt ? t('estimates.choose_option_first', 'Choose the type the customer approved') : t('estimates.approved_in_person_tip', 'Customer approved in person')}>
             {t('estimates.approve', 'Approve')}
           </button>
           <button className="es-mini es-miniBad" disabled={!!busy} onClick={() => onDecide(l.id, 'rejected')}
@@ -711,37 +743,72 @@ function DecisionCell({ t, line: l, format, canDecide, busy, onDecide }) {
   return (
     <span className={`es-dec es-dec-${l.customer_status}`}>
       {label}
-      {isPart && l.customer_status === 'approved' && l.part_option
-        ? ` · ${l.part_option === 'genuine' ? t('estimates.genuine', 'Genuine') : t('estimates.after_market', 'After-Market')}` : ''}
+      {l.line_type === 'parts' && l.customer_status === 'approved' && l.part_option
+        ? ` · ${categoryLabel(t, l.part_option)}${Number(l.alternative_approved) === 1 ? ` (${t('estimates.alt_lower', 'alternative')})` : ''}` : ''}
       {l.response_channel === 'in_person' && l.customer_status !== 'pending' ? ` ${t('estimates.in_person', '(in person)')}` : ''}
     </span>
   );
 }
 
-/** Store step 5: Genuine and After-Market price (or N/A) for one part line. */
-function PartPricingEditor({ t, estimateId, line, onSaved, onCancel }) {
+/**
+ * Store, Step 5: for each category the customer asked for — available or
+ * not, the price, and the delivery (in stock / expected date); the quantity
+ * the Store can supply (one for every category); and, when a requested
+ * category is not available, an optional alternative category for the
+ * customer to approve.
+ */
+function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
   const str = v => (v === null || v === undefined || v === '' ? '' : String(Number(v)));
-  const [g, setG] = useState(str(line.genuine_price));
-  const [gNA, setGNA] = useState(isNA(line.genuine_available));
-  const [a, setA] = useState(str(line.aftermarket_price));
-  const [aNA, setANA] = useState(isNA(line.aftermarket_available));
+  const [cats, setCats] = useState(() => Object.fromEntries(pref.map(c => {
+    const col = catCols(c);
+    const na = line[col.available] !== null && line[col.available] !== undefined && Number(line[col.available]) === 0;
+    const date = line[col.expected] ? String(line[col.expected]).slice(0, 10) : '';
+    return [c, { avail: na ? 'no' : 'yes', price: str(line[col.price]), when: date ? 'date' : 'stock', date }];
+  })));
+  const others = PART_CATEGORIES.filter(c => !pref.includes(c));
+  const oldAlt = line.alternative_option && others.includes(line.alternative_option) ? line.alternative_option : null;
+  const altCol = c => catCols(c);
+  const [alt, setAlt] = useState(() => ({
+    on: !!oldAlt,
+    option: oldAlt || others[0] || '',
+    for: line.alternative_for && pref.includes(line.alternative_for) ? line.alternative_for : '',
+    price: oldAlt ? str(line[altCol(oldAlt).price]) : '',
+    when: oldAlt && line[altCol(oldAlt).expected] ? 'date' : 'stock',
+    date: oldAlt && line[altCol(oldAlt).expected] ? String(line[altCol(oldAlt).expected]).slice(0, 10) : '',
+  }));
+  const [qty, setQty] = useState(str(line.quantity) || '1');
   const [partNo, setPartNo] = useState(line.part_number || '');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
+  const unavailable = pref.filter(c => cats[c].avail === 'no');
+  const canOffer = unavailable.length > 0 && others.length > 0;
+  const setCat = (c, patch) => setCats(prev => ({ ...prev, [c]: { ...prev[c], ...patch } }));
+
   async function save() {
-    const gv = gNA || g.trim() === '' ? null : Number(g);
-    const av = aNA || a.trim() === '' ? null : Number(a);
-    if (!gNA && gv == null) { setErr(t('estimates.err_g_missing', 'Enter the Genuine price, or mark it N/A.')); return; }
-    if (!aNA && av == null) { setErr(t('estimates.err_a_missing', 'Enter the After-Market price, or mark it N/A.')); return; }
-    if ((gv != null && !(gv >= 0)) || (av != null && !(av >= 0))) { setErr(t('estimates.err_bad_price', 'Prices must be a number, zero or more.')); return; }
+    const body = { part_number: partNo.trim() || undefined };
+    for (const c of pref) {
+      const s = cats[c];
+      const col = catCols(c);
+      if (s.avail === 'no') { body[col.available] = false; body[col.price] = null; body[col.expected] = null; continue; }
+      if (s.price.trim() === '' || !(Number(s.price) >= 0)) {
+        setErr(t('estimates.err_cat_price', 'Enter the {{cat}} price, or mark it not available.', { cat: categoryLabel(t, c) })); return;
+      }
+      if (s.when === 'date' && !s.date) { setErr(t('estimates.err_cat_date', 'Enter the expected delivery date for {{cat}}, or choose In stock.', { cat: categoryLabel(t, c) })); return; }
+      body[col.available] = true; body[col.price] = Number(s.price); body[col.expected] = s.when === 'date' ? s.date : null;
+    }
+    if (!(Number(qty) > 0)) { setErr(t('estimates.err_qty_store', 'The quantity must be more than zero.')); return; }
+    if (Number(qty) !== Number(line.quantity)) body.quantity = Number(qty);
+    if (canOffer && alt.on) {
+      if (alt.price.trim() === '' || !(Number(alt.price) >= 0)) { setErr(t('estimates.err_alt_price', 'Enter the alternative’s price.')); return; }
+      if (alt.when === 'date' && !alt.date) { setErr(t('estimates.err_alt_date', 'Enter the alternative’s expected delivery date, or choose In stock.')); return; }
+      body.alternative = { option: alt.option, for: unavailable.includes(alt.for) ? alt.for : unavailable[0], price: Number(alt.price), expected_date: alt.when === 'date' ? alt.date : null };
+    } else if (oldAlt) {
+      body.alternative = null;
+    }
     setSaving(true); setErr('');
     try {
-      const res = await api.patch(`/estimates/${estimateId}/lines/${line.id}/pricing`, {
-        genuine_price: gv, genuine_available: !gNA,
-        aftermarket_price: av, aftermarket_available: !aNA,
-        part_number: partNo.trim() || undefined,
-      });
+      const res = await api.patch(`/estimates/${estimateId}/lines/${line.id}/pricing`, body);
       if (!res.success) {
         setErr(res.status === 403 ? t('estimates.err_price_403', 'Only the Storekeeper or a manager can price parts.') : (res.message || t('estimates.err_generic', 'That did not work')));
         return;
@@ -754,35 +821,106 @@ function PartPricingEditor({ t, estimateId, line, onSaved, onCancel }) {
     }
   }
 
-  const onKey = ev => { if (ev.key === 'Enter') save(); };
   return (
     <div className="es-priceEd">
-      <div className="es-priceEdHead"><Label width={14} height={14} /> {t('estimates.store_price', 'Store price')}</div>
+      <div className="es-priceEdHead"><Label width={14} height={14} /> {t('estimates.store_price_cat', 'Store price — the customer asked for {{cats}}', { cats: categoryWords(t, pref) })}</div>
+      {pref.map(c => {
+        const s = cats[c];
+        const label = categoryLabel(t, c);
+        return (
+          <div key={c} className="es-catRow">
+            <div className="es-catName">{label}</div>
+            <div className="es-priceField">
+              <span>{t('estimates.availability', 'Availability')}</span>
+              <select className="es-input es-inputSm" value={s.avail} onChange={ev => setCat(c, { avail: ev.target.value })} aria-label={`${label} — ${t('estimates.availability', 'Availability')}`}>
+                <option value="yes">{t('estimates.available', 'Available')}</option>
+                <option value="no">{t('estimates.not_available_short', 'Not available')}</option>
+              </select>
+            </div>
+            {s.avail === 'yes' && (
+              <>
+                <div className="es-priceField">
+                  <span>{t('estimates.unit_price', 'Price (each)')}</span>
+                  <input className="es-input es-inputSm" type="number" min="0" step="0.01" inputMode="decimal" placeholder="AED"
+                    value={s.price} onChange={ev => setCat(c, { price: ev.target.value })} aria-label={`${label} — ${t('estimates.unit_price', 'Price (each)')}`} />
+                </div>
+                <DeliveryField t={t} label={label} value={s.when} date={s.date} onWhen={v => setCat(c, { when: v })} onDate={v => setCat(c, { date: v })} />
+              </>
+            )}
+          </div>
+        );
+      })}
+
       <div className="es-priceEdFields">
         <div className="es-priceField">
-          <span>{t('estimates.genuine', 'Genuine')}</span>
-          <input className="es-input es-inputSm" type="number" min="0" step="0.01" inputMode="decimal" disabled={gNA}
-            placeholder={gNA ? t('estimates.na', 'N/A') : 'AED'} value={gNA ? '' : g} onChange={ev => setG(ev.target.value)} onKeyDown={onKey} />
-          <label className="es-naChk"><input type="checkbox" checked={gNA} onChange={ev => setGNA(ev.target.checked)} /> {t('estimates.na', 'N/A')}</label>
-        </div>
-        <div className="es-priceField">
-          <span>{t('estimates.after_market', 'After-Market')}</span>
-          <input className="es-input es-inputSm" type="number" min="0" step="0.01" inputMode="decimal" disabled={aNA}
-            placeholder={aNA ? t('estimates.na', 'N/A') : 'AED'} value={aNA ? '' : a} onChange={ev => setA(ev.target.value)} onKeyDown={onKey} />
-          <label className="es-naChk"><input type="checkbox" checked={aNA} onChange={ev => setANA(ev.target.checked)} /> {t('estimates.na', 'N/A')}</label>
+          <span>{t('estimates.qty_store', 'Quantity')}</span>
+          <input className="es-input es-inputSm es-inputQty" type="number" min="0" step="1" inputMode="decimal" value={qty} onChange={ev => setQty(ev.target.value)} />
         </div>
         <div className="es-priceField">
           <span>{t('estimates.part_no', 'Part no.')}</span>
-          <input className="es-input es-inputSm es-inputPn" value={partNo} onChange={ev => setPartNo(ev.target.value)} onKeyDown={onKey} />
-        </div>
-        <div className="es-priceActions">
-          {onCancel && <button type="button" className="es-btn es-btnGhost es-btnSm" disabled={saving} onClick={onCancel}>{t('estimates.cancel', 'Cancel')}</button>}
-          <button type="button" className="es-btn es-btnSm" disabled={saving} onClick={save}>
-            <Check width={14} height={14} /> {saving ? t('estimates.saving', 'Saving…') : t('estimates.save', 'Save')}
-          </button>
+          <input className="es-input es-inputSm es-inputPn" value={partNo} onChange={ev => setPartNo(ev.target.value)} />
         </div>
       </div>
+
+      {canOffer && (
+        <div className="es-altBox">
+          <label className="es-naChk">
+            <input type="checkbox" checked={alt.on} onChange={ev => setAlt(a => ({ ...a, on: ev.target.checked }))} />
+            {t('estimates.offer_alt', 'Offer an alternative — the customer has to approve it')}
+          </label>
+          {alt.on && (
+            <div className="es-priceEdFields">
+              <div className="es-priceField">
+                <span>{t('estimates.alt_category', 'Alternative')}</span>
+                <select className="es-input es-inputSm" value={alt.option} onChange={ev => setAlt(a => ({ ...a, option: ev.target.value }))} aria-label={t('estimates.alt_category', 'Alternative')}>
+                  {others.map(c => <option key={c} value={c}>{categoryLabel(t, c)}</option>)}
+                </select>
+              </div>
+              {unavailable.length > 1 && (
+                <div className="es-priceField">
+                  <span>{t('estimates.alt_instead_of', 'Instead of')}</span>
+                  <select className="es-input es-inputSm" value={unavailable.includes(alt.for) ? alt.for : unavailable[0]} onChange={ev => setAlt(a => ({ ...a, for: ev.target.value }))} aria-label={t('estimates.alt_instead_of', 'Instead of')}>
+                    {unavailable.map(c => <option key={c} value={c}>{categoryLabel(t, c)}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="es-priceField">
+                <span>{t('estimates.unit_price', 'Price (each)')}</span>
+                <input className="es-input es-inputSm" type="number" min="0" step="0.01" inputMode="decimal" placeholder="AED"
+                  value={alt.price} onChange={ev => setAlt(a => ({ ...a, price: ev.target.value }))} aria-label={`${t('estimates.alt_category', 'Alternative')} — ${t('estimates.unit_price', 'Price (each)')}`} />
+              </div>
+              <DeliveryField t={t} label={t('estimates.alt_category', 'Alternative')} value={alt.when} date={alt.date}
+                onWhen={v => setAlt(a => ({ ...a, when: v }))} onDate={v => setAlt(a => ({ ...a, date: v }))} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="es-priceActions">
+        {onCancel && <button type="button" className="es-btn es-btnGhost es-btnSm" disabled={saving} onClick={onCancel}>{t('estimates.cancel', 'Cancel')}</button>}
+        <button type="button" className="es-btn es-btnSm" disabled={saving} onClick={save}>
+          <Check width={14} height={14} /> {saving ? t('estimates.saving', 'Saving…') : t('estimates.save', 'Save')}
+        </button>
+      </div>
       {err && <div className="es-priceErr">{err}</div>}
+    </div>
+  );
+}
+
+/** In stock, or expected on a date. */
+function DeliveryField({ t, label, value, date, onWhen, onDate }) {
+  return (
+    <div className="es-priceField">
+      <span>{t('estimates.delivery', 'Delivery')}</span>
+      <div className="es-deliv">
+        <select className="es-input es-inputSm" value={value} onChange={ev => onWhen(ev.target.value)} aria-label={`${label} — ${t('estimates.delivery', 'Delivery')}`}>
+          <option value="stock">{t('estimates.in_stock_cap', 'In stock')}</option>
+          <option value="date">{t('estimates.expected_cap', 'Expected on…')}</option>
+        </select>
+        {value === 'date' && (
+          <input className="es-input es-inputSm" type="date" value={date} onChange={ev => onDate(ev.target.value)} aria-label={`${label} — ${t('estimates.expected_date', 'Expected date')}`} />
+        )}
+      </div>
     </div>
   );
 }

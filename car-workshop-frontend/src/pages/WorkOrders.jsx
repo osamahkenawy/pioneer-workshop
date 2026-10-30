@@ -399,7 +399,8 @@ export default function WorkOrders() {
   const [wizardSeq, setWizardSeq] = useState(0);
   const [editWorkOrder, setEditWorkOrder] = useState(null);
   // Prompt shown right after a job card is created, offering to jump straight
-  // into the intake inspection form (Customer Journey step 3).
+  // into the physical inspection (Step 3) — for an external customer the job
+  // card opens once they have acknowledged it.
   const [inspectionPrompt, setInspectionPrompt] = useState(null);
 
   /* A technician works from My Jobs (/mechanic); the workshop's whole book is
@@ -823,7 +824,7 @@ export default function WorkOrders() {
           <div style={{ display: _mob ? 'grid' : 'flex', gridTemplateColumns: _mob ? '1fr 1fr' : undefined, gap: _mob ? 10 : 16, marginBottom: _mob ? 16 : 24, flexWrap:'wrap' }}>
             <KPICard icon={ClipboardCheck} label={t('orders.stats.total_orders')} value={stats.total || 0} sub={t('orders.stats.today_count', { count: stats.today||0 })} color="#1e3a6b" />
             <KPICard icon={Clock} label={woFilterLabel(t, 'waiting')} value={count('waiting')}
-              sub={t('orders.stats.approved_waiting', '{{n}} approved, to assign', { n: n('approved_waiting') + n('estimate_approved') + n('auto_assign') })} color="#4338ca" />
+              sub={t('orders.stats.approved_waiting', '{{n}} approved, to assign', { n: stats.to_assign ?? (n('approved_waiting') + n('estimate_approved') + n('auto_assign')) })} color="#4338ca" />
             <KPICard icon={Wrench} label={woLabel(t, 'in_progress', 'short')} value={count('in_work')}
               sub={t('orders.stats.ready_collection', '{{n}} ready for collection', { n: count('ready') })} color="#0e7490" />
             <KPICard icon={CheckCircle} label={woFilterLabel(t, 'closed')} value={count('closed')} sub={fmtAED(stats.total_revenue)} color="#15803d" />
@@ -1686,7 +1687,7 @@ export default function WorkOrders() {
           fetchWorkOrders();
           fetchStats();
           dispatchPlanUpdate();
-          showToast(`Job card created${created?.work_order_number ? ` — ${created.work_order_number}` : ''} ✓`, 'success');
+          showToast(`Work order created${created?.work_order_number ? ` — ${created.work_order_number}` : ''} ✓`, 'success');
           if (created?.id) setInspectionPrompt(created);
         }}
         onUpdated={(updated) => {
@@ -1711,7 +1712,7 @@ export default function WorkOrders() {
         }}
       />
 
-      {/* Post-creation prompt — jump straight into the intake inspection form */}
+      {/* Post-creation prompt — jump straight into the physical inspection */}
       {inspectionPrompt && (
         <div
           onClick={() => setInspectionPrompt(null)}
@@ -1737,11 +1738,12 @@ export default function WorkOrders() {
               <Eye width={24} height={24} color="#1d4ed8" />
             </div>
             <h3 style={{ margin: '0 0 6px', fontSize: 17, fontWeight: 700, color: '#1e293b' }}>
-              Start the intake inspection?
+              {t('workOrders.physical_prompt_title', 'Start the physical inspection?')}
             </h3>
             <p style={{ margin: '0 0 24px', fontSize: 14, color: '#64748b', lineHeight: 1.5 }}>
-              {inspectionPrompt.work_order_number || 'This job card'} was created. Do the walk-around
-              damage check with the customer now, before the vehicle goes to the bay.
+              {inspectionPrompt.intake_customer_class === 'internal'
+                ? t('workOrders.physical_prompt_internal', '{{n}} was created and its job card is open. For an internal customer the walk-around is optional — do it now if you want the vehicle\'s condition on record.', { n: inspectionPrompt.work_order_number || t('workOrders.this_job_card', 'This job card') })
+                : t('workOrders.physical_prompt_body', '{{n}} was created. Walk round the vehicle with the customer now — its condition, any damage, photos — and ask them to sign. The job card opens once they have acknowledged it.', { n: inspectionPrompt.work_order_number || t('workOrders.this_job_card', 'This job card') })}
             </p>
             <div style={{ display: 'flex', gap: 10 }}>
               <button onClick={() => setInspectionPrompt(null)} style={{
@@ -1749,7 +1751,7 @@ export default function WorkOrders() {
                 border: '1px solid #e2e8f0', background: '#fff',
                 color: '#64748b', fontSize: 14, fontWeight: 600, cursor: 'pointer',
               }}>
-                Later
+                {t('workOrders.later', 'Later')}
               </button>
               <button
                 onClick={() => { const id = inspectionPrompt.id; setInspectionPrompt(null); navigate(`/work-orders/${id}/inspection?type=intake`); }}
@@ -1758,7 +1760,7 @@ export default function WorkOrders() {
                   background: '#1d4ed8', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
                 }}
               >
-                Start Inspection
+                {t('workOrders.start_inspection', 'Start the inspection')}
               </button>
             </div>
           </div>

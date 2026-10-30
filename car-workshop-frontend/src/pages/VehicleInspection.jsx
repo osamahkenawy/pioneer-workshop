@@ -1,18 +1,21 @@
 /**
  * Vehicle Inspection Form — the walk-around damage check, done with the
- * customer standing at the car: the intake inspection (Step 4, technical
- * inspection) and the joint walk-around at handover (Step 7).
+ * customer standing at the car: the physical inspection at drop-off (Step 3,
+ * type 'intake') and the joint walk-around at handover (Step 7).
  *
  * Pick a damage code from the legend, click the spot on the car diagram, and a
- * marker lands there. Completing the form stamps the matching Customer Journey
- * checkpoint on the work order.
+ * marker lands there; add photos of the vehicle (camera or files). Completing
+ * the form stamps the matching Customer Journey checkpoint on the work order.
  *
  * The inspection can also be done on the paper form and uploaded instead
  * (a PDF or photos of the pages) — "Upload the paper form" below.
  *
  * Reached from WorkOrderDetail and the job card workflow:
  * /work-orders/:id/inspection[?type=joint]. After it is completed the bar at
- * the bottom leads on to the next step (raise / open the estimate).
+ * the bottom leads on to the next step: for an external customer the job
+ * card opens once they have acknowledged the physical inspection (signed
+ * here, from the link or in the portal, or the paper form) — until then the
+ * bar says it waits for their signature; then the estimate.
  *
  * It ends with the customer's signature on the pad — or, when they are not at
  * the car, "Customer not present" and they sign from the link. Once completed,
@@ -27,7 +30,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft, Check, Printer, Trash, WarningTriangle, Erase, Upload, Page, EditPencil, NavArrowRight, OpenNewWindow,
-  Whatsapp, SendMail, Copy,
+  Whatsapp, SendMail, Copy, Camera,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
@@ -53,6 +56,10 @@ const PAGE_CSS = `
   .vi-mark-view { min-width: 100px; }
   .vi-mark-note { flex: 1 1 180px; min-width: 0; }
   .vi-status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; margin-inline-end: 6px; vertical-align: 1px; }
+  .vi-photos { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .vi-photo { position: relative; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; background: #f8fafc; break-inside: avoid; }
+  .vi-photo img, .vi-photo-wait { display: block; inline-size: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+  .vi-photo-del { position: absolute; inset-block-start: 6px; inset-inline-end: 6px; }
   @media screen and (max-width: 900px) {
     .vi-diagram-row { grid-template-columns: minmax(0, 1fr); }
     .vi-legend-card { order: -1; }
@@ -79,6 +86,7 @@ const PAGE_CSS = `
 `;
 
 const when = d => (d ? new Date(String(d).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const MAX_PHOTOS = 10;
 
 /** Clipboard, with the old textarea fallback for http:// and older browsers.
  *  `text` may be a promise (the link still being made): the write is started
@@ -139,6 +147,13 @@ export default function VehicleInspection() {
   const [savedAt, setSavedAt] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [estimate, setEstimate] = useState(null);   // the job's estimate, for the next step
+  const [jobCard, setJobCard] = useState(null);     // { needed, open, number }: the job card the physical inspection opens
+  const [jobCardNote, setJobCardNote] = useState('');
+  const [woNumber, setWoNumber] = useState(null);
+  const [photoUrls, setPhotoUrls] = useState({});    // photo id → blob URL (read with the staff login)
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const cameraRef = useRef(null);
+  const photoFileRef = useRef(null);
   const [share, setShare] = useState(null);         // the customer's link: { url, can_email, can_whatsapp, ... }
   const [sharing, setSharing] = useState('');       // channel being sent
   const [shareNote, setShareNote] = useState('');
@@ -173,14 +188,27 @@ export default function VehicleInspection() {
 
   useEffect(() => { load(); }, [load]);
 
-  // The next step after the inspection is pricing (process step 4): is there
-  // an estimate for this job card already?
+  // The next step after the inspection: for an external customer the job
+  // card waits for their acknowledgement (process step 3); then pricing
+  // (step 4) — is there an estimate for this job already?
   const loadNext = useCallback(async () => {
     try {
       const r = await api.get(`/workflow/work-orders/${id}`);
-      if (r.success) setEstimate(r.data?.estimate || null);
+      if (r.success) {
+        setEstimate(r.data?.estimate || null);
+        const main = (r.data?.job_cards || []).find(c => !c.parent_job_card_id);
+        setJobCard({ needed: !!r.data?.physical_inspection?.needed, open: !!main, number: main?.job_card_number || null });
+        setWoNumber(r.data?.work_order?.work_order_number || null);
+      }
     } catch { /* the bar still offers the way back to the job card */ }
   }, [id]);
+  // What completing or signing did to the job card (the server's job_card).
+  const noteJobCard = useCallback((jc) => {
+    if (!jc) return;
+    if (jc.opened_now) setJobCardNote(t('inspection.jc_opened_now', 'Job card {{n}} is open — the Supervisor, Foreman and Team Leader have been told. Next: the technical inspection and the estimate.', { n: jc.number }));
+    else if (jc.waiting_for_signature) setJobCardNote(t('inspection.jc_waits_signature', 'The job card opens when the customer signs — send them the link below.'));
+    loadNext();
+  }, [loadNext, t]);
   useEffect(() => { loadNext(); }, [loadNext]);
 
   // Once completed: the customer's link, and which channels reach them.
@@ -199,6 +227,7 @@ export default function VehicleInspection() {
     const r = await api.get(`/vehicle-inspections/${inspectionId}`).catch(() => null);
     if (r?.success) setInspection(r.data);
     loadShare();
+    loadNext();
   };
 
   function applyRow(row) {
@@ -228,14 +257,43 @@ export default function VehicleInspection() {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const isCompleted = inspection?.status === 'completed';
+  // The roles that record it (the server's mayRecord); the rest only view it.
+  const mayRecord = canDo(user, 'job.open')
+    || (inspectionType === 'joint' && canDo(user, 'delivery.handover'))
+    || (inspectionType === 'qc' && canDo(user, 'qc.perform'));
+  const locked = isCompleted || !mayRecord;
   const mode = inspection?.entry_mode === 'document' ? 'document' : 'form';
   const docs = Array.isArray(inspection?.documents) ? inspection.documents : [];
+  const photos = Array.isArray(inspection?.photos) ? inspection.photos : [];
+  // An external customer's job card waits for them to sign (process step 3).
+  const waitingAck = inspectionType === 'intake' && isCompleted && !!jobCard?.needed && !jobCard.open;
+
+  // The photos are private: read with the staff login, shown from memory.
+  const photoKey = photos.map(p => p.id).join(',');
+  useEffect(() => {
+    if (!inspection?.id || !photoKey) { setPhotoUrls({}); return undefined; }
+    let live = true;
+    const made = [];
+    (async () => {
+      const next = {};
+      for (const p of photos) {
+        try {
+          const res = await api.raw(`/vehicle-inspections/${inspection.id}/photos/${p.id}`);
+          if (!res.ok) continue;
+          next[p.id] = URL.createObjectURL(await res.blob());
+          made.push(next[p.id]);
+        } catch { /* shown as a placeholder */ }
+      }
+      if (live) setPhotoUrls(next);
+    })();
+    return () => { live = false; made.forEach(u => URL.revokeObjectURL(u)); };
+  }, [inspection?.id, photoKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Marker editing ── */
   // x / y come relative to the car picture (coord 'img'), so the marker stays
   // on that spot at any width — here, in print and on the customer's page.
   const addMark = (view, x, y, coord) => {
-    if (isCompleted || !activeCode) return;
+    if (locked || !activeCode) return;
     const mark = { id: `m${Date.now()}${markSeq.current++}`, view, code: activeCode, x, y, ...(coord ? { coord } : {}), note: '' };
     setMarks(prev => [...prev, mark]);
     setSelectedMarkId(mark.id);
@@ -249,7 +307,7 @@ export default function VehicleInspection() {
 
   /* ── Save / complete ── */
   const save = async ({ at = '' } = {}) => {
-    if (isCompleted) return true;
+    if (locked) return true;
     setSaving(true); setError('');
     try {
       const res = await api.put(`/vehicle-inspections/${inspection.id}`, {
@@ -285,7 +343,7 @@ export default function VehicleInspection() {
     setSaving(true);
     try {
       const res = await api.patch(`/vehicle-inspections/${inspection.id}/complete`, mode === 'form' ? { customer_present: present } : undefined);
-      if (res.success) { setInspection(res.data); setResign(false); loadNext(); }
+      if (res.success) { setInspection(res.data); setResign(false); noteJobCard(res.job_card); loadNext(); }
       else setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } catch (e) {
       setError(e.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
@@ -294,7 +352,7 @@ export default function VehicleInspection() {
 
   /* ── Fill in on screen, or upload the paper form ── */
   const switchMode = async (next) => {
-    if (isCompleted || next === mode) return;
+    if (locked || next === mode) return;
     setError('');
     const res = await api.put(`/vehicle-inspections/${inspection.id}`, { entry_mode: next }).catch(() => null);
     if (res?.success) setInspection(res.data);
@@ -331,6 +389,31 @@ export default function VehicleInspection() {
       setError(e.message || t('inspection.err_open_doc', 'Could not open the document'));
     }
   };
+  /* ── Vehicle photos (on-screen form) ── */
+  const uploadPhotos = async (fileList, input) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploadingPhotos(true); setError('');
+    try {
+      const fd = new FormData();
+      files.forEach(f => fd.append('files', f));
+      const res = await api.post(`/vehicle-inspections/${inspection.id}/photos`, fd);
+      if (res.success) setInspection(res.data);
+      else setError(res.message || t('inspection.err_photo', 'Could not add the photo'), 'photos');
+    } catch (e) {
+      setError(e.message || t('inspection.err_photo', 'Could not add the photo'), 'photos');
+    } finally {
+      setUploadingPhotos(false);
+      if (input) input.value = '';
+    }
+  };
+  const removePhoto = async (photo) => {
+    if (!window.confirm(t('inspection.confirm_remove_photo', 'Remove this photo?'))) return;
+    const res = await api.delete(`/vehicle-inspections/${inspection.id}/photos/${photo.id}`).catch(() => null);
+    if (res?.success) setInspection(res.data);
+    else setError(res?.message || t('inspection.err_remove_photo', 'Could not remove the photo'), 'photos');
+  };
+
   const removeDoc = async (doc) => {
     if (!window.confirm(t('inspection.confirm_remove_doc', 'Remove "{{name}}"?', { name: doc.name }))) return;
     const res = await api.delete(`/vehicle-inspections/${inspection.id}/documents/${doc.id}`).catch(() => null);
@@ -351,8 +434,8 @@ export default function VehicleInspection() {
   // The pad takes a signature while none is saved (or it is being redone
   // before completion); after completion only if the customer has not signed.
   const signed = !!inspection?.signature_url;
-  const notPresent = !isCompleted && form.customer_present === false;
-  const padOpen = mode === 'form' && (!signed || (resign && !isCompleted)) && !notPresent;
+  const notPresent = !locked && form.customer_present === false;
+  const padOpen = mayRecord && mode === 'form' && (!signed || (resign && !isCompleted)) && !notPresent;
 
   const startDraw = (e) => {
     if (!padOpen) return;
@@ -395,6 +478,8 @@ export default function VehicleInspection() {
       setInspection(res.data || (i => ({ ...i, signature_url: res.url })));
       signatureDirty.current = false;
       setResign(false);
+      // Signed after completion: the acknowledgement that opens the job card.
+      noteJobCard(res.job_card);
       return true;
     } catch (e) {
       setError(e.message || t('inspection.err_signature', 'Could not save the signature'), at);
@@ -508,7 +593,7 @@ export default function VehicleInspection() {
   }[v] || v);
   const field = (key, label, extra = {}) => (
     <div><label style={LBL} htmlFor={`vi-f-${key}`}>{label}</label>
-      <input id={`vi-f-${key}`} style={INPUT} disabled={isCompleted} value={form[key] ?? ''} onChange={e => set(key, e.target.value)} {...extra} /></div>
+      <input id={`vi-f-${key}`} style={INPUT} disabled={locked} value={form[key] ?? ''} onChange={e => set(key, e.target.value)} {...extra} /></div>
   );
 
   return (
@@ -518,16 +603,16 @@ export default function VehicleInspection() {
       {/* ── Header ── */}
       <div className="vi-no-print" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
         <button style={{ ...BTN, background: '#f1f5f9', color: '#334155' }} onClick={() => navigate(`/work-orders/${id}`)}>
-          <ArrowLeft width={14} height={14} /> {t('inspection.job_card', 'Job card')}
+          <ArrowLeft width={14} height={14} /> {t('inspection.work_order', 'Work order')}
         </button>
         <div style={{ flex: 1 }} />
-        {savedAt && !isCompleted && (
+        {savedAt && !locked && (
           <span style={{ fontSize: 12, color: '#16a34a' }}>{t('inspection.saved_at', 'Saved {{time}}', { time: savedAt.toLocaleTimeString() })}</span>
         )}
         <button style={{ ...BTN, background: '#f1f5f9', color: '#334155' }} onClick={() => window.print()}>
           <Printer width={14} height={14} /> {t('inspection.print', 'Print')}
         </button>
-        {!isCompleted && (
+        {!locked && (
           <>
             <button disabled={saving} style={{ ...BTN, background: '#fff', color: '#1e3a6b', borderColor: '#c7d2fe' }} onClick={() => save()}>
               <Check width={14} height={14} /> {saving ? t('inspection.saving', 'Saving…') : t('inspection.save_draft', 'Save draft')}
@@ -537,8 +622,8 @@ export default function VehicleInspection() {
             </button>
           </>
         )}
-        {/* Done: straight on to the next step of the process (pricing). */}
-        {isCompleted && inspectionType !== 'joint' && (estimate ? (
+        {/* Done: straight on to the next step of the process — pricing, once the job card is open. */}
+        {isCompleted && inspectionType !== 'joint' && !waitingAck && (estimate ? (
           <button style={{ ...BTN, background: '#ea580c', color: '#fff' }} onClick={() => navigate(`/estimates?id=${estimate.id}`)}>
             {t('inspection.next_open_estimate', 'Next: open the estimate')} <NavArrowRight width={14} height={14} />
           </button>
@@ -547,9 +632,9 @@ export default function VehicleInspection() {
             {t('inspection.next_raise_estimate', 'Next: raise the estimate')} <NavArrowRight width={14} height={14} />
           </button>
         ) : null)}
-        {isCompleted && (inspectionType === 'joint' || (!estimate && !canDo(user, 'estimate.raise'))) && (
+        {isCompleted && (inspectionType === 'joint' || waitingAck || (!estimate && !canDo(user, 'estimate.raise'))) && (
           <button style={{ ...BTN, background: '#ea580c', color: '#fff' }} onClick={() => navigate(`/work-orders/${id}`)}>
-            {t('inspection.next_job_card', 'Next: back to the job card')} <NavArrowRight width={14} height={14} />
+            {t('inspection.next_work_order', 'Next: back to the work order')} <NavArrowRight width={14} height={14} />
           </button>
         )}
       </div>
@@ -568,8 +653,9 @@ export default function VehicleInspection() {
         <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
           {inspectionType === 'joint'
             ? t('inspection.type_joint', 'Joint inspection at handover')
-            : t('inspection.type_intake', 'Intake inspection — exterior condition')}
-          {' · '}{t('inspection.job_card_n', 'Job card {{n}}', { n: inspection.work_order_number || `#${id}` })}
+            : t('inspection.type_physical', 'Physical inspection — vehicle condition at drop-off')}
+          {' · '}{t('inspection.work_order_n', 'Work order {{n}}', { n: inspection.work_order_number || woNumber || `#${id}` })}
+          {jobCard?.number ? <>{' · '}{t('inspection.job_card_n', 'Job card {{n}}', { n: jobCard.number })}</> : null}
           {isCompleted && (
             <span style={{ marginInlineStart: 8, background: '#dcfce7', color: '#15803d', padding: '2px 10px', borderRadius: 12, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', display: 'inline-block' }}>
               {t('inspection.completed_badge', 'Completed')}
@@ -587,11 +673,11 @@ export default function VehicleInspection() {
         ].map(([key, Icon, title, sub]) => {
           const on = mode === key;
           return (
-            <button key={key} type="button" className="vi-mode-btn" disabled={isCompleted && !on} aria-pressed={on}
+            <button key={key} type="button" className="vi-mode-btn" disabled={locked && !on} aria-pressed={on}
               onClick={() => switchMode(key)}
               style={{ ...BTN, padding: '10px 14px', textAlign: 'start', alignItems: 'flex-start', minWidth: 230,
                 background: on ? '#fff7ed' : '#fff', borderColor: on ? '#f97316' : '#e2e8f0', color: '#1e293b',
-                cursor: isCompleted ? 'default' : 'pointer', opacity: isCompleted && !on ? 0.45 : 1 }}>
+                cursor: locked ? 'default' : 'pointer', opacity: locked && !on ? 0.45 : 1 }}>
               <Icon width={18} height={18} style={{ color: on ? '#ea580c' : '#64748b', flexShrink: 0, marginTop: 1 }} />
               <span><span style={{ display: 'block', fontWeight: 800 }}>{title}</span>
                 <span style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b' }}>{sub}</span></span>
@@ -607,7 +693,7 @@ export default function VehicleInspection() {
             <span style={{ fontSize: 14, fontWeight: 800, color: '#1e3a6b' }}>{t('inspection.docs_title', 'Inspection form (uploaded)')}</span>
             <span style={{ fontSize: 12, color: '#64748b' }}>{t('inspection.docs_limits', 'PDF, JPG, PNG or WEBP · up to 15 MB each · up to 10 files')}</span>
             <div style={{ flex: 1 }} />
-            {!isCompleted && (
+            {!locked && (
               <>
                 <input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/*"
                   style={{ display: 'none' }} onChange={e => uploadDocs(e.target.files)} />
@@ -622,10 +708,10 @@ export default function VehicleInspection() {
           </div>
           {docs.length === 0 ? (
             <div
-              onDragOver={e => { if (!isCompleted) e.preventDefault(); }}
-              onDrop={e => { if (isCompleted) return; e.preventDefault(); uploadDocs(e.dataTransfer.files); }}
+              onDragOver={e => { if (!locked) e.preventDefault(); }}
+              onDrop={e => { if (locked) return; e.preventDefault(); uploadDocs(e.dataTransfer.files); }}
               style={{ border: '2px dashed #cbd5e1', borderRadius: 10, padding: '26px 16px', textAlign: 'center', color: '#64748b', fontSize: 13 }}>
-              {isCompleted
+              {locked
                 ? t('inspection.docs_empty', 'No file yet. Choose the scanned form or photos of each page.')
                 : t('inspection.docs_empty_drop', 'No file yet. Choose the scanned form or photos of each page — or drop them here.')}
             </div>
@@ -639,7 +725,7 @@ export default function VehicleInspection() {
                   <button type="button" className="vi-no-print" style={{ ...BTN, padding: '5px 10px', background: '#f1f5f9', color: '#334155' }} onClick={() => viewDoc(d)}>
                     <OpenNewWindow width={13} height={13} /> {t('inspection.view_doc', 'View')}
                   </button>
-                  {!isCompleted && (
+                  {!locked && (
                     <button type="button" className="vi-no-print" aria-label={t('inspection.remove_doc', 'Remove {{name}}', { name: d.name })}
                       style={{ ...BTN, padding: '5px 8px', background: '#fff', color: '#dc2626', borderColor: '#fecaca' }} onClick={() => removeDoc(d)}>
                       <Trash width={13} height={13} />
@@ -680,12 +766,12 @@ export default function VehicleInspection() {
         <div style={{ ...CARD, marginBottom: 0 }}>
           <CarDamageDiagram
             marks={marks}
-            activeCode={isCompleted ? '' : activeCode}
+            activeCode={locked ? '' : activeCode}
             selectedMarkId={selectedMarkId}
-            onAddMark={isCompleted ? undefined : addMark}
+            onAddMark={locked ? undefined : addMark}
             onSelectMark={setSelectedMarkId}
           />
-          {!isCompleted && (
+          {!locked && (
             <p className="vi-no-print" role="status" style={{ margin: '10px 2px 0', fontSize: 12, color: activeCode ? '#0e7490' : '#64748b' }}>
               {activeCode
                 ? t('inspection.hint_active', 'Click the spot on the car to mark “{{label}}”.', { label: damageLabel(t, activeCode) })
@@ -707,14 +793,14 @@ export default function VehicleInspection() {
                 <button
                   key={code}
                   type="button"
-                  disabled={isCompleted}
+                  disabled={locked}
                   aria-pressed={on}
                   onClick={() => setActiveCode(on ? '' : code)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 6,
                     border: `1px solid ${on ? '#0e7490' : '#e2e8f0'}`,
                     background: on ? '#cffafe' : '#fff',
-                    cursor: isCompleted ? 'default' : 'pointer', textAlign: 'start', width: '100%',
+                    cursor: locked ? 'default' : 'pointer', textAlign: 'start', width: '100%',
                   }}
                 >
                   <span style={{
@@ -759,12 +845,12 @@ export default function VehicleInspection() {
                   style={{ ...INPUT, padding: '5px 8px', fontSize: 12 }}
                   placeholder={t('inspection.note_ph', 'Note (optional)')}
                   aria-label={t('inspection.note_for', 'Note for mark {{n}}', { n: i + 1 })}
-                  disabled={isCompleted}
+                  disabled={locked}
                   value={m.note || ''}
                   onClick={e => e.stopPropagation()}
                   onChange={e => updateMark(m.id, { note: e.target.value })}
                 />
-                {!isCompleted && (
+                {!locked && (
                   <button className="vi-no-print" type="button"
                     aria-label={t('inspection.remove_mark', 'Remove mark {{n}}', { n: i + 1 })}
                     onClick={e => { e.stopPropagation(); removeMark(m.id); }}
@@ -777,23 +863,68 @@ export default function VehicleInspection() {
           </div>
         )}
       </div>
+
+      {/* ── Vehicle photos ── */}
+      <div style={CARD}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#1e3a6b' }}>{t('inspection.photos_n', 'Vehicle photos ({{n}})', { n: photos.length })}</span>
+          <span className="vi-no-print" style={{ fontSize: 12, color: '#64748b' }}>{t('inspection.photos_limits', 'JPG, PNG or WEBP · up to 15 MB each · up to {{n}} photos', { n: MAX_PHOTOS })}</span>
+          <div style={{ flex: 1 }} />
+          {!locked && photos.length < MAX_PHOTOS && (
+            <span className="vi-no-print" style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 8 }}>
+              <input ref={cameraRef} type="file" accept="image/jpeg,image/png,image/webp" capture="environment"
+                style={{ display: 'none' }} onChange={e => uploadPhotos(e.target.files, e.target)} />
+              <input ref={photoFileRef} type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                style={{ display: 'none' }} onChange={e => uploadPhotos(e.target.files, e.target)} />
+              <button type="button" disabled={uploadingPhotos} style={{ ...BTN, background: '#1e3a6b', color: '#fff' }} onClick={() => cameraRef.current?.click()}>
+                <Camera width={14} height={14} /> {uploadingPhotos ? t('inspection.uploading', 'Uploading…') : t('inspection.take_photo', 'Take a photo')}
+              </button>
+              <button type="button" disabled={uploadingPhotos} style={{ ...BTN, background: '#fff', color: '#1e3a6b', borderColor: '#c7d2fe' }} onClick={() => photoFileRef.current?.click()}>
+                <Upload width={14} height={14} /> {t('inspection.choose_photos', 'Choose photos')}
+              </button>
+            </span>
+          )}
+        </div>
+        {photos.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: '#64748b', margin: 0 }}>
+            {isCompleted ? t('inspection.no_photos', 'No photos were taken.') : t('inspection.no_photos_yet', 'No photos yet. Photograph the vehicle with the customer — the damage, each side, the dashboard.')}
+          </p>
+        ) : (
+          <ul className="vi-photos">
+            {photos.map(p => (
+              <li key={p.id} className="vi-photo">
+                {photoUrls[p.id]
+                  ? <a href={photoUrls[p.id]} target="_blank" rel="noopener noreferrer"><img src={photoUrls[p.id]} alt={p.name || t('inspection.photo', 'Vehicle photo')} /></a>
+                  : <span className="vi-photo-wait" aria-hidden />}
+                {!locked && (
+                  <button type="button" className="vi-no-print vi-photo-del" aria-label={t('inspection.remove_photo', 'Remove photo')}
+                    style={{ ...BTN, padding: '5px 8px', background: '#fff', color: '#dc2626', borderColor: '#fecaca' }} onClick={() => removePhoto(p)}>
+                    <Trash width={13} height={13} />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {errorHere('photos')}
+      </div>
       </>)}
 
       {/* ── Service recommended / accepted ── */}
       <div style={{ ...CARD, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(260px, 100%), 1fr))', gap: 12 }}>
         <div>
           <label style={LBL} htmlFor="vi-f-service_recommended">{t('inspection.field.service_recommended', 'Service recommended')}</label>
-          <textarea id="vi-f-service_recommended" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={isCompleted}
+          <textarea id="vi-f-service_recommended" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={locked}
             value={form.service_recommended} onChange={e => set('service_recommended', e.target.value)} />
         </div>
         <div>
           <label style={LBL} htmlFor="vi-f-service_accepted">{t('inspection.field.service_accepted', 'Service accepted')}</label>
-          <textarea id="vi-f-service_accepted" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={isCompleted}
+          <textarea id="vi-f-service_accepted" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={locked}
             value={form.service_accepted} onChange={e => set('service_accepted', e.target.value)} />
         </div>
         <div>
           <label style={LBL} htmlFor="vi-f-notes">{t('inspection.field.notes', 'Notes')}</label>
-          <textarea id="vi-f-notes" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={isCompleted}
+          <textarea id="vi-f-notes" rows={3} style={{ ...INPUT, resize: 'vertical' }} disabled={locked}
             value={form.notes} onChange={e => set('notes', e.target.value)} />
         </div>
       </div>
@@ -814,12 +945,12 @@ export default function VehicleInspection() {
               </button>
             </>
           )}
-          {signed && resign && !isCompleted && (
+          {signed && resign && !locked && (
             <button className="vi-no-print" type="button" style={{ ...BTN, padding: '5px 10px', background: '#f1f5f9', color: '#334155' }} onClick={() => { clearSignature(); setResign(false); }}>
               {t('inspection.keep_signature', 'Keep the saved signature')}
             </button>
           )}
-          {signed && !resign && !isCompleted && (
+          {signed && !resign && !locked && (
             <button className="vi-no-print" type="button" style={{ ...BTN, padding: '5px 10px', background: '#f1f5f9', color: '#334155' }} onClick={() => setResign(true)}>
               <EditPencil width={13} height={13} /> {t('inspection.sign_again', 'Sign again')}
             </button>
@@ -841,7 +972,7 @@ export default function VehicleInspection() {
                     placeholder={form.customer_name || t('inspection.optional', 'Optional')}
                     value={form.signed_by_name || ''} onChange={e => set('signed_by_name', e.target.value)} />
                 </div>
-                {!isCompleted && !signed && (
+                {!locked && !signed && (
                   <label className="vi-no-print vi-check" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#334155', cursor: 'pointer', paddingBlock: 8 }}>
                     <input type="checkbox" checked={notPresent} onChange={e => toggleNotPresent(e.target.checked)} />
                     {t('inspection.not_present', "Customer not present — they'll sign from the link")}
@@ -865,7 +996,7 @@ export default function VehicleInspection() {
                 {t('inspection.not_present_hint', 'Complete the inspection, then send the customer the link — they check it and sign on their phone.')}
               </p>
             )}
-            {isCompleted && (
+            {isCompleted && mayRecord && (
               <p className="vi-no-print" style={{ margin: '6px 0 0', fontSize: 12.5, color: '#92400e' }}>
                 {jobClosed
                   ? t('inspection.completed_unsigned_closed', "Completed without the customer's signature. If they are here now, they can sign above (once).")
@@ -955,23 +1086,33 @@ export default function VehicleInspection() {
         boxShadow: '0 -4px 14px rgba(15,23,42,.06)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10,
       }}>
         <div style={{ flex: '1 1 260px', minWidth: 0, fontSize: 13, color: '#334155' }}>
-          {!isCompleted ? (
-            <><b style={{ color: '#1e3a6b' }}>{inspectionType === 'joint' ? t('inspection.bar_joint', 'Handover inspection') : t('inspection.bar_intake', 'Step 4 · Technical inspection')}</b>
+          {!isCompleted && !mayRecord ? (
+            <><b style={{ color: '#1e3a6b' }}>{t('inspection.bar_view_only', 'View only.')}</b>
+              {' '}{t('inspection.bar_view_only_hint', 'The Service Advisor or the Supervisor records the inspection with the customer.')}</>
+          ) : !isCompleted ? (
+            <><b style={{ color: '#1e3a6b' }}>{inspectionType === 'joint' ? t('inspection.bar_joint', 'Handover inspection') : t('inspection.bar_physical', 'Step 3 · Physical inspection')}</b>
               {' — '}{mode === 'document'
                 ? t('inspection.bar_document', 'upload the paper form, then complete the inspection.')
-                : t('inspection.bar_form', 'mark what you find, then complete the inspection.')}</>
+                : inspectionType === 'joint'
+                  ? t('inspection.bar_form', 'mark what you find, then complete the inspection.')
+                  : t('inspection.bar_form_physical', 'mark what you find, add photos, and complete it with the customer\'s signature.')}</>
           ) : inspectionType === 'joint' ? (
             <><b style={{ color: '#15803d' }}>{t('inspection.bar_done', 'Inspection completed.')}</b> {t('inspection.bar_done_joint', 'Continue on the job card.')}</>
+          ) : waitingAck ? (
+            <><b style={{ color: '#b45309' }}>{t('inspection.bar_done', 'Inspection completed.')}</b> {t('inspection.bar_waiting_signature', 'Waiting for the customer\'s signature — send them the link above. The job card opens when they sign.')}</>
           ) : estimate ? (
             <><b style={{ color: '#15803d' }}>{t('inspection.bar_done', 'Inspection completed.')}</b> {t('inspection.bar_done_estimate', 'Next: the estimate {{n}} (process steps 4–5).', { n: estimate.estimate_number })}</>
           ) : (
-            <><b style={{ color: '#15803d' }}>{t('inspection.bar_done', 'Inspection completed.')}</b> {t('inspection.bar_done_pricing', 'Next (process step 4): pricing — the Service Advisor raises the estimate with the findings; the Storekeeper prices the parts.')}</>
+            <><b style={{ color: '#15803d' }}>{t('inspection.bar_done', 'Inspection completed.')}</b>
+              {jobCard?.number && !jobCardNote ? ` ${t('inspection.bar_jc_open', 'Job card {{n}} is open.', { n: jobCard.number })}` : ''}
+              {' '}{t('inspection.bar_done_pricing', 'Next (process step 4): pricing — the Service Advisor raises the estimate with the findings; the Storekeeper prices the parts.')}</>
           )}
+          {jobCardNote && <div role="status" style={{ marginTop: 4, fontSize: 12.5, fontWeight: 600, color: waitingAck ? '#b45309' : '#15803d' }}>{jobCardNote}</div>}
         </div>
         <button type="button" style={{ ...BTN, background: '#f1f5f9', color: '#334155' }} onClick={() => navigate(`/work-orders/${id}`)}>
-          <ArrowLeft width={14} height={14} /> {t('inspection.back_to_job_card', 'Back to job card')}
+          <ArrowLeft width={14} height={14} /> {t('inspection.back_to_work_order', 'Back to the work order')}
         </button>
-        {!isCompleted ? (
+        {!isCompleted ? mayRecord && (
           <>
             <button type="button" disabled={saving} style={{ ...BTN, background: '#fff', color: '#1e3a6b', borderColor: '#c7d2fe' }} onClick={() => save({ at: 'bar' })}>
               <Check width={14} height={14} /> {saving ? t('inspection.saving', 'Saving…') : t('inspection.save_draft', 'Save draft')}
@@ -980,7 +1121,7 @@ export default function VehicleInspection() {
               {t('inspection.complete', 'Complete inspection')} <NavArrowRight width={14} height={14} />
             </button>
           </>
-        ) : inspectionType !== 'joint' && (
+        ) : inspectionType !== 'joint' && !waitingAck && (
           estimate ? (
             <button type="button" style={{ ...BTN, background: '#ea580c', color: '#fff' }} onClick={() => navigate(`/estimates?id=${estimate.id}`)}>
               {t('inspection.open_estimate', 'Open the estimate')} <NavArrowRight width={14} height={14} />

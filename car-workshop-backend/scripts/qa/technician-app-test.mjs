@@ -10,7 +10,7 @@ const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
 if (!['localhost', '127.0.0.1'].includes(env.DB_HOST)) throw new Error('local only');
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME, dateStrings: true });
 const q = async (s, p = []) => (await db.query(s, p))[0];
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const out = []; let section = '';
 const expect = (what, ok, detail) => out.push(`${ok ? 'PASS' : 'FAIL'}  [${section}] ${what}${detail !== undefined && detail !== '' ? '  — ' + detail : ''}`);
 const call = async (method, path, token, body) => {
@@ -20,9 +20,12 @@ const call = async (method, path, token, body) => {
 const brief = r => `HTTP ${r.status}${r.json?.code ? ' ' + r.json.code : ''}`;
 const p2 = n => String(n).padStart(2, '0');
 const local = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:00`;
-const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {}; for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 const created = { users: [], mechanics: [], customers: [], vehicles: [], work_orders: [] };
+// A 1×1 PNG, as the signature pad would send.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const QC_OK = [{ key: 'issue_repaired', item: 'Issue repaired', passed: true }, { key: 'test_drive', item: 'Test drive', passed: true }, { key: 'other_issues', item: 'Other issues', passed: true, notes: '' }];
 
 try {
@@ -64,7 +67,13 @@ try {
     const wo = await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh.id, customer_name: cust.full_name, customer_phone: cust.phone,
       description, odometer_in: 54321, payment_method: 'cash', service_fee: 0, items: [] });
     const woId = wo.json?.data?.id; created.work_orders.push(woId);
-    const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [{ job_name: 'Oil seal', line_type: 'labour', description: 'Replace oil seal - labour', quantity: 1.5, unit_price: 80 }] });
+    const lines = [{ job_name: 'Oil seal', line_type: 'labour', description: 'Replace oil seal - labour', quantity: 1.5, unit_price: 80 }];
+    // An external customer: the job card opens when they acknowledge the physical inspection, and the estimate follows.
+    const gated = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines });
+    const insp = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
+    await call('PATCH', `/vehicle-inspections/${insp?.id}/signature`, advisor, { signature: PNG, name: cust.full_name });
+    const ack = await call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, advisor, {});
+    const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines });
     await call('POST', `/estimates/${est.json.estimateId}/internal-approve`, supervisor);
     await call('POST', `/estimates/${est.json.estimateId}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
     const [{ approval_token: atok }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [est.json.estimateId]);
@@ -73,11 +82,12 @@ try {
     }
     const [w] = await q('SELECT id, work_order_number, service_status_token, customer_approved_at FROM work_orders WHERE id = ?', [woId]);
     const [jc] = await q('SELECT id, job_card_number FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId]);
-    return { ...w, main: jc };
+    return { ...w, main: jc, gated: gated.status === 409 && gated.json?.code === 'PHYSICAL_INSPECTION_REQUIRED', opened: ack.json?.job_card?.opened_now === true };
   };
   const A = await approvedJob(v1, 'QA TA oil leak');
   const B = await approvedJob(v2, 'QA TA brake noise');
-  expect('two job cards opened and approved by the customer', !!A.customer_approved_at && !!B.customer_approved_at && !!A.main && !!B.main, `${A.work_order_number}, ${B.work_order_number}`);
+  expect('two job cards: each opened by the customer\'s acknowledgement of the physical inspection (the estimate refused before it), then approved by the customer',
+    A.gated && B.gated && A.opened && B.opened && !!A.customer_approved_at && !!B.customer_approved_at && !!A.main && !!B.main, `${A.work_order_number}, ${B.work_order_number}`);
   const now = new Date();
   const asg = await call('POST', '/team-leader/assign', leader, { work_order_id: A.id, mechanic_id: mech,
     scheduled_start_at: local(new Date(now.getTime() - 30 * 60000)), scheduled_end_at: local(new Date(now.getTime() + 90 * 60000)) });
@@ -217,6 +227,10 @@ try {
 } catch (e) {
   out.push('ERROR ' + e.stack);
 } finally {
+  // Signature images of the inspections signed here.
+  for (const { u } of await q("SELECT signature_url u FROM vehicle_inspections WHERE id > ? AND signature_url LIKE '/uploads/signatures/sig_insp%'", [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(u)) fs.rmSync(BE + u, { force: true });
+  }
   // Only this suite's rows may be above the baseline in the tables it creates in.
   const foreign = [];
   for (const [t, ids] of Object.entries(created)) {

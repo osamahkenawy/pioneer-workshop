@@ -1,9 +1,10 @@
 /**
  * EstimateApproval — public, no-login page a customer reaches from the
  * "Review and approve" link in the estimate email or WhatsApp message
- * (routes/estimates.js POST /:id/send). Mirrors CustomerSurveyPublic.jsx's
- * shape: plain fetch against /api/public/..., no auth headers, its own small
- * CSS file. Most customers open it on a phone, from WhatsApp.
+ * (routes/estimates.js POST /:id/send), and from "Review & approve" in the
+ * customer portal. Mirrors CustomerSurveyPublic.jsx's shape: plain fetch
+ * against /api/public/..., no auth headers, its own small CSS file. Most
+ * customers open it on a phone, from WhatsApp.
  *
  * The interaction is per line, not one "approve the estimate" button,
  * because that is what the backend actually models (estimate_lines.
@@ -13,10 +14,14 @@
  * rejected — this page just reflects that back; it has no "create job card"
  * action of its own to keep in sync with the server's own rollup.
  *
- * Lines are grouped by job (process Step 4). The estimate's format decides
- * how parts are shown (Step 5/6): Format 1 Genuine and Format 2 After-Market
- * show one price; Format 3 shows both side by side and the customer picks a
- * type for each part — sent as part_option with the approval.
+ * Lines are grouped by job (process Step 4). Parts come in the categories of
+ * the customer's parts preference (Genuine / After-Market / Used, any
+ * combination): each part line carries its `options` from the server — the
+ * requested categories (priced, or not available) and, when one is not
+ * available, the Store's alternative. With more than one priced option the
+ * customer picks one per part; the alternative is shown as "Alternative —
+ * needs your approval" and is never preselected. The choice is sent as
+ * part_option with the approval; the server refuses an option not on offer.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
@@ -26,25 +31,19 @@ import './EstimateApproval.css';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const fmt = n => `AED ${Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const num = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
-const isNA = v => v !== null && v !== undefined && v !== '' && Number(v) === 0;
 const jobKey = l => String(l.job_name || l.description || 'Job').trim() || 'Job';
 const qtyOf = l => Number(l.quantity) || 1;
 const discOf = l => 1 - Number(l.discount_pct || 0) / 100;
 const lineAmount = l => Number(l.line_total ?? qtyOf(l) * Number(l.unit_price || 0) * discOf(l));
+const CATEGORY_EN = { genuine: 'Genuine', after_market: 'After-Market', used: 'Used' };
+const fmtDay = d => new Date(`${String(d).slice(0, 10)}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 
-function prices(l) {
-  const gNA = isNA(l.genuine_available);
-  const aNA = isNA(l.aftermarket_available);
-  return { g: gNA ? null : num(l.genuine_price), a: aNA ? null : num(l.aftermarket_price) };
-}
-/** The type a part line counts at in a single-type format (falls back when one is unavailable). */
-function effectiveOption(l, format) {
-  const { g, a } = prices(l);
-  if (g == null && a == null) return null;
-  const want = l.part_option || (format === 'after_market' ? 'after_market' : 'genuine');
-  if (want === 'after_market') return a != null ? 'after_market' : 'genuine';
-  return g != null ? 'genuine' : 'after_market';
+/** The options a part line offers (server-computed), or null for a line priced as one price. */
+function optionsOf(l) {
+  if (l.line_type !== 'parts' || !l.options) return null;
+  const requested = l.options.requested || [];
+  const alternative = l.options.alternative || null;
+  return { requested, alternative, choices: [...requested.filter(o => o.usable), ...(alternative ? [alternative] : [])] };
 }
 
 export default function EstimateApproval() {
@@ -55,7 +54,7 @@ export default function EstimateApproval() {
   const [lines, setLines] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [byType, setByType] = useState(null);
-  const [choice, setChoice] = useState({}); // lineId → 'genuine' | 'after_market'
+  const [choice, setChoice] = useState({}); // lineId → 'genuine' | 'after_market' | 'used'
   const [busyLineId, setBusyLine] = useState(null);
   const [banner, setBanner] = useState('');
   const [name, setName] = useState('');
@@ -79,29 +78,34 @@ export default function EstimateApproval() {
 
   useEffect(() => { load(); }, [load]);
 
-  const format = estimate?.estimate_format || 'genuine';
-  const isBoth = format === 'both';
+  const pref = useMemo(() => (Array.isArray(estimate?.parts_preference) && estimate.parts_preference.length
+    ? estimate.parts_preference : ['genuine']), [estimate]);
   const hasParts = lines.some(l => l.line_type === 'parts');
+  const anyAlternative = lines.some(l => optionsOf(l)?.alternative);
+  // The customer chooses per part when there is more than one category, or an alternative to take or leave.
+  const choosing = hasParts && (pref.length > 1 || anyAlternative);
+  const catName = useCallback(k => t(`estimates.pub_cat_${k}`, CATEGORY_EN[k] || k), [t]);
 
-  /** The type the customer has picked (or would get) for a part line. */
+  /** The option picked (or, for a requested category, the one it counts at) for a pending part line. */
   const selectedOf = useCallback(l => {
-    const { g, a } = prices(l);
-    const pick = choice[l.id] || l.part_option;
-    if (pick === 'after_market' && a != null) return 'after_market';
-    if (pick === 'genuine' && g != null) return 'genuine';
-    return g != null ? 'genuine' : a != null ? 'after_market' : null;
+    const o = optionsOf(l);
+    if (!o) return null;
+    const pick = choice[l.id];
+    if (pick && o.choices.some(c => c.option === pick)) return pick;
+    const counted = l.options.counted;
+    if (counted && o.requested.some(c => c.usable && c.option === counted)) return counted;
+    return o.requested.find(c => c.usable)?.option || null; // never the alternative by default
   }, [choice]);
 
-  /** What a line costs as things stand (pending Format 3 parts: at the chosen type). */
+  /** What a line costs as things stand (pending parts: at the option picked). */
   const amountOf = useCallback(l => {
-    if (isBoth && l.line_type === 'parts' && l.customer_status === 'pending') {
-      const { g, a } = prices(l);
-      const sel = selectedOf(l);
-      const p = sel === 'after_market' ? a : sel === 'genuine' ? g : null;
-      if (p != null) return qtyOf(l) * p * discOf(l);
+    const o = optionsOf(l);
+    if (o && l.customer_status === 'pending') {
+      const sel = o.choices.find(c => c.option === selectedOf(l));
+      return sel ? qtyOf(l) * sel.price * discOf(l) : 0;
     }
     return lineAmount(l);
-  }, [isBoth, selectedOf]);
+  }, [selectedOf]);
 
   const groups = useMemo(() => {
     const by = new Map();
@@ -126,7 +130,7 @@ export default function EstimateApproval() {
       .reduce((s, l) => s + lineAmount(l), 0);
     return sub * (1 + vatRate / 100);
   }, [lines, vatRate]);
-  // Format 3: everything not rejected, parts at the type picked.
+  // Everything not rejected, parts at the option picked.
   const selectionSub = useMemo(() => lines
     .filter(l => l.line_type !== 'discount' && l.customer_status !== 'rejected')
     .reduce((s, l) => s + amountOf(l), 0), [lines, amountOf]);
@@ -142,7 +146,7 @@ export default function EstimateApproval() {
         name: name.trim() || undefined,
         reason: decision === 'rejected' ? (reason.trim() || undefined) : undefined,
       };
-      if (decision === 'approved' && isBoth && line.line_type === 'parts') {
+      if (decision === 'approved' && optionsOf(line)) {
         const sel = selectedOf(line);
         if (sel) body.part_option = sel;
       }
@@ -195,8 +199,10 @@ export default function EstimateApproval() {
     </div></div>;
   }
 
-  const typeName = k => (k === 'after_market' ? t('estimates.pub_after_market', 'After-Market') : t('estimates.pub_genuine', 'Genuine'));
-  // Everything not rejected, parts at the type chosen (Format 3) or quoted (Formats 1/2), incl. VAT.
+  const prefWords = pref.length > 1
+    ? t('estimates.pub_cat_list', '{{a}} and {{b}}', { a: pref.slice(0, -1).map(catName).join(', '), b: catName(pref.at(-1)) })
+    : catName(pref[0]);
+  // Everything not rejected, parts at the option picked (or quoted), incl. VAT.
   const runningTotal = selectionSub * (1 + vatRate / 100);
 
   return (
@@ -210,19 +216,17 @@ export default function EstimateApproval() {
             {estimate.vehicle_plate && <span className="ea-plate">{estimate.vehicle_plate}</span>}
           </div>
           {hasParts && (
-            <div className={`ea-format ea-format-${format}`}>
-              {isBoth
-                ? t('estimates.pub_format_both', 'Genuine and After-Market prices — you choose for each part')
-                : format === 'after_market'
-                  ? t('estimates.pub_format_am', 'Priced with After-Market parts')
-                  : t('estimates.pub_format_genuine', 'Priced with Genuine parts')}
+            <div className={`ea-format${pref.length > 1 ? ' ea-format-both' : ''}`}>
+              {pref.length > 1
+                ? t('estimates.pub_pref_many', 'Parts priced in {{cats}} — you choose for each part', { cats: prefWords })
+                : t('estimates.pub_pref_one', 'Priced with {{cat}} parts', { cat: prefWords })}
             </div>
           )}
         </div>
 
         {jobCardCreated && (
           <div className="ea-banner ea-banner-ok">
-            {t('estimates.pub_jc_created', 'Every item has been decided. Job card created — the workshop has been notified and will begin work.')}
+            {t('estimates.pub_jc_created', 'Every item has been decided. The approved work is on your job card — the workshop has been notified and will begin work.')}
           </div>
         )}
         {!jobCardCreated && estimate.status === 'rejected' && (
@@ -237,25 +241,25 @@ export default function EstimateApproval() {
         )}
         {banner && !jobCardCreated && <div className="ea-banner ea-banner-info" role="status">{banner}</div>}
 
-        {isBoth && hasParts && byType && (
+        {pref.length > 1 && hasParts && byType && (
           <div className="ea-compare">
-            <div className="ea-compare-tile">
-              <span className="ea-compare-label">{t('estimates.pub_all_genuine', 'All Genuine')}</span>
-              <span className="ea-compare-amt">{fmt(byType.genuine)}</span>
-              <span className="ea-compare-sub">{t('estimates.pub_excl_vat', 'excl. VAT')}</span>
-            </div>
-            <div className="ea-compare-tile">
-              <span className="ea-compare-label">{t('estimates.pub_all_am', 'All After-Market')}</span>
-              <span className="ea-compare-amt">{fmt(byType.after_market)}</span>
-              <span className="ea-compare-sub">{t('estimates.pub_excl_vat', 'excl. VAT')}</span>
-            </div>
+            {pref.map(c => (
+              <div key={c} className="ea-compare-tile">
+                <span className="ea-compare-label">{t('estimates.pub_all_cat', 'All {{cat}}', { cat: catName(c) })}</span>
+                <span className="ea-compare-amt">{fmt(byType[c])}</span>
+                <span className="ea-compare-sub">
+                  {t('estimates.pub_excl_vat', 'excl. VAT')}
+                  {jobs.some(j => j.na?.[c]) && ` · ${t('estimates.pub_some_na_short', 'not every part available')}`}
+                </span>
+              </div>
+            ))}
           </div>
         )}
 
         {pendingCount > 0 && canDecide && (
           <p className="ea-instructions">
-            {isBoth && hasParts
-              ? t('estimates.pub_instructions_both', 'For each part, choose Genuine or After-Market, then approve or reject each item. Work only begins once every item has been decided.')
+            {choosing
+              ? t('estimates.pub_instructions_choose', 'For each part, choose the type you want, then approve or reject each item. Where a type you asked for is not available the workshop may offer an alternative — it is only used if you choose it. Work only begins once every item has been decided.')
               : t('estimates.pub_instructions', 'Please review each item below and approve or reject it. Work only begins once every item has been decided.')}
           </p>
         )}
@@ -282,10 +286,11 @@ export default function EstimateApproval() {
               {multi && (
                 <div className="ea-job-head">
                   <h2 className="ea-job-title">{job}</h2>
-                  {isBoth && info && rows.some(l => l.line_type === 'parts') ? (
+                  {pref.length > 1 && info?.totals && rows.some(l => l.line_type === 'parts') ? (
                     <div className="ea-job-totals">
-                      <span>{t('estimates.pub_genuine', 'Genuine')} <b>{fmt(info.total_genuine)}</b>{info.genuine_na && <i className="ea-na-dot" title={t('estimates.pub_some_na', 'Some parts not available in this type')}>*</i>}</span>
-                      <span>{t('estimates.pub_after_market', 'After-Market')} <b>{fmt(info.total_after_market)}</b>{info.after_market_na && <i className="ea-na-dot" title={t('estimates.pub_some_na', 'Some parts not available in this type')}>*</i>}</span>
+                      {pref.map(c => (
+                        <span key={c}>{catName(c)} <b>{fmt(info.totals[c])}</b>{info.na?.[c] && <i className="ea-na-dot" title={t('estimates.pub_some_na', 'Some parts not available in this type')}>*</i>}</span>
+                      ))}
                     </div>
                   ) : (
                     <div className="ea-job-totals"><span><b>{fmt(jobSub)}</b></span></div>
@@ -293,10 +298,10 @@ export default function EstimateApproval() {
                 </div>
               )}
               {rows.map(l => (
-                <LineCard key={l.id} t={t} line={l} isBoth={isBoth} format={format}
-                  selected={l.line_type === 'parts' ? selectedOf(l) : null}
+                <LineCard key={l.id} t={t} line={l} catName={catName}
+                  selected={optionsOf(l) ? selectedOf(l) : null}
                   onSelect={opt => setChoice(c => ({ ...c, [l.id]: opt }))}
-                  typeName={typeName} canDecide={canDecide}
+                  canDecide={canDecide} amount={amountOf(l)}
                   busy={busyLineId === l.id} anyBusy={busyLineId != null}
                   onDecide={d => decide(l, d)} />
               ))}
@@ -305,7 +310,7 @@ export default function EstimateApproval() {
         })}
 
         <div className="ea-totals">
-          {isBoth ? (
+          {choosing ? (
             <>
               <div><span>{anyRejected ? t('estimates.pub_selection_excl_rej', 'Your selection, without rejected items') : t('estimates.pub_selection', 'Your selection')}</span><span>{fmt(selectionSub)}</span></div>
               <div><span>{t('estimates.pub_vat', 'VAT ({{v}}%)', { v: vatRate })}</span><span>{fmt(selectionSub * vatRate / 100)}</span></div>
@@ -347,14 +352,24 @@ export default function EstimateApproval() {
   );
 }
 
-function LineCard({ t, line: l, isBoth, format, selected, onSelect, typeName, canDecide, busy, anyBusy, onDecide }) {
-  const isPart = l.line_type === 'parts';
+function LineCard({ t, line: l, catName, selected, onSelect, canDecide, amount, busy, anyBusy, onDecide }) {
   const pending = l.customer_status === 'pending';
   const qty = qtyOf(l);
-  const { g, a } = isPart ? prices(l) : { g: null, a: null };
-  const showChoice = isBoth && isPart && pending && canDecide && (g != null || a != null);
-  const eff = isPart ? (isBoth ? (l.part_option || null) : effectiveOption(l, format)) : null;
-  const fallback = isPart && !isBoth && eff && eff !== (format === 'after_market' ? 'after_market' : 'genuine');
+  const o = optionsOf(l);
+  // Radio cards when there is a choice to make: two or more priced
+  // categories, or an alternative standing in for one not available.
+  const showChoice = !!o && pending && canDecide && (o.choices.length > 1 || !!o.alternative);
+  const chosen = o?.choices.find(c => c.option === selected) || null;
+  const nothingOnOffer = !!o && !o.choices.length;
+  const when = c => (c.expected_date
+    ? t('estimates.pub_expected', 'Expected {{d}}', { d: fmtDay(c.expected_date) })
+    : t('estimates.pub_in_stock', 'In stock'));
+  // A decided part says what it was approved in.
+  const decidedTag = !pending && o && l.part_option
+    ? (Number(l.alternative_approved) === 1
+      ? t('estimates.pub_alt_tag', 'Alternative: {{cat}}', { cat: catName(l.part_option) })
+      : catName(l.part_option))
+    : null;
 
   return (
     <div className={`ea-line ea-line-${l.customer_status}`}>
@@ -370,37 +385,54 @@ function LineCard({ t, line: l, isBoth, format, selected, onSelect, typeName, ca
               sublet: t('estimates.pub_type_sublet', 'Sublet'), consumable: t('estimates.pub_type_consumable', 'Consumables'),
               discount: t('estimates.pub_type_discount', 'Discount'),
             }[l.line_type] || l.line_type}</span>
-            {eff && !showChoice && <span className={`ea-tag ea-tag-${eff}`}>{typeName(eff)}</span>}
-            {fallback && <span className="ea-tag ea-tag-muted">{t('estimates.pub_other_na', '{{type}} not available', { type: typeName(format === 'after_market' ? 'after_market' : 'genuine') })}</span>}
+            {!showChoice && chosen && pending && <span className={`ea-tag ea-tag-${chosen.option}`}>{catName(chosen.option)}</span>}
+            {!showChoice && chosen && pending && <span className="ea-tag ea-tag-muted">{when(chosen)}</span>}
+            {decidedTag && <span className={`ea-tag ea-tag-${l.part_option}`}>{decidedTag}</span>}
             {l.urgency === 'now' && <span className="ea-tag ea-tag-urgent">{t('estimates.pub_urgent', 'Needs attention')}</span>}
           </div>
         </div>
-        {!showChoice && <div className="ea-line-price">{fmt(lineAmount(l))}</div>}
+        {!showChoice && <div className="ea-line-price">{nothingOnOffer && pending ? '—' : fmt(amount)}</div>}
       </div>
 
       {showChoice && (
         <div className="ea-opts" role="radiogroup" aria-label={t('estimates.pub_choose_type', 'Choose the part type')}>
-          {[['genuine', g], ['after_market', a]].map(([key, price]) => {
-            const na = price == null;
-            const on = selected === key;
-            return (
-              <label key={key} className={`ea-opt${on ? ' ea-opt-on' : ''}${na ? ' ea-opt-na' : ''}`}>
-                <input type="radio" name={`opt-${l.id}`} value={key} checked={on} disabled={na || busy}
-                  onChange={() => onSelect(key)} />
-                <span className="ea-opt-radio" aria-hidden />
-                <span className="ea-opt-label">{typeName(key)}</span>
-                {na ? (
-                  <span className="ea-opt-unavail">{t('estimates.pub_not_available', 'Not available')}</span>
-                ) : (
-                  <>
-                    <span className="ea-opt-price">{fmt(price * qty * discOf(l))}</span>
-                    {qty > 1 && <span className="ea-opt-each">{t('estimates.pub_each', '{{p}} each', { p: fmt(price) })}</span>}
-                  </>
-                )}
-              </label>
-            );
-          })}
+          {o.requested.map(c => (
+            <label key={c.option} className={`ea-opt${selected === c.option ? ' ea-opt-on' : ''}${c.usable ? '' : ' ea-opt-na'}`}>
+              <input type="radio" name={`opt-${l.id}`} value={c.option} checked={selected === c.option} disabled={!c.usable || busy}
+                onChange={() => onSelect(c.option)} />
+              <span className="ea-opt-radio" aria-hidden />
+              <span className="ea-opt-label">{catName(c.option)}</span>
+              {c.usable ? (
+                <>
+                  <span className="ea-opt-price">{fmt(c.price * qty * (1 - Number(l.discount_pct || 0) / 100))}</span>
+                  {qty > 1 && <span className="ea-opt-each">{t('estimates.pub_each', '{{p}} each', { p: fmt(c.price) })}</span>}
+                  <span className="ea-opt-when">{when(c)}</span>
+                </>
+              ) : (
+                <span className="ea-opt-unavail">{t('estimates.pub_not_available', 'Not available')}</span>
+              )}
+            </label>
+          ))}
+          {o.alternative && (
+            <label className={`ea-opt ea-opt-alt${selected === o.alternative.option ? ' ea-opt-on' : ''}`}>
+              <input type="radio" name={`opt-${l.id}`} value={o.alternative.option} checked={selected === o.alternative.option} disabled={busy}
+                onChange={() => onSelect(o.alternative.option)} />
+              <span className="ea-opt-radio" aria-hidden />
+              <span className="ea-opt-flag">{t('estimates.pub_alt_flag', 'Alternative — needs your approval')}</span>
+              <span className="ea-opt-label">
+                {o.alternative.for
+                  ? t('estimates.pub_alt_instead', '{{cat}} instead of {{for}}', { cat: catName(o.alternative.option), for: catName(o.alternative.for) })
+                  : catName(o.alternative.option)}
+              </span>
+              <span className="ea-opt-price">{fmt(o.alternative.price * qty * (1 - Number(l.discount_pct || 0) / 100))}</span>
+              {qty > 1 && <span className="ea-opt-each">{t('estimates.pub_each', '{{p}} each', { p: fmt(o.alternative.price) })}</span>}
+              <span className="ea-opt-when">{when(o.alternative)}</span>
+            </label>
+          )}
         </div>
+      )}
+      {pending && canDecide && nothingOnOffer && (
+        <p className="ea-line-note">{t('estimates.pub_none_available', 'This part is not available in the types you asked for. You can only decline it — the workshop will contact you.')}</p>
       )}
 
       {pending && canDecide ? (
@@ -408,9 +440,13 @@ function LineCard({ t, line: l, isBoth, format, selected, onSelect, typeName, ca
           <button className="ea-btn ea-btn-reject" disabled={anyBusy} onClick={() => onDecide('rejected')}>
             {busy ? '…' : t('estimates.pub_reject', 'Reject')}
           </button>
-          <button className="ea-btn ea-btn-approve" disabled={anyBusy} onClick={() => onDecide('approved')}>
-            {busy ? '…' : showChoice && selected
-              ? t('estimates.pub_approve_type', 'Approve {{type}}', { type: typeName(selected) })
+          <button className="ea-btn ea-btn-approve" disabled={anyBusy || (!!o && !chosen)} onClick={() => onDecide('approved')}
+            title={o && !chosen ? t('estimates.pub_choose_first', 'Choose an option first') : undefined}>
+            {busy ? '…' : showChoice && chosen
+              ? (chosen.alternative
+                ? t('estimates.pub_approve_alt', 'Approve the alternative')
+                : t('estimates.pub_approve_type', 'Approve {{type}}', { type: catName(chosen.option) }))
+              : showChoice ? t('estimates.pub_choose_first', 'Choose an option first')
               : t('estimates.pub_approve', 'Approve')}
           </button>
         </div>

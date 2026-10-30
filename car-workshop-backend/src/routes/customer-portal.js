@@ -11,8 +11,9 @@
  *                            estimate, ready for collection) and open jobs
  *   ── Job cards           — status in the customer's stages (lib/customer-status.js),
  *                            one job's detail, the job sheet PDF
- *   ── Inspections         — the customer's copy of the walk-around, and the
- *                            sign-off from inside the portal (once only)
+ *   ── Inspections         — the customer's copy of the walk-around (with its
+ *                            photos), and the sign-off from inside the portal
+ *                            (once only; it opens the job card, as the link's)
  *   ── Invoices & payments — invoices with paid / balance, PDF
  *   ── My vehicles
  *   ── Profile
@@ -31,7 +32,7 @@ import { woLabel } from '../lib/status-labels.js';
 import { customerView } from '../lib/customer-status.js';
 import { saveBase64Signature } from './uploads.js';
 import { readDocs, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
-import { publicView as inspectionView } from './public-inspections.js';
+import { publicView as inspectionView, photosOf, openPhysicalJobCard } from './public-inspections.js';
 import { preferBearerToken } from '../lib/portal-access.js';
 
 const router = express.Router();
@@ -158,6 +159,17 @@ router.get('/inspections/:id/documents/:docId', async (req, res) => {
   }
 });
 
+/* ── GET /inspections/:id/photos/:photoId — a vehicle photo ── */
+router.get('/inspections/:id/photos/:photoId', async (req, res) => {
+  try {
+    const [row] = await ownInspections(req, { id: req.params.id });
+    return sendDocument(res, row ? photosOf(row).find(p => p.id === req.params.photoId) : null);
+  } catch (err) {
+    console.error('[CustomerPortal] Inspection photo error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load the photo' });
+  }
+});
+
 /**
  * POST /inspections/:id/sign — the customer signs the inspection in the portal.
  * Body: { signature: "data:image/png;base64,...", name: "Full name", confirmed: true }
@@ -168,6 +180,8 @@ router.get('/inspections/:id/documents/:docId', async (req, res) => {
  * or here — wins, and a signed inspection is never re-signed. Recorded with
  * signed_via 'portal': signed by the customer under their own login, so a
  * staff "new link" (share/reset), which clears 'link' signatures, keeps it.
+ * Signing the drop-off (physical) inspection acknowledges the vehicle's
+ * condition and opens an external customer's job card (lib/physical-inspection.js).
  */
 router.post('/inspections/:id/sign', async (req, res) => {
   try {
@@ -216,7 +230,8 @@ router.post('/inspections/:id/sign', async (req, res) => {
       return res.status(409).json({ success: false, code: 'ALREADY_SIGNED', message: 'This inspection has already been signed.' });
     }
 
-    await notifySigned(row, name);
+    const jobCard = await openPhysicalJobCard(row);
+    await notifySigned(row, name, jobCard);
     const [signed] = await ownInspections(req, { id: row.id });
     return res.json({ success: true, data: signed ? portalInspection(signed) : null, signature: signed ? portalInspection(signed).signature : null });
   } catch (err) {
@@ -228,12 +243,13 @@ router.post('/inspections/:id/sign', async (req, res) => {
 /** As the link's sign-off (public-inspections.js): whoever did the walk-around
  *  and the job's estimate advisor hear it, the Service Advisors as a group
  *  when neither is known. */
-async function notifySigned(row, name) {
+async function notifySigned(row, name, jobCard = null) {
   try {
     const handover = row.inspection_type === 'joint';
     const payload = {
       title: `Inspection signed by the customer: ${row.work_order_number}`,
-      body: `${name} signed the ${handover ? 'handover' : 'intake'} inspection in the customer portal.`,
+      body: `${name} signed the ${handover ? 'handover' : 'physical'} inspection in the customer portal.`
+        + (jobCard?.opened_now ? ` Job card ${jobCard.job_card_number} is open — the technical inspection is next.` : ''),
       link: `/work-orders/${row.work_order_id}/inspection${handover ? '?type=joint' : ''}`,
       orderId: row.work_order_id, type: 'inspection_signed', icon: '✍️',
     };

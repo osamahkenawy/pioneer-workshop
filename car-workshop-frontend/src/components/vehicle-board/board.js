@@ -80,8 +80,10 @@ export const BADGE_EN = {
   estimate_expired: 'Estimate expired',
   not_classified: 'Customer not classified',
   vehicle_missing: 'Vehicle / issue missing',
-  inspection_not_started: 'Inspection not started',
-  inspection_in_progress: 'Inspection in progress',
+  physical_not_started: 'Physical inspection not started',
+  physical_in_progress: 'Physical inspection in progress',
+  awaiting_acknowledgement: 'Waiting for the customer\'s signature',
+  open_job_card: 'Open the job card',
   no_job_card: 'No job card',
 };
 

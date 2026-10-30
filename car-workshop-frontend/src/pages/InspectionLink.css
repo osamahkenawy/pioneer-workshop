@@ -113,6 +113,8 @@
 .il-doc-img { grid-column: auto; padding: 0; overflow: hidden; }
 .il-doc-img a { display: block; inline-size: 100%; }
 .il-doc-img img { display: block; inline-size: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: #f8fafc; }
+/* Vehicle photos are landscape, not pages. */
+.il-photos .il-doc-img img { aspect-ratio: 4 / 3; }
 
 /* ── Signature ── */
 .il-signed img { display: block; max-inline-size: 100%; max-block-size: 140px; border: 1px solid var(--il-line); border-radius: 10px; background: #fff; }

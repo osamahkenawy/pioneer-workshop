@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useContext } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Search, Plus, Xmark, WarningTriangle, CheckCircle, Phone, Clock,
   StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar, Page,
@@ -15,6 +16,10 @@ import { canDo } from '../lib/permissions';
  * Every enquiry records the channel it arrived through, so conversion can be
  * measured by source; ones that don't convert record a reason and an optional
  * re-offer date, which is the nurture loop drawn back to stage 01.
+ *
+ * Each enquiry has its work order (the visit) from the moment it is saved:
+ * Convert confirms the customer goes ahead on that work order, and "Not
+ * converted" cancels it while nothing has happened on it yet.
  */
 
 const NAVY = '#1e3a6b';
@@ -98,6 +103,7 @@ export default function Enquiries() {
   const [convertFor, setConvertFor] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const navigate = useNavigate();
+  const { t: tr } = useTranslation();
   const { user } = useContext(AuthContext) || {};
   const mayQuote = canDo(user, 'estimate.raise');
   const mayBook = canDo(user, 'job.open');
@@ -166,7 +172,9 @@ export default function Enquiries() {
   }, [t]);
 
   const remove = async (row) => {
-    if (!window.confirm(`Delete enquiry ${row.enquiry_number}?`)) return;
+    if (!window.confirm(row.work_order_number && row.work_order_status !== 'cancelled'
+      ? tr('enquiries.confirm_delete_wo', 'Delete enquiry {{n}}? Its work order {{wo}} is cancelled with it.', { n: row.enquiry_number, wo: row.work_order_number })
+      : `Delete enquiry ${row.enquiry_number}?`)) return;
     try {
       const res = await api.delete(`/enquiries/${row.id}`);
       if (res.success) refresh();
@@ -342,7 +350,12 @@ export default function Enquiries() {
                     <td style={st.td}>
                       <span style={{ ...st.pill, background: sm.bg, color: sm.color }}>{sm.label}</span>
                       {r.work_order_number && (
-                        <div style={{ fontSize: 11, color: '#16a34a', marginTop: 3 }}>{r.work_order_number}</div>
+                        <Link to={`/work-orders/${r.converted_work_order_id || r.work_order_id}`}
+                          style={{ display: 'block', fontSize: 11, marginTop: 3, textDecoration: r.work_order_status === 'cancelled' ? 'line-through' : 'none',
+                            color: r.work_order_status === 'cancelled' ? '#94a3b8' : r.converted_work_order_id ? '#16a34a' : '#1d4ed8' }}
+                          title={r.work_order_status === 'cancelled' ? tr('enquiries.wo_cancelled', 'Work order cancelled') : tr('enquiries.wo_open', 'Open the work order')}>
+                          {r.work_order_number}
+                        </Link>
                       )}
                       {r.lost_reason && r.status !== 'converted' && (
                         <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{LOST_REASONS[r.lost_reason] || r.lost_reason}</div>
@@ -382,7 +395,8 @@ export default function Enquiries() {
                         </button>
                         <button onClick={() => remove(r)}
                           style={{ ...st.iconBtn, color: r.converted_work_order_id ? '#cbd5e1' : '#dc2626', cursor: r.converted_work_order_id ? 'not-allowed' : 'pointer' }}
-                          title={r.converted_work_order_id ? 'Converted enquiries cannot be deleted' : 'Delete'}>
+                          title={r.converted_work_order_id ? 'Converted enquiries cannot be deleted'
+                            : r.work_order_id ? tr('enquiries.delete_with_wo', 'Delete — its work order is cancelled too, if nothing has happened on it') : 'Delete'}>
                           <Trash width={14} height={14} />
                         </button>
                       </div>
@@ -555,6 +569,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
 
 /* ── Not converted — reason + optional re-offer ── */
 function NotConvertedModal({ enquiry, onClose, onSaved }) {
+  const { t } = useTranslation();
   const [reason, setReason] = useState('');
   const [notes, setNotes] = useState('');
   const [followUp, setFollowUp] = useState('');
@@ -601,6 +616,9 @@ function NotConvertedModal({ enquiry, onClose, onSaved }) {
             {followUp
               ? 'This enquiry will be kept in nurture and resurfaced on the follow-up date.'
               : 'Without a re-offer date this enquiry will be closed as lost.'}
+            {enquiry.work_order_number && enquiry.work_order_status !== 'cancelled' && (
+              <> {t('enquiries.lost_cancels_wo', 'Its work order {{wo}} is cancelled — unless work has already started on it.', { wo: enquiry.work_order_number })}</>
+            )}
           </div>
         </div>
         <div style={st.footer}>
@@ -616,6 +634,10 @@ function NotConvertedModal({ enquiry, onClose, onSaved }) {
 
 /* ── Convert to work order ── */
 function ConvertModal({ enquiry, onClose, onSaved }) {
+  const { t } = useTranslation();
+  // The work order opened with the enquiry, while it is open.
+  const ownWo = enquiry.work_order_number && enquiry.work_order_status && !['cancelled', 'completed'].includes(enquiry.work_order_status)
+    ? enquiry.work_order_number : null;
   const [createCustomer, setCreateCustomer] = useState(!enquiry.customer_id);
   const [scheduledAt, setScheduledAt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -654,14 +676,15 @@ function ConvertModal({ enquiry, onClose, onSaved }) {
           )}
           <Field label="Scheduled drop-off"><input style={st.input} type="datetime-local" value={scheduledAt} onChange={e => setScheduledAt(e.target.value)} /></Field>
           <div style={st.infoBox}>
-            The work order inherits this enquiry's service tier, payer route and source channel,
-            so conversion stays attributable to the channel it came from.
+            {ownWo
+              ? t('enquiries.convert_own_wo', 'The customer goes ahead on this enquiry\'s work order {{wo}}: it keeps its service tier, payer route and source channel. An external customer\'s job card opens after the physical inspection.', { wo: ownWo })
+              : 'The work order inherits this enquiry\'s service tier, payer route and source channel, so conversion stays attributable to the channel it came from.'}
           </div>
         </div>
         <div style={st.footer}>
           <button onClick={onClose} style={st.ghostBtn}>Cancel</button>
           <button onClick={submit} disabled={saving} style={{ ...st.primaryBtn, opacity: saving ? 0.7 : 1 }}>
-            {saving ? 'Converting…' : 'Create work order'}
+            {saving ? 'Converting…' : ownWo ? t('enquiries.convert_confirm', 'Convert on {{wo}}', { wo: ownWo }) : 'Create work order'}
           </button>
         </div>
       </div>

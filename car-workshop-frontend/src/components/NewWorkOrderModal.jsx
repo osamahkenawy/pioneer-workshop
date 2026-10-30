@@ -528,17 +528,21 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           }));
           setItems(loaded.length ? loaded : [newItem()]);
 
-          // Customer and vehicle are fixed once an estimate exists or work
-          // has started (D9). The server refuses the change either way; this
-          // only stops the advisor from making it in the first place.
+          // Customer and vehicle are fixed once the inspection is completed or
+          // signed, an estimate exists or work has started (D9). The server
+          // refuses the change either way; this only stops the advisor from
+          // making it in the first place.
           const estimates = (wfRes?.success && Array.isArray(wfRes.data?.estimates)) ? wfRes.data.estimates : [];
+          const inspected = wfRes?.success ? wfRes.data?.physical_inspection : null;
           const liveEstimate = estimates.find(e => !['rejected', 'expired'].includes(e.status));
           const closed = ['completed', 'cancelled'].includes(wo.status);
           const started = !['pending', 'confirmed', 'estimate_approved'].includes(wo.status);
-          const lockReason = closed ? `This job card is ${wo.status}.`
+          const lockReason = closed ? `This work order is ${wo.status}.`
             : liveEstimate ? `Estimate ${liveEstimate.estimate_number} has been raised for this car.`
-            : wo.customer_approved_at ? 'The customer has already approved this job card.'
-            : started ? 'Work on this job card has started.'
+            : wo.customer_approved_at ? 'The customer has already approved this work order.'
+            : inspected?.signed ? 'The customer has signed the vehicle inspection for this car.'
+            : inspected?.status === 'completed' ? 'The vehicle inspection for this car has been completed.'
+            : started ? 'Work on this work order has started.'
             : '';
           setEditInfo({
             id: wo.id, number: wo.work_order_number, updatedAt: wo.updated_at ?? null, status: wo.status,
@@ -1304,7 +1308,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         onClick={e => { if (downOnOverlay.current && e.target === e.currentTarget) onClose?.(); }}>
         <div className="nwo-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="nwo-title" style={{ height: 'auto', maxWidth: 520 }}>
           <div className="nwo-header">
-            <h2 id="nwo-title" className="nwo-title">{editMode ? 'Edit Job Card' : 'New Job Card'}</h2>
+            <h2 id="nwo-title" className="nwo-title">{editMode ? 'Edit Work Order' : 'New Work Order'}</h2>
             <button type="button" className="nwo-close" onClick={onClose} aria-label="Close"><Xmark width={20} height={20} /></button>
           </div>
           <div className="nwo-body" style={{ paddingBottom: 22 }}>
@@ -1337,7 +1341,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         {/* Header */}
         <div className="nwo-header">
           <div style={{ minWidth: 0 }}>
-            <h2 id="nwo-title" className="nwo-title">{editMode ? 'Edit Job Card' : 'New Job Card'}</h2>
+            <h2 id="nwo-title" className="nwo-title">{editMode ? 'Edit Work Order' : 'New Work Order'}</h2>
             <p id="nwo-subtitle" className="nwo-subtitle" ref={headRef} tabIndex={-1}>
               {editMode && (editInfo?.number || editOrder.work_order_number) ? `${editInfo?.number || editOrder.work_order_number} — ` : ''}
               Page {pageIdx + 1} of {pages.length} — {cur.title}
@@ -1420,7 +1424,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           {closedJob && (
             <div style={st.lockNote}>
               <Lock width={15} height={15} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>{editInfo.lockReason} A {editInfo.status} job card can no longer be edited.</span>
+              <span>{editInfo.lockReason} A {editInfo.status} work order can no longer be edited.</span>
             </div>
           )}
 
@@ -1453,7 +1457,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     <div style={st.blockLabel}>Customer</div>
                     <div style={st.lockNote}>
                       <Lock width={15} height={15} style={{ flexShrink: 0, marginTop: 1 }} />
-                      <span>{editInfo.lockReason} The customer can no longer be changed on this job card.</span>
+                      <span>{editInfo.lockReason} The customer can no longer be changed on this work order.</span>
                     </div>
                     {needsClassify && (
                       <ClassifyBlock value={classifySub} onChange={setClassifySub} invalid={bad('classifySub')} t={t} />
@@ -1789,7 +1793,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     <div style={st.blockLabel}>Vehicle</div>
                     <div style={st.lockNote}>
                       <Lock width={15} height={15} style={{ flexShrink: 0, marginTop: 1 }} />
-                      <span>{editInfo.lockReason} The vehicle can no longer be changed on this job card.</span>
+                      <span>{editInfo.lockReason} The vehicle can no longer be changed on this work order.</span>
                     </div>
                     {pickedVehicle ? <VehicleCard v={pickedVehicle} on readOnly /> : <div style={st.emptyHint}>No vehicle on this job card.</div>}
                   </>
@@ -2189,8 +2193,10 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
               )}
               {!editMode && (
                 <div style={st.processNote}>
-                  Creating the job card notifies the Supervisor, Foreman and Team Leader; the technical inspection is next.
-                  The Team Leader assigns a technician later (process step 6).
+                  {jobClass === 'internal'
+                    ? t('orders.form.note_internal', 'Creating the job card notifies the Supervisor, Foreman and Team Leader; the technical inspection is next.')
+                    : t('orders.form.note_external', 'Creating the work order records Steps 1–2. Next is the physical inspection with the customer: the main job card opens once they have acknowledged it (signed at the car, from the link or in the portal), and the Supervisor, Foreman and Team Leader are told then.')}
+                  {' '}{t('orders.form.note_assign', 'The Team Leader assigns a technician later (process step 6).')}
                 </div>
               )}
             </div>
@@ -2210,7 +2216,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                 </button>
               : !closedJob && (
                 <button type="button" style={{ ...st.primaryBtn, opacity: submitting ? 0.7 : 1 }} disabled={submitting} onClick={submit}>
-                  {submitting ? (editMode ? 'Saving…' : 'Creating…') : (editMode ? 'Save changes' : 'Create job card')}
+                  {submitting ? (editMode ? 'Saving…' : 'Creating…') : (editMode ? 'Save changes' : jobClass === 'internal' ? 'Create job card' : 'Create work order')}
                 </button>
               )}
           </div>

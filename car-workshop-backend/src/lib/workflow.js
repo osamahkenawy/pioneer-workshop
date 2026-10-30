@@ -3,7 +3,9 @@
  * (Pioneer_Complete_Workshop_Workflow_Steps_1_to_7.pdf).
  *
  * The visit is the work order (WO). Work is carried out on job cards (JC):
- * one MAIN job card per work order, opened at intake (Step 3), plus SUB-job
+ * one MAIN job card per work order, opened in Step 3 — with the work order
+ * for an internal customer, once the customer has acknowledged the physical
+ * inspection for an external one (lib/physical-inspection.js) — plus SUB-job
  * cards when part of the approved work needs its own card (Step 6). Time
  * booking, parts requisitions, the quality check and the gate pass all hang
  * off job cards (tables from the SOW schema that nothing used to create).
@@ -19,6 +21,7 @@ import { sendPushToUser } from './push.js';
 import { sendFCMToUser } from './firebase.js';
 import { isManagerRole } from './roles.js';
 import { jobClassification, canApproveEstimates } from './job-card-approval.js';
+import { acknowledgedVia, openJobCardIfReady } from './physical-inspection.js';
 
 // Step 1 as recorded on the job (the approval rules read it too).
 export { jobClassification };
@@ -165,6 +168,9 @@ export function shortText(text, max = 120) {
 
 /**
  * Step 3: the work order's main job card, created if it does not exist yet.
+ * No rule is checked here: an external customer's card waits for the
+ * physical inspection, so callers go through openJobCardIfReady()
+ * (lib/physical-inspection.js), which calls this once the rule allows it.
  * The unique key on job_cards.main_for_work_order makes this safe against
  * two requests racing to open it. Opening it is also Step 4's trigger: the
  * Supervisor, Foreman and Team Leader are told a request has been raised.
@@ -224,10 +230,7 @@ export async function ensureMainJobCard({ workOrderId, workshopId, userId = null
  */
 export async function announceMainJobCard({ workOrderId, workshopId, userId = null, notify = true }) {
   try {
-    // Loaded lazily: the reminders route imports nothing from here.
-    import('../routes/crm-reminders.js')
-      .then(m => m.fulfilOpenReminders({ workshopId, workOrderId }))
-      .catch(e => console.error('[workflow] reminders:', e.message));
+    fulfilReminders({ workshopId, workOrderId });
     if (!notify) return;
     const [wo] = await query(
       `SELECT wo.id, wo.work_order_number, wo.customer_name, wo.description, v.plate_number, jc.job_card_number
@@ -248,6 +251,18 @@ export async function announceMainJobCard({ workOrderId, workshopId, userId = nu
   } catch (err) {
     console.error('[Workflow] request-raised follow-up failed:', err.message);
   }
+}
+
+/**
+ * The visit books the car's open service reminders (CRM): when its main job
+ * card opens, or — an external customer's job, whose card waits for the
+ * physical inspection — when the work order is opened. Fire and forget.
+ */
+export function fulfilReminders({ workshopId, workOrderId }) {
+  // Loaded lazily: the reminders route imports nothing from here.
+  import('../routes/crm-reminders.js')
+    .then(m => m.fulfilOpenReminders({ workshopId, workOrderId }))
+    .catch(e => console.error('[workflow] reminders:', e.message));
 }
 
 export async function getMainJobCard(workOrderId, workshopId, db = null) {
@@ -341,13 +356,13 @@ export async function buildWorkflow(workOrderId, workshopId) {
          FROM material_requisition_items i JOIN material_requisitions r ON r.id = i.requisition_id
         WHERE r.job_card_id IN (?) AND r.status <> 'cancelled' ORDER BY i.id`, [jcIds]) : [],
     query(
-      `SELECT id, estimate_number, status, customer_type, total_amount, estimate_format,
+      `SELECT id, estimate_number, status, customer_type, total_amount, estimate_format, parts_preference,
               internal_approved_at, sent_to_customer_at, customer_approved_at, customer_notes, created_at,
               work_order_id, intake_work_order_id
          FROM service_estimates
         WHERE workshop_id = ? AND (intake_work_order_id = ? OR work_order_id = ?)
         ORDER BY id DESC`, [workshopId, wo.id, wo.id]),
-    query(`SELECT id, inspection_type, status, completed_at, signed_at, signed_via, signed_by_name, shared_at, shared_via
+    query(`SELECT id, inspection_type, entry_mode, status, completed_at, customer_present, signed_at, signed_via, signed_by_name, shared_at, shared_via
              FROM vehicle_inspections WHERE work_order_id = ? AND workshop_id = ? ORDER BY id`, [wo.id, workshopId]),
     query(`SELECT id, invoice_number, status, total_amount, amount_paid, created_at FROM invoices
             WHERE work_order_id = ? AND workshop_id = ? AND status NOT IN ('void','cancelled') ORDER BY id DESC`, [wo.id, workshopId]),
@@ -374,10 +389,14 @@ export async function buildWorkflow(workOrderId, workshopId) {
   let pricing = null;
   if (estimate) {
     const lines = await query(
-      `SELECT id, job_name, line_type, description, quantity, unit_price, genuine_price, genuine_available,
-              aftermarket_price, aftermarket_available, part_option, customer_status
+      `SELECT id, job_name, line_type, description, quantity, unit_price,
+              genuine_price, genuine_available, genuine_expected_date,
+              aftermarket_price, aftermarket_available, aftermarket_expected_date,
+              used_price, used_available, used_expected_date,
+              alternative_option, alternative_for, alternative_approved, part_option, customer_status
          FROM estimate_lines WHERE estimate_id = ? AND line_type <> 'discount' ORDER BY sort_order, id`, [estimate.id]);
-    pricing = summariseEstimatePricing(lines);
+    // Totals in the categories of the customer's parts preference.
+    pricing = summariseEstimatePricing(lines, estimate);
   }
 
   // Time booking per job card
@@ -436,7 +455,30 @@ export async function buildWorkflow(workOrderId, workshopId) {
   const pickupContacted = contacts.some(c => c.purpose === 'pickup');
   const paid = paymentSettled(invoice, { customerClass, payerType: wo.payer_type });
   const gateReleased = gatePass?.status === 'released';
-  const intakeInspection = inspections.find(i => i.inspection_type === 'intake' && i.status === 'completed') || (wo.intake_inspection_at ? { completed_at: wo.intake_inspection_at } : null);
+  // Step 3: the physical inspection (the walk-around with the customer) and
+  // their acknowledgement, which opens an external customer's job card
+  // (lib/physical-inspection.js). Internal customers do not need it.
+  const physicalRow = inspections.find(i => i.inspection_type === 'intake') || null;
+  const ackVia = acknowledgedVia(physicalRow, wo);
+  const [overrideBy] = wo.inspection_override_at && wo.inspection_override_by
+    ? await query('SELECT full_name FROM users WHERE id = ?', [wo.inspection_override_by]) : [];
+  const physical = {
+    needed: !isInternal,
+    inspection_id: physicalRow?.id || null,
+    status: physicalRow ? (physicalRow.status === 'completed' ? 'completed' : 'draft') : 'none',
+    entry_mode: physicalRow?.entry_mode || null,
+    completed_at: physicalRow?.completed_at || null,
+    customer_present: physicalRow ? !!physicalRow.customer_present : null,
+    signed: !!physicalRow?.signed_at,
+    signed_at: physicalRow?.signed_at || null, signed_via: physicalRow?.signed_via || null, signed_by_name: physicalRow?.signed_by_name || null,
+    shared_at: physicalRow?.shared_at || null, shared_via: physicalRow?.shared_via || null,
+    // Signed / paper form. A manager's override is not the customer's acknowledgement.
+    acknowledged: !!ackVia && ackVia !== 'override',
+    via: ackVia,
+    override: wo.inspection_override_at
+      ? { at: wo.inspection_override_at, by: overrideBy?.full_name || null, reason: wo.inspection_override_reason || null } : null,
+    job_card_open: !!main,
+  };
   const partsWaiting = reqItems.filter(i => i.availability !== 'available' && Number(i.quantity_issued) < Number(i.quantity_requested));
 
   // Every visible string is sent with an i18n key + params (the screen
@@ -478,20 +520,32 @@ export async function buildWorkflow(workOrderId, workshopId) {
       done: intakeMissing.length === 0,
     },
     {
-      n: 3, key: 'job_card', title: 'Job card (JC)',
+      // The physical inspection with the customer, then the job card (client
+      // e-mail, 2026-10-29): an external customer's main job card opens when
+      // they acknowledge the inspection; an internal customer's opens with
+      // the work order. Done once the main job card is open, however it was
+      // opened (before the rule, a manager's override) — the first check
+      // then says what did not happen. title_key: the screen's
+      // workflow.steps.* key for this title (the key stays 'job_card').
+      n: 3, key: 'job_card', title_key: 'physical_inspection', title: 'Physical inspection & job card',
       ...sumOf(main
         ? (cards.length > 1 ? L('sum.jc_with_subs', `${main.job_card_number} + ${cards.length - 1} sub-job card(s)`, { jc: main.job_card_number, n: cards.length - 1 })
                             : L('sum.raw', main.job_card_number, { v: main.job_card_number }))
         : everOpened ? L('sum.jc_cancelled', `${everOpened.job_card_number} (cancelled)`, { jc: everOpened.job_card_number })
-        : L('sum.not_opened', 'Not opened')),
+        : !physical.needed || physical.acknowledged ? L('sum.not_opened', 'Not opened')
+        : physical.status === 'none' ? L('sum.pi_not_started', 'Physical inspection not started')
+        : physical.status === 'draft' ? L('sum.pi_in_progress', 'Physical inspection in progress')
+        : L('sum.pi_awaiting_ack', 'Waiting for the customer\'s acknowledgement')),
       checks: [
+        C('physical_ack', 'Physical inspection acknowledged by the customer', !physical.needed || physical.acknowledged,
+          ...physicalAckDetail(physical, !!everOpened)),
         C('main_jc_opened', 'Main job card opened', !!everOpened, everOpened ? everOpened.job_card_number : null),
         C('floor_notified', 'Supervisor, Foreman and Team Leader notified', !!everOpened, everOpened ? 'On opening' : null, everOpened ? { key: 'val.on_opening' } : null),
       ],
       done: !!everOpened,
     },
     {
-      n: 4, key: 'inspection_pricing', title: 'Inspection & pricing',
+      n: 4, key: 'inspection_pricing', title_key: 'technical_pricing', title: 'Technical inspection & pricing',
       ...sumOf(counterPriced ? L('sum.priced_counter', 'Priced at the counter')
         : !estimate ? L('sum.no_estimate', 'No estimate yet')
         : pricing.unpricedParts > 0 ? L('sum.parts_waiting_store', `${pricing.unpricedParts} part line(s) waiting for the store`, { n: pricing.unpricedParts })
@@ -500,13 +554,18 @@ export async function buildWorkflow(workOrderId, workshopId) {
       // A job priced at the counter skipped the estimate: it is priced (the
       // step is done), but the checks say what did not happen — no inspection
       // on record, parts not priced by the Storekeeper.
+      // The technical inspection's own fields are still to come from the
+      // client: until then it counts as done when the estimate with its
+      // findings is raised (the physical inspection is Step 3's).
       checks: [
-        C('technical_inspection', 'Technical inspection', !!intakeInspection || !!estimate,
-          intakeInspection?.completed_at ? 'Intake inspection completed' : counterPriced ? 'Not recorded — priced at the counter' : null,
-          intakeInspection?.completed_at ? { key: 'val.intake_done' } : counterPriced ? { key: 'val.inspection_not_recorded' } : null),
-        C('parts_priced', 'Parts priced by the Storekeeper (Genuine / After-Market)', !!pricing && pricing.unpricedParts === 0,
+        C('technical_inspection', 'Technical inspection', !!estimate,
+          estimate ? `With estimate ${estimate.estimate_number}` : counterPriced ? 'Not recorded — priced at the counter' : null,
+          estimate ? { key: 'val.tech_with_estimate', params: { est: estimate.estimate_number } } : counterPriced ? { key: 'val.inspection_not_recorded' } : null),
+        // label_key: the screen's workflow.chk.* key for this wording (the check key stays).
+        { ...C('parts_priced', `Parts priced by the Storekeeper (${prefText(partsPreference(estimate))})`, !!pricing && pricing.unpricedParts === 0,
           pricing ? `${pricing.partLines - pricing.unpricedParts}/${pricing.partLines} part lines` : counterPriced ? 'Priced at the counter, not by the Storekeeper' : null,
           pricing ? { key: 'val.part_lines', params: { a: pricing.partLines - pricing.unpricedParts, b: pricing.partLines } } : counterPriced ? { key: 'val.counter_not_store' } : null),
+          label_key: 'parts_priced_categories' },
         C('labour_priced', 'Labour priced by the Service Advisor', counterPriced || (!!pricing && pricing.unpricedLabour === 0),
           pricing ? `${pricing.labourLines - pricing.unpricedLabour}/${pricing.labourLines} labour lines` : counterPriced ? 'Priced at the counter' : null,
           pricing ? { key: 'val.labour_lines', params: { a: pricing.labourLines - pricing.unpricedLabour, b: pricing.labourLines } } : counterPriced ? { key: 'val.priced_counter' } : null),
@@ -522,7 +581,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
       ...sumOf(counterPriced ? (managerApproved ? L('sum.shown_counter', 'Shown to the customer at the counter')
                                                 : L('sum.counter_no_approval', 'Priced at the counter — no Supervisor / Workshop Manager approval'))
         : !estimate ? L('sum.raw', '—', { v: '—' })
-        : estimate.sent_to_customer_at ? L(`sum.sent_${estimate.estimate_format || 'genuine'}`, `Sent ${fmtFormat(estimate.estimate_format)}`)
+        : estimate.sent_to_customer_at ? L('sum.sent_pref', `Sent — ${prefText(partsPreference(estimate))}`, { pref: prefText(partsPreference(estimate)) })
         : !estimateInternal && !estimate.internal_approved_at ? L('sum.needs_approval', 'Needs Supervisor / Workshop Manager approval')
         : L('sum.ready_to_send', 'Ready to send')),
       checks: [
@@ -532,8 +591,8 @@ export async function buildWorkflow(workOrderId, workshopId) {
           estimateInternal ? { key: 'val.not_needed_internal' } : estimate?.internal_approved_at ? { key: 'val.approved' }
             : counterSignedOff ? { key: 'val.counter_signed_off' } : counterPriced ? { key: 'val.counter_no_approval' } : null),
         C('sent', 'Sent by WhatsApp or Email', counterPriced || !!estimate?.sent_to_customer_at,
-          estimate?.sent_to_customer_at ? fmtFormat(estimate.estimate_format) : counterPriced ? 'Shown at the counter' : null,
-          estimate?.sent_to_customer_at ? { key: `val.format_${estimate.estimate_format || 'genuine'}` } : counterPriced ? { key: 'val.shown_counter' } : null),
+          estimate?.sent_to_customer_at ? prefText(partsPreference(estimate)) : counterPriced ? 'Shown at the counter' : null,
+          estimate?.sent_to_customer_at ? { key: 'val.pref', params: { pref: prefText(partsPreference(estimate)) } } : counterPriced ? { key: 'val.shown_counter' } : null),
       ],
       // A counter-priced external job without that approval is done here only
       // once the customer has agreed (history cannot be redone); the check
@@ -617,10 +676,13 @@ export async function buildWorkflow(workOrderId, workshopId) {
       service_status_token: wo.service_status_token, plate_number: wo.plate_number, make: wo.make, model: wo.model,
       vehicle_id: wo.vehicle_id, vin: wo.vin || null, odometer_in: wo.odometer_in, description: wo.description,
       customer_approved_at: wo.customer_approved_at, intake_channel: wo.intake_channel, updated_at: wo.updated_at,
+      enquiry_id: wo.enquiry_id || null, fleet_intake_id: wo.fleet_intake_id || null,
     },
     steps,
     current_step: steps.find(s => s.state === 'current')?.n || null,
-    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, customerClass, intakeDone: !!intakeInspection?.completed_at }),
+    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, customerClass, physical }),
+    // Step 3: where the physical inspection and the customer's acknowledgement stand.
+    physical_inspection: physical,
     job_cards: cards,
     estimate: estimate ? { ...estimate, pricing } : null,
     estimates,
@@ -634,18 +696,158 @@ export async function buildWorkflow(workOrderId, workshopId) {
   };
 }
 
+/* ── Step 5 parts categories: Genuine, After-Market, Used ─────────────────
+ * The customer's parts preference (service_estimates.parts_preference) is
+ * any combination of the three. The Store prices every part line in each
+ * category of the preference: available or not (*_available 0 = not
+ * available), the price, and the expected delivery (*_expected_date; none =
+ * in stock). When a requested category is not available the Store may offer
+ * an ALTERNATIVE — a category the customer did not ask for
+ * (alternative_option, standing in for alternative_for) — which only ever
+ * counts once the customer has approved the line with it. Nothing falls back
+ * to another category by itself.
+ */
+export const PART_CATEGORIES = ['genuine', 'after_market', 'used'];
+export const PART_CATEGORY_LABEL = { genuine: 'Genuine', after_market: 'After-Market', used: 'Used' };
+const CATEGORY_COLUMN = { genuine: 'genuine', after_market: 'aftermarket', used: 'used' };
+
+/** The estimate_lines columns of one category: { price, available, expected }. */
+export function categoryColumns(category) {
+  const p = CATEGORY_COLUMN[category];
+  return { price: `${p}_price`, available: `${p}_available`, expected: `${p}_expected_date` };
+}
+
+/**
+ * The estimate's parts preference, in the order Genuine, After-Market, Used.
+ * Takes the estimate row (or the preference itself: 'genuine,used' or an
+ * array). An estimate from before the preference existed reads it from the
+ * format it was sent in (Format 1 Genuine, 2 After-Market, 3 both).
+ */
+export function partsPreference(source) {
+  const est = source && typeof source === 'object' && !Array.isArray(source) ? source : { parts_preference: source };
+  const raw = est.parts_preference;
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',').map(s => s.trim()) : [];
+  const pref = PART_CATEGORIES.filter(c => list.includes(c));
+  if (pref.length) return pref;
+  if (est.estimate_format === 'genuine') return ['genuine'];
+  if (est.estimate_format === 'after_market') return ['after_market'];
+  return ['genuine', 'after_market'];
+}
+
+/** The old Format a preference amounts to (genuine / after_market / both), or null when it has none (Used). */
+export function formatOfPreference(pref) {
+  const key = PART_CATEGORIES.filter(c => pref.includes(c)).join(',');
+  return { genuine: 'genuine', after_market: 'after_market', 'genuine,after_market': 'both' }[key] || null;
+}
+
+const priceOrNull = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+
+/**
+ * One category of a part line. available: true / false / null (not priced
+ * yet); decided: priced or marked not available; usable: can be chosen.
+ */
+export function partCategory(l, category) {
+  const col = categoryColumns(category);
+  const unavailable = l[col.available] !== null && l[col.available] !== undefined && Number(l[col.available]) === 0;
+  const price = unavailable ? null : priceOrNull(l[col.price]);
+  return {
+    option: category, price,
+    available: unavailable ? false : price != null ? true : null,
+    expected_date: !unavailable && l[col.expected] ? String(l[col.expected]).slice(0, 10) : null,
+    decided: unavailable || price != null,
+    usable: price != null,
+  };
+}
+
+/** True when the Store has entered anything per category (otherwise: a line priced as one unit price, before categories). */
+export function hasCategoryPricing(l) {
+  return PART_CATEGORIES.some(c => {
+    const col = categoryColumns(c);
+    return (l[col.price] !== null && l[col.price] !== undefined) || (l[col.available] !== null && l[col.available] !== undefined);
+  });
+}
+
+/**
+ * What the customer can choose for a part line: each requested category,
+ * and the alternative (priced and available, a category outside the
+ * preference) or null.
+ */
+export function partOptions(l, pref) {
+  const requested = pref.map(c => partCategory(l, c));
+  let alternative = null;
+  const alt = l.alternative_option;
+  if (alt && PART_CATEGORIES.includes(alt) && !pref.includes(alt)) {
+    const o = partCategory(l, alt);
+    if (o.usable) {
+      alternative = {
+        ...o, alternative: true,
+        for: pref.includes(l.alternative_for) ? l.alternative_for : (requested.find(r => r.available === false)?.option || null),
+        approved: l.alternative_approved === null || l.alternative_approved === undefined ? null : Number(l.alternative_approved) === 1,
+      };
+    }
+  }
+  return { requested, alternative };
+}
+
+/**
+ * The option a part line counts at: the customer's choice while it is still
+ * on offer, else the first priced, available requested category. The
+ * alternative counts only when the customer approved the line with it.
+ * null = nothing to count (not priced, or nothing available).
+ */
+export function effectivePartOption(l, pref) {
+  const { requested, alternative } = partOptions(l, pref);
+  const usable = requested.filter(o => o.usable);
+  if (l.part_option) {
+    const chosen = usable.find(o => o.option === l.part_option)
+      || (alternative && alternative.option === l.part_option && alternative.approved ? alternative : null);
+    if (chosen) return chosen;
+  }
+  return usable[0] || null;
+}
+
+/**
+ * A part line the Store has still to price: a requested category that is
+ * neither priced nor marked not available. A line priced before categories
+ * existed (a unit price only) counts as priced.
+ */
+export function partLineUnpriced(l, pref) {
+  if (l.line_type !== 'parts') return false;
+  if (!hasCategoryPricing(l)) return !(Number(l.unit_price) > 0);
+  return partOptions(l, pref).requested.some(o => !o.decided);
+}
+
+/** partLineUnpriced() in SQL, for the queues: `l` is the estimate_lines row, `e` its service_estimates row. */
+export const UNPRICED_PART_SQL = `(l.line_type = 'parts' AND CASE
+    WHEN l.genuine_price IS NULL AND l.aftermarket_price IS NULL AND l.used_price IS NULL
+     AND l.genuine_available IS NULL AND l.aftermarket_available IS NULL AND l.used_available IS NULL
+    THEN COALESCE(l.unit_price, 0) = 0
+    ELSE (FIND_IN_SET('genuine', e.parts_preference) > 0 AND l.genuine_price IS NULL AND COALESCE(l.genuine_available, 1) <> 0)
+      OR (FIND_IN_SET('after_market', e.parts_preference) > 0 AND l.aftermarket_price IS NULL AND COALESCE(l.aftermarket_available, 1) <> 0)
+      OR (FIND_IN_SET('used', e.parts_preference) > 0 AND l.used_price IS NULL AND COALESCE(l.used_available, 1) <> 0)
+  END)`;
+
 /**
  * Step 5 numbers: for each job (estimate lines grouped by job_name), the
- * total with Genuine parts and with After-Market parts. Labour counts in
- * both. A part type marked unavailable (N/A) falls back to the other type
- * for that job, as the process chart says.
+ * parts and the total in each category of the customer's preference. Labour
+ * counts in every category. A part counts in a category only when it is
+ * priced and available in it — there is no fallback to another category; the
+ * job is flagged (na) instead. Alternatives are listed on their own and
+ * never added to a category's total.
+ *
+ * `preference`: the estimate row, or its parts_preference (default Genuine +
+ * After-Market). The Genuine / After-Market keys of Format 1/2/3 stay for the
+ * screens that read them (null when that category was not asked for).
  */
-export function summariseEstimatePricing(lines) {
+export function summariseEstimatePricing(lines, preference = null) {
+  const pref = partsPreference(preference);
+  const zero = () => Object.fromEntries(pref.map(c => [c, 0]));
   const jobs = new Map();
+  const alternatives = [];
   let unpricedParts = 0, unpricedLabour = 0, partLines = 0, labourLines = 0, rejected = 0;
   for (const l of lines) {
     const key = (l.job_name || l.description || 'Job').trim();
-    if (!jobs.has(key)) jobs.set(key, { job: key, labour: 0, genuine: 0, after_market: 0, genuine_na: false, after_market_na: false, other: 0, lines: 0 });
+    if (!jobs.has(key)) jobs.set(key, { job: key, labour: 0, other: 0, parts: zero(), na: Object.fromEntries(pref.map(c => [c, false])), alternative: 0, alternatives: 0, waiting: 0, partLines: 0, lines: 0 });
     const j = jobs.get(key);
     j.lines++;
     if (l.customer_status === 'rejected') rejected++;
@@ -655,35 +857,51 @@ export function summariseEstimatePricing(lines) {
       if (l.unit_price == null || Number(l.unit_price) <= 0) unpricedLabour++;
       j.labour += qty * Number(l.unit_price || 0);
     } else if (l.line_type === 'parts') {
-      partLines++;
-      const g = l.genuine_available === 0 ? null : (l.genuine_price != null ? Number(l.genuine_price) : null);
-      const a = l.aftermarket_available === 0 ? null : (l.aftermarket_price != null ? Number(l.aftermarket_price) : null);
-      const legacy = l.genuine_price == null && l.aftermarket_price == null && Number(l.unit_price) > 0 ? Number(l.unit_price) : null;
-      const bothNA = l.genuine_available === 0 && l.aftermarket_available === 0;
-      if (g == null && a == null && legacy == null && !bothNA) unpricedParts++;
-      if (l.genuine_available === 0) j.genuine_na = true;
-      if (l.aftermarket_available === 0) j.after_market_na = true;
-      const gUse = g ?? a ?? legacy ?? 0;    // N/A → fall back to the other type
-      const aUse = a ?? g ?? legacy ?? 0;
-      j.genuine += qty * gUse;
-      j.after_market += qty * aUse;
+      partLines++; j.partLines++;
+      if (partLineUnpriced(l, pref)) { unpricedParts++; j.waiting++; }
+      if (!hasCategoryPricing(l)) {
+        // Priced as one unit price before categories existed: the same in each.
+        for (const c of pref) j.parts[c] += qty * Number(l.unit_price || 0);
+        continue;
+      }
+      const { requested, alternative } = partOptions(l, pref);
+      for (const o of requested) {
+        if (o.usable) j.parts[o.option] += qty * o.price;
+        else if (o.available === false) j.na[o.option] = true;
+      }
+      if (alternative) {
+        j.alternative += qty * alternative.price; j.alternatives++;
+        alternatives.push({
+          line_id: l.id ?? null, job: key, description: l.description, option: alternative.option, for: alternative.for,
+          price: alternative.price, quantity: qty, amount: Math.round(qty * alternative.price * 100) / 100,
+          expected_date: alternative.expected_date, approved: alternative.approved,
+        });
+      }
     } else {
-      const v = qty * Number(l.unit_price || 0);
-      j.other += v;
+      j.other += qty * Number(l.unit_price || 0);
     }
   }
   const r2 = n => Math.round(n * 100) / 100;
-  const out = [...jobs.values()].map(j => ({
-    job: j.job,
-    labour: r2(j.labour),
-    genuine_parts: r2(j.genuine), after_market_parts: r2(j.after_market),
-    total_genuine: r2(j.labour + j.genuine + j.other), total_after_market: r2(j.labour + j.after_market + j.other),
-    genuine_na: j.genuine_na, after_market_na: j.after_market_na,
-  }));
+  const has = c => pref.includes(c);
+  const out = [...jobs.values()].map(j => {
+    const parts = Object.fromEntries(pref.map(c => [c, r2(j.parts[c])]));
+    const totals = Object.fromEntries(pref.map(c => [c, r2(j.labour + j.parts[c] + j.other)]));
+    return {
+      job: j.job, labour: r2(j.labour), other: r2(j.other), parts, totals, na: j.na,
+      alternative_parts: r2(j.alternative), alternatives: j.alternatives, waiting: j.waiting, part_lines: j.partLines,
+      genuine_parts: has('genuine') ? parts.genuine : null, after_market_parts: has('after_market') ? parts.after_market : null,
+      total_genuine: has('genuine') ? totals.genuine : null, total_after_market: has('after_market') ? totals.after_market : null,
+      genuine_na: !!j.na.genuine, after_market_na: !!j.na.after_market,
+    };
+  });
+  const totals = Object.fromEntries(pref.map(c => [c, r2(out.reduce((s, j) => s + j.totals[c], 0))]));
   return {
+    preference: pref,
     jobs: out,
-    total_genuine: r2(out.reduce((s, j) => s + j.total_genuine, 0)),
-    total_after_market: r2(out.reduce((s, j) => s + j.total_after_market, 0)),
+    totals,
+    total_genuine: has('genuine') ? totals.genuine : null,
+    total_after_market: has('after_market') ? totals.after_market : null,
+    alternatives,
     lines: lines.length, partLines, labourLines, unpricedParts, unpricedLabour, rejected,
   };
 }
@@ -705,15 +923,28 @@ function nextAction(c) {
       const missing = list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list.at(-1)}` : list[0];
       return N('service_advisor', 'Service Advisor', 'intake_missing', `Record ${missing} on the job card.`, 'edit', { missing });
     }
-    case 'job_card': return N('service_advisor', 'Service Advisor', 'open_job_card', 'Open the main job card.', 'open_job_card');
+    case 'job_card': {
+      // An external customer's job card waits for their acknowledgement of
+      // the physical inspection (lib/physical-inspection.js), which opens it.
+      const p = c.physical;
+      if (!p.needed || p.acknowledged || p.override) return N('service_advisor', 'Service Advisor', 'open_job_card', 'Open the main job card.', 'open_job_card');
+      if (p.status === 'none') return N('service_advisor', 'Service Advisor', 'physical_inspection',
+        'Do the physical inspection with the customer: the vehicle\'s condition, damage and photos, and their signature. The job card opens when they sign.', 'inspect');
+      if (p.status === 'draft') return N('service_advisor', 'Service Advisor', 'finish_physical_inspection',
+        'Finish the physical inspection and get the customer\'s signature. The job card opens when they sign.', 'inspect');
+      if (p.shared_at) return N('customer', 'Customer', 'await_acknowledgement',
+        'Waiting for the customer\'s acknowledgement — the link was sent. They sign from the link or in the customer portal, and the job card opens.', 'inspect');
+      return N('service_advisor', 'Service Advisor', 'send_inspection_link',
+        'Waiting for the customer\'s acknowledgement — send them the inspection link to sign. The job card opens when they sign.', 'inspect');
+    }
     case 'inspection_pricing':
       if (!c.estimate) {
-        // The walk-around is done: only the estimate is left.
-        return c.intakeDone
-          ? N('service_advisor', 'Service Advisor', 'create_estimate_from_inspection', 'Raise the estimate with the inspection findings.', 'create_estimate')
-          : N('service_advisor', 'Service Advisor', 'create_estimate', 'Carry out the technical inspection and raise the estimate with the findings.', 'create_estimate');
+        return N('service_advisor', 'Service Advisor', 'create_estimate', 'Carry out the technical inspection and raise the estimate with the findings.', 'create_estimate');
       }
-      if (c.pricing?.unpricedParts > 0) return N('storekeeper', 'Storekeeper', 'price_parts', 'Price the parts — Genuine and After-Market, or mark a type N/A.', 'price_parts');
+      if (c.pricing?.unpricedParts > 0) {
+        const pref = prefText(partsPreference(c.estimate));
+        return N('storekeeper', 'Storekeeper', 'price_parts_categories', `Price the parts in the customer's categories (${pref}), or mark a category not available.`, 'price_parts', { pref });
+      }
       return N('service_advisor', 'Service Advisor', 'price_labour', 'Price the labour on the estimate.', 'open_estimate');
     case 'estimate':
       if (c.counterPriced && !c.managerApproved) return N('service_advisor', 'Service Advisor', 'counter_needs_estimate',
@@ -738,11 +969,40 @@ function nextAction(c) {
   }
 }
 
+/** Step 3's "acknowledged by the customer" check: [detail, detail_i18n]. */
+function physicalAckDetail(p, jobCardOpened) {
+  const who = p.signed_by_name ? ` · ${p.signed_by_name}` : '';
+  if (!p.needed) return ['Not needed — internal customer', { key: 'val.not_needed_internal' }];
+  if (p.acknowledged) {
+    return ({
+      on_site: [`Signed at the car${who}`, { key: 'val.pi_on_site', params: { name: p.signed_by_name || '' } }],
+      link: [`Signed from the link${who}`, { key: 'val.pi_link', params: { name: p.signed_by_name || '' } }],
+      portal: [`Signed in the customer portal${who}`, { key: 'val.pi_portal', params: { name: p.signed_by_name || '' } }],
+      paper: ['Paper form uploaded', { key: 'val.pi_paper' }],
+    })[p.via] || [null, null];
+  }
+  if (p.override) {
+    const text = `Skipped — job card opened by ${p.override.by || 'a manager'}${p.override.reason ? `: ${p.override.reason}` : ''}`;
+    return [text, { key: 'val.pi_override', params: { name: p.override.by || '', reason: p.override.reason || '' } }];
+  }
+  if (p.status === 'completed') {
+    return p.shared_at ? ['Link sent — waiting for the signature', { key: 'val.pi_link_sent' }]
+      : ['Completed, not signed — send the link', { key: 'val.pi_unsigned' }];
+  }
+  if (p.status === 'draft') return ['In progress', { key: 'val.pi_in_progress' }];
+  if (jobCardOpened) return ['Not recorded — the job card was opened before it was required', { key: 'val.pi_before_rule' }];
+  return [null, null];
+}
+
 function timeByCardRunning(cards) { return cards.some(c => c.time.state === 'running'); }
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ') : s; }
 function clip(s, max) { const t = String(s || '').trim(); return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t; }
 function fmtSub(s) { return s ? ({ walkin: 'Walk-in', fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset' })[s] || cap(s) : null; }
-function fmtFormat(f) { return f === 'genuine' ? '(Format 1 — Genuine)' : f === 'after_market' ? '(Format 2 — After-Market)' : f === 'both' ? '(Format 3 — Genuine & After-Market)' : ''; }
+/** The customer's parts categories in words: "Genuine", "Genuine & After-Market", "Genuine, After-Market & Used". */
+function prefText(pref) {
+  const words = pref.map(c => PART_CATEGORY_LABEL[c] || c);
+  return words.length > 1 ? `${words.slice(0, -1).join(', ')} & ${words.at(-1)}` : words[0] || '';
+}
 function fmtOutcome(o) { return o === 'reached' ? 'reached' : o === 'no_answer' ? 'no answer' : o === 'message_sent' ? 'message sent' : 'logged'; }
 export function fmtMinutes(m) { const h = Math.floor(m / 60); const mm = m % 60; return h ? `${h}h ${mm}m` : `${mm}m`; }
 
@@ -753,7 +1013,9 @@ export function fmtMinutes(m) { const h = Math.floor(m / 60); const mm = m % 60;
  */
 export async function onTechnicianAssigned({ workOrderId, workshopId, mechanicId }) {
   try {
-    const main = await ensureMainJobCard({ workOrderId, workshopId, notify: false });
+    // An external job whose physical inspection is not acknowledged yet has
+    // no job card, and assigning a technician does not open one.
+    const { jobCard: main } = await openJobCardIfReady({ workOrderId, workshopId, notify: false });
     if (main) await execute('UPDATE job_cards SET mechanic_id = ? WHERE id = ?', [mechanicId, main.id]);
     await notifyTechnicianAssigned({ workshopId, workOrderId, mechanicId, jobCardId: main?.id || null });
   } catch (err) {
@@ -814,12 +1076,17 @@ export async function notifyTechnicianAssigned({ workshopId, workOrderId, mechan
 /** Step 6: the customer approved — the floor is told the work is ready to assign. */
 export async function onWorkApproved({ workOrderId, workshopId, userId = null, how = '' }) {
   try {
-    const main = await ensureMainJobCard({ workOrderId, workshopId, userId, notify: false });
+    // Not for an external job whose physical inspection is not acknowledged
+    // yet (a job priced and agreed at the counter): its card opens on the
+    // acknowledgement, and only then can it be assigned.
+    const { jobCard: main } = await openJobCardIfReady({ workOrderId, workshopId, userId, notify: false });
     const [wo] = await query('SELECT work_order_number, mechanic_id FROM work_orders WHERE id = ? AND workshop_id = ?', [workOrderId, workshopId]);
     if (!wo) return;
+    const next = !main ? 'The job card opens once the customer has acknowledged the physical inspection.'
+      : wo.mechanic_id ? 'A technician is already assigned.' : 'Ready for the Team Leader to assign a technician.';
     await notifyGroups(workshopId, FLOOR, {
       title: `Approved: ${wo.work_order_number}`,
-      body: `The customer approved the work${how ? ` (${how})` : ''}. ${wo.mechanic_id ? 'A technician is already assigned.' : 'Ready for the Team Leader to assign a technician.'}${main ? ` Job card ${main.job_card_number}.` : ''}`,
+      body: `The customer approved the work${how ? ` (${how})` : ''}. ${next}${main ? ` Job card ${main.job_card_number}.` : ''}`,
       link: `/work-orders/${workOrderId}`, orderId: workOrderId, icon: '✅', type: 'workflow_work_approved', exceptUserId: userId,
     });
   } catch (err) {

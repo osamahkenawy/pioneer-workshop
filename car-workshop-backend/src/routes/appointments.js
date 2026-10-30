@@ -10,7 +10,9 @@
  *    visit (job card) → after the visit → service due.
  *  A booking can be made from an enquiry or a quote (enquiry_id /
  *  estimate_id), and POST /:id/check-in turns it into the visit: the
- *  work order and its main job card, exactly like any other intake.
+ *  enquiry's work order (opened when it was submitted) or a new one, and
+ *  its main job card — at once for an internal customer, after the
+ *  physical inspection for an external one (lib/physical-inspection.js).
  *
  *  Reads are open to staff; making, changing and checking in bookings
  *  is front-desk work (capability 'job.open': Service Advisor,
@@ -22,7 +24,8 @@ import pool, { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { logAudit } from '../lib/audit.js';
 import { requireCapability } from '../lib/roles.js';
-import { ensureMainJobCard } from '../lib/workflow.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
+import { fulfilReminders } from '../lib/workflow.js';
 import { serviceStatusToken } from '../lib/tokens.js';
 import {
   customerForEnquiry, vehicleForEnquiry, customerForContact, notePlateConflict,
@@ -460,7 +463,8 @@ router.post('/', canBook, async (req, res) => {
       }
       customer_name = customer_name || enq.contact_name || '';
       customer_phone = customer_phone || enq.contact_phone || '';
-      if (!work_order_id) work_order_id = await openWorkOrder(enq.converted_work_order_id);
+      // The enquiry's work order, opened when it was submitted.
+      if (!work_order_id) work_order_id = await openWorkOrder(enq.converted_work_order_id) || await openWorkOrder(enq.work_order_id);
     }
 
     if (customer_id) {
@@ -536,16 +540,19 @@ router.post('/', canBook, async (req, res) => {
 // POST /api/appointments/:id/check-in — the car has arrived
 // Body: { odometer_in, complaint? }
 // Turns the booking into the visit: the work order (job card) and its
-// main job card, opened the same way as every other intake. A booking
-// already tied to an open job card (an approved quote) arrives on that
-// one. Safe to repeat: a second check-in returns the same work order.
+// main job card, opened the same way as every other intake — the job card
+// at once for an internal customer, after the physical inspection for an
+// external one. A booking already tied to an open work order (the
+// enquiry's, an approved quote) arrives on that one. Safe to repeat: a
+// second check-in returns the same work order.
 //
 // The odometer reading is optional (recorded when given). The job
 // card carries the reported issue — the booking's notes ("what the customer
 // reported"), else the enquiry's description, else the booked service —
 // and the channel the request came through (the enquiry's WhatsApp /
 // website / social media, an online booking as the website).
-// Response: { success, work_order_id, work_order_number, created, message }
+// Response: { success, work_order_id, work_order_number, job_card_number,
+//             physical_inspection_required, created, message }
 // ══════════════════════════════════════════════════════════════
 router.post('/:id/check-in', canBook, async (req, res) => {
   const raw = req.body?.odometer_in;
@@ -585,7 +592,9 @@ router.post('/:id/check-in', canBook, async (req, res) => {
     const lockWo = async id => {
       if (!id) return null;
       const [[wo]] = await conn.query(
-        'SELECT id, work_order_number, status, vehicle_id, enquiry_id FROM work_orders WHERE id = ? AND workshop_id = ? FOR UPDATE',
+        `SELECT id, work_order_number, status, customer_id, vehicle_id, description, enquiry_id,
+                service_category, scheduled_at, service_bay_id
+           FROM work_orders WHERE id = ? AND workshop_id = ? FOR UPDATE`,
         [id, req.workshopId]
       );
       return wo || null;
@@ -618,8 +627,10 @@ router.post('/:id/check-in', canBook, async (req, res) => {
         'SELECT * FROM enquiries WHERE id = ? AND workshop_id = ? FOR UPDATE',
         [appt.enquiry_id, req.workshopId]
       );
-      if (!wo && enq?.converted_work_order_id) {
-        const w = await lockWo(enq.converted_work_order_id);
+      // The enquiry's own work order, opened when it was submitted.
+      for (const id of [enq?.converted_work_order_id, enq?.work_order_id]) {
+        if (wo || !id) continue;
+        const w = await lockWo(id);
         if (w && !CLOSED_WO.includes(w.status)) wo = w;
       }
     }
@@ -634,6 +645,29 @@ router.post('/:id/check-in', canBook, async (req, res) => {
       workOrderNumber = wo.work_order_number;
       if (!CLOSED_WO.includes(wo.status) && odometer != null) {
         await conn.query('UPDATE work_orders SET odometer_in = ? WHERE id = ? AND workshop_id = ?', [odometer, wo.id, req.workshopId]);
+      }
+      // A work order opened with the enquiry may still lack the car and the
+      // reported issue: the booking and the check-in fill them in.
+      if (!CLOSED_WO.includes(wo.status)) {
+        const issue = typedComplaint || String(appt.notes || '').trim();
+        if (!String(wo.description || '').trim() && issue) {
+          await conn.query('UPDATE work_orders SET description = ? WHERE id = ?', [issue.slice(0, 5000), wo.id]);
+        }
+        if (!wo.vehicle_id && appt.vehicle_id) {
+          const [[own]] = await conn.query('SELECT id FROM vehicles WHERE id = ? AND workshop_id = ? AND customer_id <=> ?', [appt.vehicle_id, req.workshopId, wo.customer_id]);
+          if (own) { await conn.query('UPDATE work_orders SET vehicle_id = ? WHERE id = ?', [own.id, wo.id]); vehicleId = own.id; }
+        }
+        // …and the booked service, slot and bay, as a work order opened at
+        // check-in gets them: the service due reminder after the visit reads
+        // the category. Only over the defaults of a job not started yet.
+        if (['pending', 'confirmed', 'estimate_approved'].includes(wo.status)) {
+          const booked = appt.service_category ? woCategory(appt.service_category) : null;
+          const category = booked && booked !== wo.service_category && [null, 'general_maintenance'].includes(wo.service_category) ? booked : null;
+          await conn.query(
+            `UPDATE work_orders SET service_category = COALESCE(?, service_category), scheduled_at = COALESCE(scheduled_at, ?),
+                    service_bay_id = COALESCE(service_bay_id, ?) WHERE id = ?`,
+            [category, `${appt.appointment_date} ${normTime(appt.appointment_time)}`, appt.service_bay_id || null, wo.id]);
+        }
       }
     } else {
       // (b) Open the work order, as routes/enquiries.js convert does.
@@ -759,9 +793,9 @@ router.post('/:id/check-in', canBook, async (req, res) => {
       await conn.query(
         `UPDATE enquiries
             SET status = 'converted', converted_work_order_id = ?, converted_at = NOW(),
-                customer_id = COALESCE(customer_id, ?)
+                work_order_id = COALESCE(work_order_id, ?), customer_id = COALESCE(customer_id, ?)
           WHERE id = ? AND workshop_id = ? AND converted_work_order_id IS NULL`,
-        [workOrderId, appt.customer_id || null, enq.id, req.workshopId]
+        [workOrderId, workOrderId, appt.customer_id || null, enq.id, req.workshopId]
       );
       await conn.query('UPDATE work_orders SET enquiry_id = ? WHERE id = ? AND enquiry_id IS NULL', [enq.id, workOrderId]);
     }
@@ -779,9 +813,13 @@ router.post('/:id/check-in', canBook, async (req, res) => {
     // After the commit (as fleet-intake and estimates do): the main job card
     // reads the work order through the pool, and a failure here must not
     // undo a visit the workshop can already see.
-    let jobCard = null;
+    // An external customer's job card waits for the physical inspection.
+    let jobCard = null; let inspectionFirst = false;
     try {
-      jobCard = await ensureMainJobCard({ workOrderId, workshopId: req.workshopId, userId: req.user?.id || null });
+      const r = await openJobCardIfReady({ workOrderId, workshopId: req.workshopId, userId: req.user?.id || null });
+      jobCard = r.jobCard;
+      inspectionFirst = r.reason === 'PHYSICAL_INSPECTION_REQUIRED';
+      if (!r.opened) fulfilReminders({ workshopId: req.workshopId, workOrderId });
     } catch (e) {
       console.error('[Appointments] main job card:', e.message);
     }
@@ -798,8 +836,10 @@ router.post('/:id/check-in', canBook, async (req, res) => {
       work_order_id: workOrderId,
       work_order_number: workOrderNumber,
       job_card_number: jobCard?.job_card_number || null,
+      physical_inspection_required: inspectionFirst,
       created,
-      message: created ? `Checked in — job card ${workOrderNumber} opened` : `Checked in to job card ${workOrderNumber}`,
+      message: `${created ? `Checked in — job card ${workOrderNumber} opened` : `Checked in to job card ${workOrderNumber}`}`
+        + (inspectionFirst ? '. Next: the physical inspection with the customer.' : ''),
     });
   } catch (err) {
     if (conn) { try { await conn.rollback(); } catch { /* connection gone */ } }

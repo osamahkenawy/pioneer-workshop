@@ -1,5 +1,5 @@
 // Regression test for the job-card leak fixes (process steps 4-6), LOCAL ONLY:
-// localhost:4000 + the DB in car-workshop-backend/.env. Creates LEAKTEST
+// the API at QA_API (default localhost:4000) + the DB in car-workshop-backend/.env. Creates LEAKTEST
 // records, asserts the fixed behaviour, then deletes everything it created.
 import { createRequire } from 'module';
 import crypto from 'crypto';
@@ -13,7 +13,7 @@ const bcrypt = require('bcryptjs');
 const env = Object.fromEntries(fs.readFileSync(BE + '/.env', 'utf8').split('\n')
   .filter(l => /^[A-Z_]+=/.test(l)).map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 if (env.DB_HOST !== 'localhost' && env.DB_HOST !== '127.0.0.1') throw new Error('refusing to run against a non-local DB');
-const API = 'http://localhost:4000/api';
+const API = process.env.QA_API || 'http://localhost:4000/api'; // QA_API overrides the API base
 const db = await mysql.createConnection({ host: '127.0.0.1', user: env.DB_USER, password: env.DB_PASSWORD, database: env.DB_NAME });
 const q = async (sql, p = []) => (await db.query(sql, p))[0];
 
@@ -28,12 +28,22 @@ async function api(method, path, body, { auth = true } = {}) {
   return { status: r.status, json };
 }
 const wo = async id => (await q('SELECT * FROM work_orders WHERE id = ?', [id]))[0];
+const mainOf = async woId => (await q('SELECT * FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [woId || 0]))[0];
+// A 1×1 PNG, as the signature pad would send.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+/** The physical inspection with the customer at the car: signed, then completed — opens an external customer's main job card. */
+async function acknowledge(woId) {
+  const insp = (await api('POST', '/vehicle-inspections', { work_order_id: woId, inspection_type: 'intake' })).json?.data;
+  await api('PATCH', `/vehicle-inspections/${insp?.id}/signature`, { signature: PNG, name: 'LEAKTEST Customer' });
+  return api('PATCH', `/vehicle-inspections/${insp?.id}/complete`, {});
+}
 const inv = async woId => (await q('SELECT * FROM invoices WHERE work_order_id = ?', [woId]))[0];
 const invLines = async invId => q('SELECT item_type, description, quantity, unit_price, total FROM invoice_items WHERE invoice_id = ? ORDER BY id', [invId]);
 const n = x => Number(x);
 
 const idTables = (await q(`SELECT table_name AS t FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t);
+  WHERE table_schema = DATABASE() AND column_name = 'id' AND extra LIKE '%auto_increment%'`)).map(r => r.t)
+  .filter(t => t !== 'roles'); // never cleaned up by id: the seeded / demo roles live there
 const baseline = {};
 for (const t of idTables) baseline[t] = (await q(`SELECT COALESCE(MAX(id),0) AS m FROM \`${t}\``))[0].m;
 const created = { users: [], customers: [], vehicles: [], mechanics: [], work_orders: [], service_estimates: [] };
@@ -100,6 +110,17 @@ try {
   const again = await api('POST', `/estimates/${ea.id}/convert-to-work-order`);
   expect(A, 'converting twice is refused', again.status === 400 || again.status === 409, `HTTP ${again.status}`);
 
+  // LEAKTEST Customer is external: the main job card opens when they
+  // acknowledge the physical inspection (client, 2026-10-29), not with the
+  // approved estimate — and until then there is nothing for the floor.
+  const tl0 = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
+  const jc0 = await api('POST', '/job-cards', { work_order_id: woA, estimate_id: ea.id, lines: [{ description: 'AC compressor - labour', line_type: 'labour' }] });
+  const [woA0] = await q('SELECT mechanic_id FROM work_orders WHERE id = ?', [woA]);
+  expect(A, 'no job card before the physical inspection is acknowledged: the Team Leader cannot assign, no job card can be added (409 PHYSICAL_INSPECTION_REQUIRED)',
+    !(await mainOf(woA)) && tl0.status === 409 && tl0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && jc0.status === 409 && jc0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && woA0.mechanic_id == null,
+    `assign ${tl0.status} ${tl0.json?.code || ''}, job card ${jc0.status} ${jc0.json?.code || ''}`);
+  const ackA = await acknowledge(woA);
+  expect(A, 'acknowledged at the car → the main job card opens', ackA.json?.job_card?.opened_now === true && !!(await mainOf(woA)), JSON.stringify(ackA.json?.job_card));
   const tl = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
   const ia = await inv(woA);
   expect(A, 'team leader assign raises the invoice', tl.status === 200 && !!ia, `HTTP ${tl.status}, invoice ${ia?.invoice_number}, total ${ia?.total_amount}`);
@@ -149,6 +170,10 @@ try {
   const woB = wiz.json?.data?.id; created.work_orders.push(woB);
   const b0 = await wo(woB);
   expect(B, 'wizard job card total = 80 + 195 + VAT 13.75 = 288.75', n(b0.total_amount) === 288.75, `total ${b0.total_amount}, VAT ${b0.vat_amount}`);
+  const asgB0 = await api('PATCH', `/work-orders/${woB}/assign-mechanic`, { mechanic_id: MECH });
+  expect(B, 'no technician on an external job before the physical inspection is acknowledged (409 PHYSICAL_INSPECTION_REQUIRED)',
+    asgB0.status === 409 && asgB0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && !(await mainOf(woB)) && (await wo(woB)).mechanic_id == null, `HTTP ${asgB0.status} ${asgB0.json?.code || ''}`);
+  await acknowledge(woB);
   await api('PATCH', `/work-orders/${woB}/assign-mechanic`, { mechanic_id: MECH });
   const blocked = await api('PATCH', `/work-orders/${woB}/status`, { status: 'in_progress' });
   expect(B, 'work cannot start before the customer approves', blocked.status === 409 && blocked.json?.code === 'CUSTOMER_APPROVAL_REQUIRED', `HTTP ${blocked.status} ${blocked.json?.code || ''}`);
@@ -244,6 +269,7 @@ try {
     customer_approval_channel: 'phone', customer_approval_note: 'Approved on call',
   });
   const woH = wizH.json?.data?.id; created.work_orders.push(woH);
+  await acknowledge(woH); // external: the job card (and the floor) wait for the physical inspection
   await api('PATCH', `/work-orders/${woH}/assign-mechanic`, { mechanic_id: MECH });
   const startH = await api('PATCH', `/work-orders/${woH}/status`, { status: 'in_progress' });
   expect(H, 'approval recorded at creation lets work start', startH.status === 200, `HTTP ${startH.status}`);
@@ -281,6 +307,10 @@ try {
 } catch (e) {
   out.push({ error: e.stack });
 } finally {
+  // Signature images of the inspections signed here.
+  for (const { u } of await q("SELECT signature_url u FROM vehicle_inspections WHERE id > ? AND signature_url LIKE '/uploads/signatures/sig_insp%'", [baseline.vehicle_inspections])) {
+    if (/^\/uploads\/signatures\/sig_insp\d+_[\w-]+\.png$/.test(u)) fs.rmSync(BE + u, { force: true });
+  }
   const foreign = [];
   for (const [t, ids] of Object.entries(created)) {
     for (const r of await q(`SELECT id FROM \`${t}\` WHERE id > ?`, [baseline[t]])) if (!ids.includes(r.id)) foreign.push(`${t}#${r.id}`);

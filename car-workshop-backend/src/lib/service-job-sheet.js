@@ -580,7 +580,7 @@ function renderInspectionPage(doc, order, tenant) {
   const marks = Array.isArray(insp.marks) ? insp.marks : [];
   const inspTypeLabel = insp.inspection_type === 'joint' ? 'Joint Inspection'
                       : insp.inspection_type === 'qc' ? 'QC Inspection'
-                      : 'Intake Inspection';
+                      : 'Physical Inspection';
 
   let y = M;
 

@@ -81,16 +81,22 @@ const onAccountFor = (customerClass, payerType) =>
   customerClass === 'internal' || ['fleet', 'insurance', 'corporate'].includes(payerType);
 
 /**
- * Which stage the job is at, and the special ending if any.
+ * Which stage the job is at, and the special ending if any. `awaitingAck`:
+ * an external customer's job whose physical inspection they have not
+ * acknowledged yet — no job card, so the car is still "received" even when
+ * the walk-around is done, or the customer already approved a quote for it
+ * (lib/physical-inspection.js). A quote still waiting for their decision is
+ * "Your approval" all the same.
  * @returns {{ key: string, special: null|'declined'|'cancelled' }}
  */
-export function stageOf({ status, estimateStatus, approved, qcPassedAll, workDoneAll, inspected, estimateSent }) {
+export function stageOf({ status, estimateStatus, approved, qcPassedAll, workDoneAll, inspected, estimateSent, awaitingAck = false }) {
   if (status === 'cancelled') return { key: estimateStatus === 'rejected' ? 'declined' : 'cancelled', special: estimateStatus === 'rejected' ? 'declined' : 'cancelled' };
   if (status === 'completed') return { key: 'collected', special: null };
   if (status === 'ready_for_pickup' || qcPassedAll) return { key: 'ready', special: null };
   if (status === 'inspection' || workDoneAll) return { key: 'quality_check', special: null };
-  if (OPEN_FOR_REPAIR.includes(status) || approved) return { key: 'repair', special: null };
-  if (estimateSent) return { key: 'approval', special: null };
+  if (OPEN_FOR_REPAIR.includes(status) || (approved && !awaitingAck)) return { key: 'repair', special: null };
+  if (estimateSent && !approved) return { key: 'approval', special: null };
+  if (awaitingAck) return { key: 'received', special: null };
   if (inspected || status === 'confirmed') return { key: 'inspection_estimate', special: null };
   return { key: 'received', special: null };
 }
@@ -142,10 +148,14 @@ export async function buildCustomerStatus({ token, workOrderId, workshopId } = {
   const workDoneAll = cards.length > 0 && cards.every(c => JC_WORK_DONE.includes(c.status));
   const qcPassedAll = cards.length > 0 && cards.every(c => JC_QC_PASSED.includes(c.status));
   const intakeDone = (wf.inspections || []).find(i => i.inspection_type === 'intake' && i.status === 'completed');
-  const inspectedAt = intakeDone?.completed_at || extra?.intake_inspection_at || null;
+  // An external job's technical inspection starts once the job card is open,
+  // i.e. once the customer has acknowledged the physical inspection.
+  const pi = wf.physical_inspection;
+  const awaitingAck = !!pi?.needed && !pi.job_card_open && !cards.length;
+  const inspectedAt = awaitingAck ? null : (intakeDone?.completed_at || extra?.intake_inspection_at || null);
   const { key: stageKey, special } = stageOf({
     status: w.status, estimateStatus: estimate?.status, approved, qcPassedAll, workDoneAll,
-    inspected: !!inspectedAt || !!estimate, estimateSent,
+    inspected: !!inspectedAt || !!estimate, estimateSent, awaitingAck,
   });
 
   // ── When each stage happened ──

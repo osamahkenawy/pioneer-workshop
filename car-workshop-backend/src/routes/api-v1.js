@@ -13,8 +13,9 @@ import { query, execute } from '../lib/database.js';
 import { requireApiPermission } from '../middleware/api-key-auth.js';
 import { serviceStatusToken } from '../lib/tokens.js';
 import { syncJobCardBilling } from '../lib/job-card-billing.js';
-import { ensureMainJobCard } from '../lib/workflow.js';
-import { onEnquiryCreated } from '../lib/crm-cycle.js';
+import { openJobCardIfReady } from '../lib/physical-inspection.js';
+import { fulfilReminders } from '../lib/workflow.js';
+import { onEnquiryCreated, openEnquiryWorkOrder, snapshotIntakeClass } from '../lib/crm-cycle.js';
 import { stripMarkup, clampText } from '../lib/sanitize.js';
 
 const router = express.Router();
@@ -66,6 +67,10 @@ const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
  * Idempotent on `reference`: pushing the same reference again returns the
  * enquiry that already exists (200) rather than creating a duplicate, so a
  * landing page that retries on timeout is safe.
+ *
+ * The enquiry's work order (the visit) is opened with it, Received via API
+ * (lib/crm-cycle.js openEnquiryWorkOrder): data.workOrder { id, number }, or
+ * null if it could not be opened (the enquiry is kept).
  *
  * Requires: enquiries:write
  */
@@ -194,9 +199,10 @@ router.post('/enquiries', requireApiPermission('enquiries:write'), async (req, r
       'SELECT id, enquiry_number, external_reference, status, source_channel, source_detail, enquiry_type, created_at FROM enquiries WHERE id = ?',
       [result.insertId]
     );
-    // Follow up: the lead lands as a call-back task.
+    // Follow up: the lead lands as a call-back task, and as its work order.
     const [full] = await query('SELECT * FROM enquiries WHERE id = ?', [result.insertId]);
     await onEnquiryCreated(full);
+    const wo = await openEnquiryWorkOrder({ enquiryId: result.insertId, workshopId: req.workshopId, channel: 'api' });
 
     return res.status(201).json({
       success: true,
@@ -211,6 +217,7 @@ router.post('/enquiries', requireApiPermission('enquiries:write'), async (req, r
         source: row.source_detail,
         enquiryType: row.enquiry_type,
         linkedCustomerId: known ? known.id : null,
+        workOrder: wo ? { id: wo.workOrderId, number: wo.workOrderNumber } : null,
         receivedAt: row.created_at,
       },
     });
@@ -250,9 +257,9 @@ router.get('/enquiries/:reference', requireApiPermission('enquiries:read'), asyn
       `SELECT e.id, e.enquiry_number, e.external_reference, e.status, e.enquiry_type,
               e.source_channel, e.source_detail, e.branch, e.service_requested,
               e.preferred_date, e.contact_name, e.contact_phone, e.created_at,
-              e.converted_work_order_id, wo.work_order_number, wo.status AS work_order_status
+              COALESCE(e.converted_work_order_id, e.work_order_id) AS work_order_id, wo.work_order_number, wo.status AS work_order_status
        FROM enquiries e
-       LEFT JOIN work_orders wo ON e.converted_work_order_id = wo.id
+       LEFT JOIN work_orders wo ON wo.id = COALESCE(e.converted_work_order_id, e.work_order_id)
        WHERE e.workshop_id = ? AND e.external_reference = ?`,
       [req.workshopId, req.params.reference]
     );
@@ -272,8 +279,8 @@ router.get('/enquiries/:reference', requireApiPermission('enquiries:read'), asyn
         service: row.service_requested,
         preferredDate: row.preferred_date,
         customer: { name: row.contact_name, phone: row.contact_phone },
-        workOrder: row.converted_work_order_id
-          ? { id: row.converted_work_order_id, number: row.work_order_number, status: row.work_order_status }
+        workOrder: row.work_order_id
+          ? { id: row.work_order_id, number: row.work_order_number, status: row.work_order_status }
           : null,
         receivedAt: row.created_at,
       },
@@ -430,8 +437,13 @@ router.post('/work_orders', requireApiPermission('work_orders:write'), async (re
       );
     }
     await syncJobCardBilling(id, req.workshopId);
-    await ensureMainJobCard({ workOrderId: id, workshopId: req.workshopId })
-      .catch(e => console.error('[api/v1] main job card:', e.message));
+    // Step 1 as the job records it; the main job card opens now for an
+    // internal customer, and on the physical inspection for an external one
+    // (lib/physical-inspection.js).
+    await snapshotIntakeClass(id);
+    const jc = await openJobCardIfReady({ workOrderId: id, workshopId: req.workshopId })
+      .catch(e => { console.error('[api/v1] main job card:', e.message); return null; });
+    if (!jc?.opened) fulfilReminders({ workshopId: req.workshopId, workOrderId: id });
     // changed_by is a user id; API calls have none.
     await execute(
       `INSERT INTO work_order_status_logs (work_order_id, status, note, changed_by) VALUES (?, 'pending', ?, NULL)`,
