@@ -34,6 +34,8 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
 /** The physical inspection with the customer at the car: signed, then completed — opens an external customer's main job card. */
 async function acknowledge(woId) {
   const insp = (await api('POST', '/vehicle-inspections', { work_order_id: woId, inspection_type: 'intake' })).json?.data;
+  // The physical inspection records the odometer when the work order has none (client review, 2 Nov 2026).
+  if (insp?.id && insp.odometer == null) await api('PUT', `/vehicle-inspections/${insp.id}`, { odometer: 85000 });
   await api('PATCH', `/vehicle-inspections/${insp?.id}/signature`, { signature: PNG, name: 'LEAKTEST Customer' });
   return api('PATCH', `/vehicle-inspections/${insp?.id}/complete`, {});
 }
@@ -56,7 +58,7 @@ try {
   created.users.push(u.insertId);
   const c = await q(`INSERT INTO customers (workshop_id, full_name, phone, email) VALUES (1, 'LEAKTEST Customer', '+971500000999', 'leaktest-customer@example.invalid')`);
   created.customers.push(c.insertId);
-  const v = await q(`INSERT INTO vehicles (workshop_id, customer_id, make, model, plate_number, vin) VALUES (1, ?, 'Toyota', 'Camry', 'LEAKTEST', 'LEAKTEST000000001')`, [c.insertId]);
+  const v = await q(`INSERT INTO vehicles (workshop_id, customer_id, make, model, year, plate_number, plate_emirate, vin) VALUES (1, ?, 'Toyota', 'Camry', 2020, 'LEAKTEST', 'Dubai', 'LEAKTEST000000001')`, [c.insertId]);
   created.vehicles.push(v.insertId);
   const m = await q(`INSERT INTO mechanics (workshop_id, full_name, phone, is_active, status) VALUES (1, 'LEAKTEST Technician', '+971500000998', 1, 'available')`);
   created.mechanics.push(m.insertId);
@@ -282,23 +284,18 @@ try {
   const startA = (await wo(woA)).customer_approval_channel;
   expect(H, 'estimate-born job card is approved by the estimate', startA === 'estimate', `channel ${startA}`);
 
-  // ── I: supervisor / manager sign-off for external customers
-  const I = 'I manager sign-off';
+  // ── I: no Supervisor / Manager sign-off any more (client review, 2 Nov 2026:
+  //    "once the parts estimation is submitted there is no need for any approval")
+  const I = 'I no sign-off';
   const estI = (await as(dispatcherToken, () => api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: [LINES[0]] }))).json.estimateId;
   created.service_estimates.push(estI);
   const sendI = await as(dispatcherToken, () => api('POST', `/estimates/${estI}/send`, { email: 'leaktest-customer@example.invalid' }));
-  expect(I, 'advisor cannot send an external estimate unapproved', sendI.status === 409 && sendI.json?.code === 'MANAGER_APPROVAL_REQUIRED', `HTTP ${sendI.status}`);
-  const listI = await api('GET', '/estimates?view=needs_approval');
-  expect(I, 'it appears in the "needs approval" queue', listI.json?.estimates?.some(e => e.id === estI) && listI.json.counts.needs_approval >= 1, `count ${listI.json?.counts?.needs_approval}`);
-  const notifI = (await q(`SELECT COUNT(*) c FROM user_notifications WHERE title LIKE ? AND user_id IN (?)`, [`%needs your approval%`, created.users]))[0].c;
-  expect(I, 'approvers are notified', notifI >= 2, `${notifI} test approvers notified`);
-  const selfI = await as(dispatcherToken, () => api('POST', `/estimates/${estI}/internal-approve`));
-  expect(I, 'an advisor cannot approve it', selfI.status === 403, `HTTP ${selfI.status}`);
-  const mgrI = await as(managerToken, () => api('POST', `/estimates/${estI}/internal-approve`));
-  const send2 = await as(dispatcherToken, () => api('POST', `/estimates/${estI}/send`, { email: 'leaktest-customer@example.invalid' }));
   // No SMTP locally → 502 EMAIL_FAILED (the link is live); either way it was let through.
   const wentOut = r => r.status === 200 || (r.status === 502 && r.json?.code === 'EMAIL_FAILED' && !!r.json?.approval_url);
-  expect(I, 'after manager approval the advisor can send it', mgrI.status === 200 && wentOut(send2), `approve ${mgrI.status}, send ${send2.status}`);
+  expect(I, 'the advisor sends an external estimate without a sign-off', wentOut(sendI), `HTTP ${sendI.status} ${sendI.json?.code || ''}`);
+  const listI = await api('GET', '/estimates?view=needs_approval');
+  expect(I, 'no "needs approval" queue', listI.json?.approval_required === false && (listI.json?.counts?.needs_approval || 0) === 0,
+    `required ${listI.json?.approval_required} count ${listI.json?.counts?.needs_approval}`);
   await q(`UPDATE customers SET customer_class = 'internal' WHERE id = ?`, [CUST]);
   const estJ = (await as(dispatcherToken, () => api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: [LINES[0]] }))).json.estimateId;
   created.service_estimates.push(estJ);

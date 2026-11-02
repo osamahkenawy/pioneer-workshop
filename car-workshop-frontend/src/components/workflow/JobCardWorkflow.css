@@ -267,3 +267,17 @@ textarea.wf-input { height: auto; padding: 8px 10px; resize: vertical; }
 /* the next action is the viewer's */
 .wf-next.is-mine { border-color: var(--wf-accent); box-shadow: 0 0 0 3px rgba(234, 88, 12, .12); }
 .wf-next-mine { flex-shrink: 0; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: #fff; background: var(--wf-accent); border-radius: 20px; padding: 5px 11px; }
+
+/* Step 4: job types (multi-select) */
+.wf-jobtypes { margin: 4px 0 12px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+.wf-jobtypes-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #1e3a6b; }
+.wf-jobtypes-head span { font-size: 12px; color: #64748b; }
+.wf-jobtypes-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.wf-jt-chip { height: 32px; padding: 0 12px; border-radius: 999px; border: 1.5px solid #e2e8f0; background: #fff; color: #334155; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+.wf-jt-chip.on { border-color: #ea580c; background: #fff7ed; color: #c2410c; }
+
+/* Step 4: the technical inspection (Supervisor / Foreman), above the job types */
+.wf-ti { margin: 4px 0 12px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+.wf-ti-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: #1e3a6b; }
+.wf-ti .wf-note { margin: 6px 0 0; }
+.wf-ti .wf-row { margin-top: 10px; }

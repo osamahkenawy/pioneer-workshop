@@ -16,6 +16,9 @@ import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import { downloadCsv, toCsv, csvCell } from '../utils/csv';
 import { woLabel, woTone } from '../lib/statusLabels';
+import { VEHICLE_TYPES } from '../lib/intakeOptions';
+
+const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
 
 /* ── WhatsApp SVG Icon ── */
 const WhatsAppIcon = ({ width = 16, height = 16, color = 'currentColor' }) => (
@@ -68,7 +71,7 @@ const emptyForm = {
   // applies when nothing is sent; the form makes it visible and changeable.
   customer_class:'external', customer_subcategory:'walkin',
 };
-const EMPTY_VEHICLE = { make:'', model:'', year:'', plate_number:'', vin:'', color:'', mileage:'', fuel_type:'petrol', transmission:'automatic' };
+const EMPTY_VEHICLE = { make:'', model:'', year:'', plate_number:'', plate_emirate:'', vehicle_type:'', vin:'', color:'', mileage:'', fuel_type:'petrol', transmission:'automatic' };
 // The values the vehicles table accepts (an 'lpg' option could never be saved).
 const FUEL_TYPES = ['petrol', 'diesel', 'hybrid', 'electric', 'other'];
 const FUEL_LABELS = { petrol: 'Petrol', diesel: 'Diesel', hybrid: 'Hybrid', electric: 'Electric', other: 'Other' };
@@ -547,6 +550,18 @@ export default function Customers() {
       // '' means "not set": sent as null, which the server stores as no subcategory.
       customer_subcategory: form.customer_subcategory || null,
     };
+    // The optional vehicle: once started, the details the client requires
+    // (2 Nov 2026) — VIN, plate number, emirate and model year — must be there.
+    const v = vehicleForm;
+    if (!selected && [v.make, v.model, v.plate_number, v.vin, v.year].some(x => String(x || '').trim())) {
+      const missing = [['make', 'Make'], ['model', 'Model'], ['plate_number', 'Plate number'], ['plate_emirate', 'Emirate'], ['year', 'Year'], ['vin', 'VIN']]
+        .filter(([k]) => !String(v[k] || '').trim()).map(([, label]) => label);
+      if (missing.length) {
+        setSaving(false); setStep(STEPS.length);
+        setFormError(t('customers.validation.vehicle_missing', 'Vehicle: {{fields}} required — or clear the vehicle to skip it.', { fields: missing.join(', ') }));
+        return;
+      }
+    }
     if (payload.customer_class === 'internal' && !payload.customer_subcategory) {
       setSaving(false); setStep(2);
       setFormError(t('customers.validation.internal_sub_required', 'Choose Fleet, Insurance or Asset for an internal customer.'));
@@ -565,7 +580,7 @@ export default function Customers() {
     if (res.success) {
       // Optional vehicle, new customers only — never blocks the customer
       // creation itself if it fails, since it's a "nice to have" add-on.
-      if (!selected && vehicleForm.make.trim() && vehicleForm.model.trim()) {
+      if (!selected && vehicleForm.make.trim() && vehicleForm.model.trim()) {  // complete (checked above)
         try {
           const vRes = await api.post('/vehicles', {
             customer_id: res.data.id, ...vehicleForm,
@@ -1618,18 +1633,18 @@ export default function Customers() {
                       </span>
                     </div>
                     <div style={{ gridColumn:'1/-1', padding:'10px 14px', background:'#f8fafc', borderRadius:10, border:'1px solid #e2e8f0', fontSize:13, color:'#64748b' }}>
-                      Leave this blank to skip — you can always add a vehicle for this customer later from the Vehicles page.
+                      Leave this blank to skip — you can always add a vehicle for this customer later from the Vehicles page. If you add it now, the fields marked * are required.
                     </div>
 
                     <div>
-                      <label style={LABEL}>Make</label>
+                      <label style={LABEL}>Make *</label>
                       <select value={vehicleForm.make} onChange={e => setVehicleForm(v => ({ ...v, make: e.target.value, model: '' }))} style={INPUT}>
                         <option value="">Select make…</option>
                         {CAR_MAKES.map(m => <option key={m} value={m}>{m}</option>)}
                       </select>
                     </div>
                     <div>
-                      <label style={LABEL}>Model</label>
+                      <label style={LABEL}>Model *</label>
                       {vehicleForm.make && CAR_CATALOG[vehicleForm.make]?.length > 0 ? (
                         <select value={vehicleForm.model} onChange={e => setVeh('model', e.target.value)} style={INPUT}>
                           <option value="">Select model…</option>
@@ -1642,12 +1657,27 @@ export default function Customers() {
                     </div>
 
                     <div>
-                      <label style={LABEL}>Year</label>
-                      <input value={vehicleForm.year} onChange={e => setVeh('year', e.target.value)} style={INPUT} placeholder="2021" />
+                      <label style={LABEL}>Year *</label>
+                      <input value={vehicleForm.year} onChange={e => setVeh('year', e.target.value)} style={INPUT} placeholder="2021" inputMode="numeric" maxLength={4} />
                     </div>
                     <div>
-                      <label style={LABEL}>Plate number</label>
+                      <label style={LABEL}>Plate number *</label>
                       <input value={vehicleForm.plate_number} onChange={e => setVeh('plate_number', e.target.value)} style={INPUT} placeholder="A 12345" />
+                    </div>
+
+                    <div>
+                      <label style={LABEL}>Emirate *</label>
+                      <select value={vehicleForm.plate_emirate} onChange={e => setVeh('plate_emirate', e.target.value)} style={INPUT}>
+                        <option value="">Select emirate…</option>
+                        {EMIRATES.map(em => <option key={em} value={em}>{em}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={LABEL}>Vehicle type</label>
+                      <select value={vehicleForm.vehicle_type} onChange={e => setVeh('vehicle_type', e.target.value)} style={INPUT}>
+                        <option value="">Select type…</option>
+                        {VEHICLE_TYPES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
                     </div>
 
                     <div>
@@ -1655,8 +1685,8 @@ export default function Customers() {
                       <input value={vehicleForm.color} onChange={e => setVeh('color', e.target.value)} style={INPUT} placeholder="White" />
                     </div>
                     <div>
-                      <label style={LABEL}>VIN</label>
-                      <input value={vehicleForm.vin} onChange={e => setVeh('vin', e.target.value)} style={INPUT} placeholder="Optional" />
+                      <label style={LABEL}>VIN *</label>
+                      <input value={vehicleForm.vin} onChange={e => setVeh('vin', e.target.value.toUpperCase())} style={INPUT} placeholder="17 characters" maxLength={25} dir="ltr" />
                     </div>
 
                     <div>

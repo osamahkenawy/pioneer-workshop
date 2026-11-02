@@ -745,14 +745,16 @@ router.post('/:id/check-in', canBook, async (req, res) => {
                (workshop_id, work_order_number, customer_id, vehicle_id, service_bay_id,
                 customer_name, customer_phone, customer_email, description, service_category,
                 service_tier, payer_type, enquiry_id, scheduled_at, odometer_in, intake_channel,
-                status, service_status_token, notes)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)`,
+                status, service_status_token, notes, parts_preference)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?, ?)`,
             [req.workshopId, number, customerId, vehicleId || null, appt.service_bay_id || null,
              name, phone, cust.email || enq?.contact_email || null, description.slice(0, 5000), category,
              enq?.service_tier || null, payer, enq?.id || null,
              `${appt.appointment_date} ${normTime(appt.appointment_time)}`, odometer, channel, serviceStatusToken(),
              `Booked visit #${appt.id} (${appt.appointment_date} ${hhmm})` +
-               (plateConflict ? ` | Plate ${plateConflict.plate} is on file for ${plateConflict.owner_name || 'another customer'} — not attached; confirm the owner.` : '')]
+               (plateConflict ? ` | Plate ${plateConflict.plate} is on file for ${plateConflict.owner_name || 'another customer'} — not attached; confirm the owner.` : ''),
+             // The parts the customer accepts, as asked at the enquiry (2 Nov 2026).
+             enq?.parts_preference || null]
           );
           workOrderId = ins.insertId;
           workOrderNumber = number;

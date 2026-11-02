@@ -12,7 +12,7 @@ import crypto from 'crypto';
 import pool, { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { recalcWorkOrder } from '../lib/job-card-billing.js';
-import { recordCustomerApproval, canApproveEstimates, isExternalEstimate, estimateApprovers } from '../lib/job-card-approval.js';
+import { recordCustomerApproval, canApproveEstimates, isExternalEstimate, estimateApprovers, ESTIMATE_APPROVAL_REQUIRED } from '../lib/job-card-approval.js';
 import { serviceStatusToken } from '../lib/tokens.js';
 import { logAudit } from '../lib/audit.js';
 import { customerAppBase } from '../lib/customer-link.js';
@@ -85,6 +85,8 @@ const DEFAULT_PREFERENCE = ['genuine', 'after_market'];
 // Every per-category column of an estimate line, plus the alternative.
 const CATEGORY_FIELDS = PART_CATEGORIES.flatMap(c => Object.values(categoryColumns(c)));
 const ALTERNATIVE_FIELDS = ['alternative_option', 'alternative_for', 'alternative_approved'];
+/** A part number as sent: trimmed, at most 100 characters; blank = none. */
+const partNoOrNull = v => (v === undefined || v === null || String(v).trim() === '' ? null : String(v).trim().slice(0, 100));
 
 /** A parts preference from a request body (array or 'genuine,used'): the
  *  ordered list, null when not sent, [] when empty or not a category. */
@@ -163,6 +165,7 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
           pricing[col.price] = available === 0 ? null : price;
           pricing[col.available] = available;
           pricing[col.expected] = available === 0 ? null : (l[col.expected] !== undefined ? dateOrNull(l[col.expected]) : pricing[col.expected]);
+          pricing[col.partNumber] = available === 0 ? null : (l[col.partNumber] !== undefined ? partNoOrNull(l[col.partNumber]) : pricing[col.partNumber]);
         }
         pricing.priced_by = user?.id || null; pricing.priced_at = new Date();
       }
@@ -180,9 +183,10 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
           genuine_price, genuine_available, genuine_expected_date,
           aftermarket_price, aftermarket_available, aftermarket_expected_date,
           used_price, used_available, used_expected_date,
+          genuine_part_number, aftermarket_part_number, used_part_number,
           part_option, alternative_option, alternative_for, alternative_approved, priced_by, priced_at, discount_pct,
           payer_direction, insurance_ref, warranty_ref, urgency, customer_status, sort_order)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [estimateId, workshopId, type, l.operation_id || null,
        l.description, (l.job_name ? String(l.job_name).trim().slice(0, 200) : null) || null,
        l.part_number || null, parseFloat(l.quantity || 1),
@@ -190,6 +194,7 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
        pricing.genuine_price, pricing.genuine_available, pricing.genuine_expected_date,
        pricing.aftermarket_price, pricing.aftermarket_available, pricing.aftermarket_expected_date,
        pricing.used_price, pricing.used_available, pricing.used_expected_date,
+       pricing.genuine_part_number, pricing.aftermarket_part_number, pricing.used_part_number,
        partOption, pricing.alternative_option, pricing.alternative_for, pricing.alternative_approved,
        pricing.priced_by, pricing.priced_at,
        parseFloat(l.discount_pct || 0), l.payer_direction || 'customer',
@@ -393,8 +398,9 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
       // says what it stands in for.
       const eff = l.line_type === 'parts' ? effectivePartOption(l, pref) : null;
       const unitPrice = Math.round(Number(eff ? eff.price : l.unit_price || 0) * (1 - Number(l.discount_pct || 0) / 100) * 100) / 100;
+      const partNo = eff ? (eff.part_number || l.part_number || null) : null;
       const name = (l.description || l.line_type) + (eff
-        ? ` (${PART_CATEGORY_LABEL[eff.option]}${eff.alternative ? ` — alternative to ${PART_CATEGORY_LABEL[eff.for] || 'the requested type'}` : ''})` : '');
+        ? ` (${PART_CATEGORY_LABEL[eff.option]}${partNo ? ` · P/N ${partNo}` : ''}${eff.alternative ? ` — alternative to ${PART_CATEGORY_LABEL[eff.for] || 'the requested type'}` : ''})` : '');
       await conn.query(
         `INSERT INTO work_order_items (work_order_id, name, item_type, estimate_line_id, quantity, unit_price)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -762,7 +768,7 @@ router.get('/', async (req, res) => {
 
     // needs_internal_approval: an external customer's estimate that has not
     // been signed off and has not gone out yet (process step 5).
-    const NEEDS_APPROVAL = `(e.internal_approved_at IS NULL AND e.status = 'draft'
+    const NEEDS_APPROVAL = !ESTIMATE_APPROVAL_REQUIRED ? '(1 = 0)' : `(e.internal_approved_at IS NULL AND e.status = 'draft'
       AND COALESCE(e.customer_type, '') <> 'internal_fleet' AND COALESCE(c.customer_class, 'external') <> 'internal')`;
     // The staff screen's tabs. 'parts_to_price' (the Store), 'needs_approval'
     // and 'to_convert' are the queues somebody has to act on.
@@ -813,7 +819,7 @@ router.get('/', async (req, res) => {
     for (const k of Object.keys(VIEWS)) counts[k] = Number(countRow?.[k]) || 0;
 
     res.json({ success: true, estimates: rows.map(r => ({ ...r, customer_type_label: CUSTOMER_TYPE_LABEL[r.customer_type] || r.customer_type, preference: partsPreference(r) })),
-      total, counts, page: parseInt(page) || 1, limit: lim });
+      total, counts, approval_required: ESTIMATE_APPROVAL_REQUIRED, page: parseInt(page) || 1, limit: lim });
   } catch (err) {
     console.error('GET /estimates error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch estimates' });
@@ -858,7 +864,7 @@ router.get('/:id', async (req, res) => {
         ...rows[0],
         customer_type_label: CUSTOMER_TYPE_LABEL[rows[0].customer_type] || rows[0].customer_type,
         is_external: external,
-        needs_internal_approval: external && !rows[0].internal_approved_at && rows[0].status === 'draft',
+        needs_internal_approval: ESTIMATE_APPROVAL_REQUIRED && external && !rows[0].internal_approved_at && rows[0].status === 'draft',
         preference: pref,
       },
       lines: withPartOptions(lines, pref),
@@ -893,13 +899,15 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     if (customer_type && !CUSTOMER_TYPES.includes(customer_type)) {
       return res.status(400).json({ success: false, message: `Account type must be one of: ${CUSTOMER_TYPES.join(', ')}` });
     }
-    const pref = preferenceFromBody(req.body.parts_preference) ?? DEFAULT_PREFERENCE;
-    if (!pref.length) return res.status(400).json({ success: false, code: 'PARTS_PREFERENCE_REQUIRED', message: PREFERENCE_REQUIRED });
+    // The customer's parts preference: as sent, else as they asked at the
+    // enquiry / work order (client review, 2 Nov 2026), else the default.
+    let pref = preferenceFromBody(req.body.parts_preference);
+    if (pref && !pref.length) return res.status(400).json({ success: false, code: 'PARTS_PREFERENCE_REQUIRED', message: PREFERENCE_REQUIRED });
 
     // Quote stage of the CRM cycle: an estimate raised from an enquiry.
     let enquiry = null;
     if (enquiry_id) {
-      [enquiry] = await query('SELECT id, customer_id, vehicle_id, converted_work_order_id FROM enquiries WHERE id = ? AND workshop_id = ?',
+      [enquiry] = await query('SELECT id, customer_id, vehicle_id, converted_work_order_id, parts_preference FROM enquiries WHERE id = ? AND workshop_id = ?',
         [enquiry_id, req.workshopId]);
       if (!enquiry) return res.status(404).json({ success: false, message: 'Enquiry not found' });
       customer_id = customer_id || enquiry.customer_id;
@@ -943,6 +951,8 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     if (!customer_id && !req.body.customer_name) {
       return res.status(400).json({ success: false, message: 'customer_id or customer_name required' });
     }
+    if (!pref) pref = preferenceFromBody(intakeWo?.parts_preference || enquiry?.parts_preference) || DEFAULT_PREFERENCE;
+    if (!pref.length) pref = DEFAULT_PREFERENCE;
 
     // Step 1 classification: the job's snapshot when it has one, else the
     // customer's record. "From the job card" (no account type sent) maps it
@@ -1210,7 +1220,7 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
     // The categories the customer asked for.
     for (const c of PART_CATEGORIES) {
       const col = categoryColumns(c);
-      const sent = [col.price, col.available, col.expected].some(f => b[f] !== undefined);
+      const sent = [col.price, col.available, col.expected, col.partNumber].some(f => b[f] !== undefined);
       if (!sent) continue;
       if (!pref.includes(c)) {
         return bad(`The customer did not ask for ${PART_CATEGORY_LABEL[c]} parts — offer it as an alternative when a requested type is not available.`);
@@ -1223,6 +1233,8 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
       row[col.available] = available;
       row[col.price] = available === 0 ? null : (b[col.price] !== undefined ? numOrNull(b[col.price]) : row[col.price]);
       row[col.expected] = available === 0 ? null : (b[col.expected] !== undefined ? dateOrNull(b[col.expected]) : row[col.expected]);
+      // Each type has its own part number (client review, 2 Nov 2026).
+      row[col.partNumber] = available === 0 ? null : (b[col.partNumber] !== undefined ? partNoOrNull(b[col.partNumber]) : row[col.partNumber]);
     }
     if (!pref.some(c => partOptions(row, [c]).requested[0].decided)) {
       return bad(`Enter the ${categoryWords(pref)} price, or mark it not available.`);
@@ -1249,6 +1261,7 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
       }
       const col = categoryColumns(alt.option);
       row[col.price] = numOrNull(alt.price); row[col.available] = 1; row[col.expected] = dateOrNull(alt.expected_date);
+      row[col.partNumber] = partNoOrNull(alt.part_number);
       row.alternative_option = alt.option; row.alternative_for = alt.for || unavailable[0]; row.alternative_approved = null;
     }
     tidyAlternative(row, pref);
@@ -1263,12 +1276,14 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
           SET genuine_price = ?, genuine_available = ?, genuine_expected_date = ?,
               aftermarket_price = ?, aftermarket_available = ?, aftermarket_expected_date = ?,
               used_price = ?, used_available = ?, used_expected_date = ?,
+              genuine_part_number = ?, aftermarket_part_number = ?, used_part_number = ?,
               alternative_option = ?, alternative_for = ?, alternative_approved = ?,
               quantity = ?, unit_price = ?, part_number = COALESCE(?, part_number), priced_by = ?, priced_at = NOW()
         WHERE id = ?`,
       [row.genuine_price, row.genuine_available, row.genuine_expected_date,
        row.aftermarket_price, row.aftermarket_available, row.aftermarket_expected_date,
        row.used_price, row.used_available, row.used_expected_date,
+       row.genuine_part_number ?? null, row.aftermarket_part_number ?? null, row.used_part_number ?? null,
        row.alternative_option, row.alternative_for, row.alternative_approved,
        row.quantity, unitPrice, b.part_number ? String(b.part_number).slice(0, 100) : null, req.user.id, line.id]
     );
@@ -1341,7 +1356,7 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
     // Process step 5: an external customer's estimate is signed off by a
     // supervisor or workshop manager before it goes out. A manager sending
     // it themselves signs it off in the same step.
-    if (!est.internal_approved_at && await isExternalEstimate(est)) {
+    if (ESTIMATE_APPROVAL_REQUIRED && !est.internal_approved_at && await isExternalEstimate(est)) {
       if (!canApproveEstimates(req.user)) {
         await notifyApprovers(est, req.workshopId);
         return res.status(409).json({

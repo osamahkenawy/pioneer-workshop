@@ -85,6 +85,7 @@ import publicInspectionsRouter from './routes/public-inspections.js';
 import publicServiceStatusRouter from './routes/public-service-status.js';
 import jobCardsRouter from './routes/job-cards.js';
 import workflowRouter from './routes/workflow.js';
+import technicalInspectionsRouter from './routes/technical-inspections.js';
 import vehicleBoardRouter from './routes/vehicle-board.js';
 import teamLeaderRouter from './routes/team-leader.js';
 import fleetIntakeRouter, { publicFleetIntakeRouter } from './routes/fleet-intake.js';
@@ -322,6 +323,8 @@ app.use('/api/public/inspections', publicInspectionsRouter);
 app.use('/api/job-cards', jobCardsRouter);
 // Workshop workflow Steps 1–7 (lib/workflow.js)
 app.use('/api/workflow', workflowRouter);
+// Step 4: the technical inspection and its report (Supervisor / Workshop Foreman)
+app.use('/api/technical-inspections', technicalInspectionsRouter);
 // Vehicle Status Board: every open car by phase (Steps 1–7), staff only
 app.use('/api/vehicle-board', vehicleBoardRouter);
 // Team leader board: their technicians, the vehicles on the team, time bookings

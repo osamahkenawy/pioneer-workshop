@@ -13,6 +13,8 @@
 /** Capability → the roles that hold it (managers hold all of them). */
 export const CAPABILITIES = {
   'job.open':           { roles: ['service_advisor', 'supervisor'],                                   step: 2, label: 'Open job cards and record the vehicle and issue' },
+  // The technical report the estimate is raised from (client review, 2 Nov 2026; routes/technical-inspections.js).
+  'tech.inspect':       { roles: ['supervisor', 'workshop_foreman'],                                  step: 4, label: 'Technical inspection and report' },
   'estimate.raise':     { roles: ['service_advisor'],                                                 step: 4, label: 'Raise and send estimates; price labour' },
   'estimate.price_parts': { roles: ['storekeeper', 'part_advisor'],                                   step: 5, label: 'Price parts — Genuine / After-Market / N/A' },
   'estimate.approve':   { roles: ['supervisor'],                                                      step: 5, label: 'Approve estimates for external customers' },

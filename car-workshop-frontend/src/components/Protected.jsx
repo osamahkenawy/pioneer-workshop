@@ -15,11 +15,13 @@
  *   other page sends them to My Jobs; a work order page opens their card on
  *   that work order (/mechanic?wo=:id). The vehicle inspection
  *   (/work-orders/:id/inspection) is the Service Advisor's, and /mechanics and
- *   /mechanic-earnings are staff pages.
+ *   /mechanic-earnings are staff pages. The one exception is the technical
+ *   report (/work-orders/:id/technical-inspection): they do the work it
+ *   lists, so they may read it (the server shows it on their own jobs only).
  * - Without a module prop, the page's module comes from the sidebar
  *   (Layout's ROUTE_MODULES, longest matching path): '/customers' needs
- *   'customers', '/crm/reminders' needs 'crm-reminders'. The Dashboard and the
- *   vehicle inspection need none.
+ *   'customers', '/crm/reminders' needs 'crm-reminders'. The Dashboard, the
+ *   vehicle inspection and the technical report need none.
  * - A role without the module, or a non-manager on a managers' page, sees
  *   "Not available for your role" inside the normal frame, with a link to its
  *   own home page. The server still checks every request; this only decides
@@ -57,21 +59,23 @@ export const isTechnicianPath = p => p === TECHNICIAN_HOME || p.startsWith(`${TE
 
 const INSPECTION_PAGE = /^\/work-orders\/[^/]+\/inspection\/?$/;
 const WORK_ORDER_PAGE = /^\/work-orders\/(\d+)\/?$/;
+/** The technical report (Step 4): technicians may read it too. */
+const TECHNICAL_REPORT_PAGE = /^\/work-orders\/\d+\/technical-inspection\/?$/;
 
 /**
  * Where a technician who opened `pathname` should be: null when the page is
- * theirs to use (the technician app), otherwise My Jobs (with ?wo= for a
- * work order page).
+ * theirs to use (the technician app, the technical report), otherwise My
+ * Jobs (with ?wo= for a work order page).
  */
 export function technicianTarget(pathname) {
-  if (isTechnicianPath(pathname)) return null;
+  if (isTechnicianPath(pathname) || TECHNICAL_REPORT_PAGE.test(pathname)) return null;
   const wo = pathname.match(WORK_ORDER_PAGE);
   return wo ? `${TECHNICIAN_HOME}?wo=${wo[1]}` : TECHNICIAN_HOME;
 }
 
 /** The menu module a staff page needs (ROUTE_MODULES, longest path), or undefined. */
 export function moduleForPath(pathname) {
-  if (INSPECTION_PAGE.test(pathname) || isTechnicianPath(pathname)) return undefined;
+  if (INSPECTION_PAGE.test(pathname) || TECHNICAL_REPORT_PAGE.test(pathname) || isTechnicianPath(pathname)) return undefined;
   let best;
   for (const path of Object.keys(ROUTE_MODULES)) {
     if ((pathname === path || pathname.startsWith(`${path}/`)) && (!best || path.length > best.length)) best = path;

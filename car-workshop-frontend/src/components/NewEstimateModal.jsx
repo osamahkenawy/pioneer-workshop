@@ -23,7 +23,10 @@
  *   onSaved({ estimateId, … })   — after a create or an edit
  *   intakeWorkOrder              — { id, work_order_number, customer_id, customer_name,
  *                                    vehicle_id, plate_number }: the estimate is for an
- *                                    existing job card; customer & vehicle are locked to it
+ *                                    existing job card; customer & vehicle are locked to it.
+ *                                    When its technical report (Step 4) is completed, a new
+ *                                    estimate starts from the report's service lines: one job
+ *                                    each, a labour line to price, its parts for the Store
  *   editEstimate                 — the GET /estimates/:id payload ({ estimate, lines }):
  *                                    edit mode (PUT), line ids sent back so Store prices carry over
  *
@@ -31,7 +34,7 @@
  * preference with its totals + channel picker) shared with pages/Estimates.jsx
  * and pages/Store.jsx.
  */
-import { useState, useEffect, useContext, useMemo } from 'react';
+import { useState, useEffect, useContext, useMemo, useRef } from 'react';
 import {
   Xmark, Wrench, Cube, Plus, Trash, SendMail, FloppyDisk, Label, Mail, Whatsapp, WarningCircle, Copy, Check,
 } from 'iconoir-react';
@@ -230,6 +233,27 @@ function jobsFromLines(lines) {
   return { jobs: jobs.length ? jobs : [blankJob()], extras };
 }
 
+/**
+ * A new estimate from the work order's technical report (Step 4, completed
+ * by the Supervisor / Foreman): each service line a job — one labour line
+ * (the report's labour, else the job; its hours as the quantity) with no
+ * price, the advisor prices it — and its parts, which go to the Store for
+ * pricing as usual.
+ */
+function jobsFromReport(lines) {
+  const jobs = (lines || []).filter(l => String(l?.job || '').trim()).map(l => ({
+    key: uid(), name: String(l.job).trim(),
+    labour: [{ ...blankLine(), description: String(l.labour || l.job).trim(), quantity: Number(l.hours) || 1 }],
+    parts: (l.parts || []).length
+      ? l.parts.map(p => ({ ...blankLine(), description: String(p.description || '').trim(), part_number: p.part_number || '', quantity: Number(p.quantity) || 1 }))
+      : [blankLine()],
+  }));
+  return jobs.length ? jobs : [blankJob()];
+}
+/** Nothing typed yet: the one empty job a new estimate starts with. */
+const untouched = jobs => jobs.length === 1 && !jobs[0].name.trim()
+  && [...jobs[0].labour, ...jobs[0].parts].every(r => !r.description.trim() && !String(r.part_number || '').trim());
+
 /** A form part row as an estimate line (the shape partUnpriced() reads): the saved line, with the form's prices when they can be edited here. */
 function rowAsPart(r, pref, editable) {
   const l = { ...(r.orig || {}), line_type: 'parts', unit_price: r.orig?.unit_price || 0 };
@@ -296,16 +320,26 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const [extras, setExtras] = useState([]);
   // The customer's parts preference: which categories the Store prices and the customer chooses from.
   const [pref, setPref] = useState(DEFAULT_PREFERENCE);
+  // As the customer asked at the enquiry / work order (client review,
+  // 2 Nov 2026): then the estimate offers only those categories.
+  const [askedPref, setAskedPref] = useState(null);
   const [submitting, setSubmitting] = useState(null); // null | 'draft' | 'store' | 'send' | 'save'
   const [error, setError] = useState('');
   const [result, setResult] = useState(null); // { kind, estimateId, estimate_number, … }
   const [sendData, setSendData] = useState(null); // GET /estimates/:id payload for the send step
+  // The jobs came from the work order's technical report: { by, at } for the note.
+  const [fromReport, setFromReport] = useState(null);
+  const jobsRef = useRef(jobs);
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   const editKey = editE ? `${editE.id}:${editE.version}` : '';
   useEffect(() => {
     if (!open) return;
     setCustomer(null); setVehicles([]); setVehicleId(''); setCustomerType('retail_cash'); setTypeTouched(false); setKlass(null); setClaimRef('');
-    setPref(editE ? preferenceOf(editE) : DEFAULT_PREFERENCE);
+    setFromReport(null);
+    const fromEnquiry = !editE ? PART_CATEGORIES.filter(c => String(enquiry?.parts_preference || '').split(',').includes(c)) : [];
+    setAskedPref(fromEnquiry.length ? fromEnquiry : null);
+    setPref(editE ? preferenceOf(editE) : fromEnquiry.length ? fromEnquiry : DEFAULT_PREFERENCE);
     if (editEstimate?.lines) {
       const r = jobsFromLines(editEstimate.lines);
       setJobs(r.jobs); setExtras(r.extras);
@@ -334,10 +368,27 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
         const cls = wo.intake_customer_class || cu.customer_class || null;
         const sub = wo.intake_customer_subcategory || cu.customer_subcategory || null;
         setKlass(cls ? { cls, sub } : { cls: 'external', sub: null });
+        const asked = PART_CATEGORIES.filter(c => String(wo.parts_preference || '').split(',').includes(c));
+        if (asked.length) { setAskedPref(asked); setPref(asked); }
       } catch { if (live) setKlass({ cls: 'external', sub: null }); }
     })();
     return () => { live = false; };
   }, [open, intakeWorkOrder?.id, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Step 4: a new estimate on a work order whose technical report is
+  // completed starts from the report's service lines — unless the advisor
+  // has typed something meanwhile. Everything stays editable.
+  useEffect(() => {
+    if (!open || !intakeWorkOrder?.id || isEdit) return;
+    let live = true;
+    api.get(`/technical-inspections?work_order_id=${encodeURIComponent(intakeWorkOrder.id)}`).then(r => {
+      const report = r?.success ? r.data : null;
+      if (!live || report?.status !== 'completed' || !report.service_lines?.length || !untouched(jobsRef.current)) return;
+      setJobs(jobsFromReport(report.service_lines));
+      setFromReport({ by: report.completed_by_name || '', at: report.completed_at });
+    }).catch(() => { /* the form starts empty, as before */ });
+    return () => { live = false; };
+  }, [open, intakeWorkOrder?.id, isEdit]);
 
   // A customer chosen here (no job card): its account type follows Step 1 too.
   useEffect(() => {
@@ -498,7 +549,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
         body.intake_work_order_id = Number(intakeWorkOrder.id);
         if (intakeWorkOrder.customer_id) body.customer_id = Number(intakeWorkOrder.customer_id);
         if (intakeWorkOrder.vehicle_id) body.vehicle_id = Number(intakeWorkOrder.vehicle_id);
-        // "From the job card": the type that follows from its classification
+        // "From the work order": the type that follows from its classification
         // (Retail, Credit for a fleet, Insurance, Internal). Unknown → the server decides.
         if (typeTouched) body.customer_type = customerType;
         else if (klass) body.customer_type = fromClass;
@@ -588,7 +639,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                   {!isEdit && (
                     <Field label={t('estimates.account_type', 'Account type')}>
                       <select style={st.input} value={typeTouched ? customerType : ''} onChange={e => { setCustomerType(e.target.value); setTypeTouched(!!e.target.value); }}>
-                        <option value="">{t('estimates.account_from_job', 'From the job card')}{klass ? ` (${typeLabel(fromClass)})` : ''}</option>
+                        <option value="">{t('estimates.account_from_wo', 'From the work order')}{klass ? ` (${typeLabel(fromClass)})` : ''}</option>
                         {typeOptions.map(o => <option key={o.value} value={o.value}>{typeLabel(o.value)}</option>)}
                       </select>
                     </Field>
@@ -628,10 +679,16 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
               <div style={st.prefBox}>
                 <div style={st.prefHead}>
                   <span style={st.fieldLabel} id="est-pref-label">{t('estimates.pref_label', 'Customer’s parts preference')}</span>
-                  <span style={st.prefHint}>{t('estimates.pref_hint', 'The Store prices these for every part; the customer chooses between them. Pick at least one.')}</span>
+                  <span style={st.prefHint}>{askedPref
+                    ? t('estimates.pref_hint_asked', 'As the customer asked on the work order — the Store prices only these, and the customer chooses between them.')
+                    : t('estimates.pref_hint', 'The Store prices these for every part; the customer chooses between them. Pick at least one.')}</span>
                 </div>
                 <div style={st.prefChips} role="group" aria-labelledby="est-pref-label">
-                  {PART_CATEGORIES.map(c => {
+                  {askedPref ? askedPref.map(c => (
+                    <span key={c} style={{ ...st.prefChip, ...st.prefChipOn, cursor: 'default' }}>
+                      <Check width={14} height={14} /> {categoryLabel(t, c)}
+                    </span>
+                  )) : PART_CATEGORIES.map(c => {
                     const on = pref.includes(c);
                     return (
                       <button key={c} type="button" aria-pressed={on} style={{ ...st.prefChip, ...(on ? st.prefChipOn : null) }}
@@ -643,6 +700,16 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                   })}
                 </div>
               </div>
+
+              {fromReport && (
+                <div style={st.reportNote} role="status">
+                  <Wrench width={15} height={15} style={{ flexShrink: 0 }} />
+                  <span>{t('estimates.from_report', 'Pre-filled from the technical report (completed by {{name}} on {{date}}).', {
+                    name: fromReport.by || '—',
+                    date: fromReport.at ? new Date(String(fromReport.at).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—',
+                  })}</span>
+                </div>
+              )}
 
               {jobs.map((j, ji) => (
                 <JobBlock
@@ -1133,6 +1200,7 @@ const st = {
   fieldLabel: { fontSize: 12, fontWeight: 700, color: '#475569' },
   input: { border: '1.5px solid #e2e8f0', borderRadius: 10, padding: '9px 11px', fontSize: 13.5, outline: 'none', color: '#1e293b', background: '#fff', fontFamily: 'inherit', minWidth: 0, boxSizing: 'border-box' },
   prefBox: { border: '1.5px solid #fed7aa', background: '#fffaf5', borderRadius: 14, padding: '12px 14px', marginBottom: 14 },
+  reportNote: { display: 'flex', gap: 8, alignItems: 'center', background: '#f0f9ff', border: '1px solid #bae6fd', color: '#075985', padding: '9px 12px', borderRadius: 10, fontSize: 13, marginBottom: 14, lineHeight: 1.45 },
   prefHead: { display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 10 },
   prefHint: { fontSize: 12, color: '#64748b', lineHeight: 1.4 },
   prefChips: { display: 'flex', flexWrap: 'wrap', gap: 8 },

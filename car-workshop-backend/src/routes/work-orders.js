@@ -63,6 +63,9 @@ import { issueSurveyOnClosure } from '../lib/survey-trigger.js';
 import { createTask } from '../lib/crm-cycle.js';
 import { scheduleNextReminder } from './crm-reminders.js';
 import { ASSIGN_WHERE } from '../lib/floor-queues.js';
+import {
+  missingVehicleDetails, vehicleDetailsRequired, ODOMETER_REQUIRED, checkOdometer, parsePartsPreference, parseJobTypes,
+} from '../lib/intake-rules.js';
 
 // SR-01/SR-16 — sanitise at the write boundary. Identity fields can never
 // legitimately contain markup, so it is stripped; free text is stored verbatim
@@ -232,7 +235,7 @@ const phoneOf = (customer, given) => (/\d/.test(String(customer.phone || '')) ? 
 /** A vehicle of this workshop, owned by the customer when one is given. */
 async function loadVehicle(id, workshopId, customerId) {
   const [v] = await query(
-    'SELECT id, customer_id, vin, plate_number, mileage, year, make, model FROM vehicles WHERE id = ? AND workshop_id = ?',
+    'SELECT id, customer_id, vin, plate_number, plate_emirate, mileage, year, make, model FROM vehicles WHERE id = ? AND workshop_id = ?',
     [id, workshopId]
   );
   if (!v) throw new InputError('Vehicle not found.', 'VEHICLE_NOT_FOUND');
@@ -1017,18 +1020,28 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
     if (!complaint) {
       return res.status(400).json({ success: false, code: 'COMPLAINT_REQUIRED', message: 'The vehicle complaint is required.' });
     }
-    // The odometer reading is optional (the process asks for the vehicle
-    // information and the issue, not a mandatory reading); when typed it must
-    // be a sensible whole number.
+    // The odometer reading is required with the car (client review,
+    // 2 Nov 2026) and never below its previous reading — checked below,
+    // once the vehicle is known. A typed reading must be a whole number.
     const odometer = parseOdometer(body.odometer_in);
-    // The VIN lives on the vehicle, not the work order, so it is checked
-    // against the vehicle being booked in — which must be this customer's.
-    // No vehicle at all is still allowed: a job card can legitimately be
-    // raised before the car arrives.
+    // The VIN, plate, emirate and model year live on the vehicle, not the
+    // work order, so they are checked against the vehicle being booked in —
+    // which must be this customer's. No vehicle at all is still allowed: a
+    // work order can legitimately be opened before the car arrives.
     const vehicle = vehicleId ? await loadVehicle(vehicleId, req.workshopId, customerId) : null;
     if (vehicle && !String(vehicle.vin || '').trim()) {
       return res.status(400).json({ success: false, ...VIN_REQUIRED });
     }
+    const missingDetails = missingVehicleDetails(vehicle);
+    if (missingDetails.length) return res.status(400).json({ success: false, ...vehicleDetailsRequired(missingDetails) });
+    if (vehicle && odometer == null) return res.status(400).json({ success: false, ...ODOMETER_REQUIRED });
+    const odoCheck = await checkOdometer({ reading: odometer, vehicleId: vehicle?.id, workshopId: req.workshopId, user: req.user });
+    if (odoCheck?.status) return res.status(odoCheck.status).json(odoCheck.body);
+    // The parts the customer accepts (asked at the enquiry), and the job types.
+    const partsPref = parsePartsPreference(body.parts_preference);
+    if (partsPref.error) throw new InputError(partsPref.error, 'PARTS_PREFERENCE_INVALID');
+    const jobTypes = parseJobTypes(body.job_types);
+    if (jobTypes.error) throw new InputError(jobTypes.error, 'JOB_TYPES_INVALID');
     if (serviceBayId) {
       const [bay] = await query('SELECT id FROM service_bays WHERE id = ? AND workshop_id = ?', [serviceBayId, req.workshopId]);
       if (!bay) throw new InputError('Service bay not found.', 'SERVICE_BAY_NOT_FOUND');
@@ -1123,10 +1136,8 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
         warnings.push({ code: 'OPEN_JOB_CARD', work_order_id: o.id, work_order_number: o.work_order_number, status: o.status,
           message: `${vehicle.plate_number || 'This vehicle'} already has job card ${o.work_order_number} open (${woLabel(o.status)}).` });
       }
-      if (odometer != null && vehicle.mileage != null && odometer < Number(vehicle.mileage)) {
-        warnings.push({ code: 'ODOMETER_BELOW_LAST', last_mileage: Number(vehicle.mileage),
-          message: `The reading (${odometer.toLocaleString('en-US')} km) is below the last one on file (${Number(vehicle.mileage).toLocaleString('en-US')} km); the vehicle keeps the higher figure.` });
-      }
+      // A lower reading gets this far only when a manager confirmed it.
+      if (odoCheck?.warning) warnings.push(odoCheck.warning);
     }
 
     conn = await pool.getConnection();
@@ -1153,8 +1164,8 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
             scheduled_at, payment_method, payer_type, cash_amount, service_fee, discount, total_amount,
             commission_rate, commission_amount, vat_rate, vat_amount, platform_fee, net_payable,
             odometer_in, intake_channel, intake_customer_class, intake_customer_subcategory,
-            status, service_status_token, pregenerated_token_id, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+            status, service_status_token, pregenerated_token_id, notes, parts_preference, job_types)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
           [req.workshopId, work_order_number, customerId, vehicleId, serviceBayId, _work_order_type, _service_category,
            resolvedName, resolvedPhone, resolvedEmail,
            dropoff_address || null, dropoff_lat || null, dropoff_lng || null,
@@ -1162,7 +1173,7 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
            _payment_method, payerType, totals.itemsTotal, serviceFee, totals.discount, totals.total,
            fin.commissionRate, fin.commissionAmount, totals.vatRate, totals.vatAmount, fin.platformFee, fin.netPayable,
            odometer, intakeChannel, intakeClass, intakeSub,
-           serviceToken, pregenerated?.id || null, notes || null]
+           serviceToken, pregenerated?.id || null, notes || null, partsPref.value ?? null, jobTypes.value ?? null]
         );
         workOrderId = result.insertId;
         break;
@@ -1815,6 +1826,8 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     // thousands of imported jobs have their car on file under another account.
     const vehicle = vehicleId && (customerChanged || vehicleChanged) ? await loadVehicle(vehicleId, req.workshopId, customerId) : null;
     if (vehicle && !String(vehicle.vin || '').trim()) return res.status(400).json({ success: false, ...VIN_REQUIRED });
+    const missingDetails = missingVehicleDetails(vehicle);
+    if (missingDetails.length) throw new InputError(vehicleDetailsRequired(missingDetails).message, 'VEHICLE_DETAILS_REQUIRED');
 
     // ── Step 2: the complaint and the odometer stay on record ──
     let complaint = current.description;
@@ -1826,6 +1839,21 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     let odometer = current.odometer_in;
     if (has('odometer_in')) odometer = parseOdometer(raw.odometer_in);
     else if (vehicleChanged) odometer = null; // the old car's reading does not belong to the new one
+    // Required with the car (client review, 2 Nov 2026): it can't be cleared,
+    // a change of car needs that car's reading, and it never goes below the
+    // car's previous visits (a manager may confirm a lower one).
+    if (vehicleId && odometer == null && (vehicleChanged || has('odometer_in'))) throw new InputError(ODOMETER_REQUIRED.message, ODOMETER_REQUIRED.code);
+    const warnings = [];
+    if (vehicleId && odometer != null && (vehicleChanged || Number(odometer) !== Number(current.odometer_in))) {
+      const chk = await checkOdometer({ reading: odometer, vehicleId, workshopId: req.workshopId, workOrderId: vehicleChanged ? null : current.id, user: req.user });
+      if (chk?.status) throw new InputError(chk.body.message, chk.body.code);
+      if (chk?.warning) warnings.push(chk.warning);
+    }
+    // The parts the customer accepts, and the job types (Step 4).
+    const partsPref = parsePartsPreference(raw.parts_preference);
+    if (partsPref.error) throw new InputError(partsPref.error, 'PARTS_PREFERENCE_INVALID');
+    const jobTypes = parseJobTypes(raw.job_types);
+    if (jobTypes.error) throw new InputError(jobTypes.error, 'JOB_TYPES_INVALID');
 
     // ── The rest: what was sent, else what is stored ──
     const pick = (k, valid) => (has(k) && valid.includes(raw[k]) ? raw[k] : current[k]);
@@ -1890,7 +1918,7 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
         description=?, special_instructions=?, payment_method=?, odometer_in=?, intake_channel=?,
         cash_amount=?, service_fee=?, discount=?, total_amount=?,
         commission_rate=?, commission_amount=?, vat_rate=?, vat_amount=?, platform_fee=?, net_payable=?,
-        scheduled_at=?, notes=?
+        scheduled_at=?, notes=?, parts_preference=?, job_types=?
        WHERE id = ? AND workshop_id = ?`,
       [customerId, vehicleId, bayId, pick('work_order_type', VALID_WORK_ORDER_TYPES), serviceCategory,
        name, phone, email,
@@ -1899,7 +1927,10 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
        complaint, keep('special_instructions'), pick('payment_method', VALID_PAY_METHODS), odometer, intakeChannel,
        cash, fee, disc, fin.totalAmount,
        fin.commissionRate, fin.commissionAmount, fin.vatRate, fin.vatAmount, fin.platformFee, fin.netPayable,
-       keep('scheduled_at', raw.scheduled_at), keep('notes'), current.id, req.workshopId]
+       keep('scheduled_at', raw.scheduled_at), keep('notes'),
+       partsPref.value === undefined ? current.parts_preference : partsPref.value,
+       jobTypes.value === undefined ? (current.job_types == null || typeof current.job_types === 'string' ? current.job_types : JSON.stringify(current.job_types)) : jobTypes.value,
+       current.id, req.workshopId]
     );
     if (diff?.changed) await writeLines(conn, current.id, diff);
 
@@ -1969,7 +2000,7 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     }
     const billing = await syncJobCardBilling(current.id, req.workshopId);
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [current.id]);
-    return res.json({ success: true, data: workOrder, billing, ...(diff ? { lines_changed: diff.changed } : {}) });
+    return res.json({ success: true, data: workOrder, billing, ...(diff ? { lines_changed: diff.changed } : {}), ...(warnings.length ? { warnings } : {}) });
   } catch (err) {
     if (conn) await conn.rollback().catch(() => {});
     if (err instanceof InputError) return sendError(res, err);

@@ -7,7 +7,8 @@
  *
  * It is the customer's copy of what was recorded at the car — the damage
  * marked on the diagram (drawn read-only with the staff form's
- * CarDamageDiagram) and the vehicle photos, or the uploaded paper form — and,
+ * CarDamageDiagram; each marker is listed under it by its damage name, so no
+ * legend is needed) and the vehicle photos, or the uploaded paper form — and,
  * when they did not sign at the car, where they sign. Signing is once only;
  * the server refuses a second, and a cancelled job's link closes (410).
  *
@@ -108,7 +109,8 @@ export default function InspectionLink() {
             ? t('inspectionLink.title_handover', 'Vehicle inspection — handover')
             : t('inspectionLink.title_checkin', 'Vehicle inspection — check-in')}</h1>
           <div className="il-meta">
-            <span>{t('inspectionLink.job_card_n', 'Job card {{n}}', { n: insp.work_order_number })}</span>
+            {/* WO-… is the work order; "job card" is the workshop's JC-…, not shown to the customer. */}
+            <span>{t('inspectionLink.work_order_n', 'Work order {{n}}', { n: insp.work_order_number })}</span>
             {insp.completed_at && <span>{fmtDate(insp.completed_at)}</span>}
           </div>
         </div>

@@ -3,9 +3,16 @@
  * customer standing at the car: the physical inspection at drop-off (Step 3,
  * type 'intake') and the joint walk-around at handover (Step 7).
  *
- * Pick a damage code from the legend, click the spot on the car diagram, and a
- * marker lands there; add photos of the vehicle (camera or files). Completing
- * the form stamps the matching Customer Journey checkpoint on the work order.
+ * Pick the damage type in the drop-down above the car diagram, click the spot
+ * on the car, and a marker lands there (the list under the diagram names each
+ * one — there is no separate legend); add photos of the vehicle (camera or
+ * files). Completing the form stamps the matching Customer Journey checkpoint
+ * on the work order.
+ *
+ * The odometer is required on the physical inspection and never below the
+ * car's previous reading (client review, 2026-11-02): the server refuses a
+ * missing or lower one (a manager may confirm a lower one, and is warned),
+ * and its word shows under the field. Optional at handover.
  *
  * The inspection can also be done on the paper form and uploaded instead
  * (a PDF or photos of the pages) — "Upload the paper form" below.
@@ -36,9 +43,11 @@ import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import { woLabel, woTone } from '../lib/statusLabels';
-import CarDamageDiagram, { DAMAGE_CODES, damageLabel, viewLabel } from '../components/CarDamageDiagram';
+import CarDamageDiagram, { DAMAGE_CODES, DAMAGE_COLORS, damageLabel, viewLabel } from '../components/CarDamageDiagram';
 
 const CODE_LIST = Object.keys(DAMAGE_CODES);
+// The server's refusals about the odometer: shown under the field, not in the banner.
+const ODOMETER_CODES = ['ODOMETER_REQUIRED', 'ODOMETER_BELOW_LAST', 'INVALID_ODOMETER'];
 
 const LBL = { display: 'block', fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.3 };
 const INPUT = { width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, background: '#fff', boxSizing: 'border-box' };
@@ -49,9 +58,13 @@ const BTN = { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9p
 // page; what has to change with the width lives here.
 const PAGE_CSS = `
   .vi-page { padding: 20px; max-width: 1300px; margin: 0 auto; box-sizing: border-box; }
-  .vi-diagram-row { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 16px; align-items: start; }
-  .vi-legend-list { display: flex; flex-direction: column; gap: 3px; }
+  /* The damage type to place, above the car diagram; it stays in reach (sticky,
+     under the top bar) while the views scroll past on a phone. */
+  .vi-type-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 12px; padding: 4px 0 10px; background: #fff; border-block-end: 1px solid #eef2f7; }
+  .vi-type-select { flex: 0 1 280px; min-width: 200px; }
+  .vi-type-hint { flex: 1 1 220px; min-width: 0; margin: 0; font-size: 12px; }
   .vi-mark-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .vi-mark-code { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .vi-mark-name { min-width: 130px; }
   .vi-mark-view { min-width: 100px; }
   .vi-mark-note { flex: 1 1 180px; min-width: 0; }
@@ -60,20 +73,19 @@ const PAGE_CSS = `
   .vi-photo { position: relative; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; background: #f8fafc; break-inside: avoid; }
   .vi-photo img, .vi-photo-wait { display: block; inline-size: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
   .vi-photo-del { position: absolute; inset-block-start: 6px; inset-inline-end: 6px; }
-  @media screen and (max-width: 900px) {
-    .vi-diagram-row { grid-template-columns: minmax(0, 1fr); }
-    .vi-legend-card { order: -1; }
-    .vi-legend-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  @media screen {
+    .vi-type-bar { position: sticky; top: var(--topbar-height, 70px); z-index: 6; }
   }
   @media screen and (max-width: 600px) {
     .vi-page { padding: 16px; }
     .vi-mark-name, .vi-mark-view { min-width: 0; }
     .vi-mode-btn { min-width: 0 !important; flex: 1 1 100%; }
+    .vi-type-select { flex: 1 1 160px; min-width: 0; }
   }
   /* Fingers need 44px targets; the markers on the car keep their own size. */
   @media screen and (max-width: 900px), (pointer: coarse) {
     .vi-page button:not(.cdd-mark) { min-height: 44px; }
-    .vi-page input:not([type="checkbox"]) { min-height: 44px; }
+    .vi-page input:not([type="checkbox"]), .vi-page select { min-height: 44px; }
     .vi-check { min-height: 44px; }
   }
   @media print {
@@ -160,9 +172,24 @@ export default function VehicleInspection() {
   const [resign, setResign] = useState(false);      // redo a saved signature (before completion)
   const [savingSig, setSavingSig] = useState(false);
   const fileRef = useRef(null);
+  const [odoMsg, setOdoMsg] = useState(null);       // the server's word on the odometer: { text, warn }
+  const odoRef = useRef(null);
 
   // The cards at the bottom are a long scroll from the banner, so their errors show beside them.
   const setError = useCallback((msg, at = '') => { setErrorMsg(msg); setErrorAt(at); }, []);
+
+  // A refusal about the odometer (missing, below the car's last reading, not a
+  // whole number) shows under the field, brought into view. True if it was one.
+  const odometerRefused = (res) => {
+    if (!ODOMETER_CODES.includes(res?.code)) return false;
+    setError('');
+    setOdoMsg({ text: res.message, warn: false });
+    const el = odoRef.current;
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); }
+    return true;
+  };
+  // A lower reading a manager confirmed is saved, with the server's warning.
+  const odometerWarned = (res) => { if (res?.warning?.message) setOdoMsg({ text: res.warning.message, warn: true }); };
 
   const markSeq = useRef(1);
 
@@ -262,6 +289,8 @@ export default function VehicleInspection() {
     || (inspectionType === 'joint' && canDo(user, 'delivery.handover'))
     || (inspectionType === 'qc' && canDo(user, 'qc.perform'));
   const locked = isCompleted || !mayRecord;
+  // The odometer is required on the physical inspection; at handover it is optional.
+  const odoRequired = inspectionType === 'intake';
   const mode = inspection?.entry_mode === 'document' ? 'document' : 'form';
   const docs = Array.isArray(inspection?.documents) ? inspection.documents : [];
   const photos = Array.isArray(inspection?.photos) ? inspection.photos : [];
@@ -317,8 +346,12 @@ export default function VehicleInspection() {
         odometer: form.odometer === '' ? null : form.odometer,
         marks,
       });
-      if (!res.success) { setError(res.message || t('inspection.err_save', 'Save failed'), at); return false; }
+      if (!res.success) {
+        if (!odometerRefused(res)) setError(res.message || t('inspection.err_save', 'Save failed'), at);
+        return false;
+      }
       setInspection(res.data);
+      odometerWarned(res);
       setSavedAt(new Date());
       return true;
     } catch (e) {
@@ -343,8 +376,13 @@ export default function VehicleInspection() {
     setSaving(true);
     try {
       const res = await api.patch(`/vehicle-inspections/${inspection.id}/complete`, mode === 'form' ? { customer_present: present } : undefined);
-      if (res.success) { setInspection(res.data); setResign(false); noteJobCard(res.job_card); loadNext(); }
-      else setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
+      if (res.success) {
+        setInspection(res.data);
+        // A blank odometer was filled from the work order's reading.
+        set('odometer', res.data?.odometer ?? '');
+        odometerWarned(res);
+        setResign(false); noteJobCard(res.job_card); loadNext();
+      } else if (!odometerRefused(res)) setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } catch (e) {
       setError(e.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } finally { setSaving(false); }
@@ -751,69 +789,60 @@ export default function VehicleInspection() {
           {field('vehicle_model', t('inspection.field.model', 'Model'))}
           {field('vin', t('inspection.field.vin', 'VIN'), { dir: 'ltr' })}
           {field('plate_number', t('inspection.field.plate', 'Plate'))}
-          {field('odometer', t('inspection.field.odometer', 'Odometer (km)'), { type: 'number' })}
+          {/* Required on the physical inspection (the server checks it on save and completion). */}
+          <div>
+            <label style={LBL} htmlFor="vi-f-odometer">
+              {t('inspection.field.odometer', 'Odometer (km)')}
+              {odoRequired && !locked && <span aria-hidden="true" style={{ color: '#dc2626' }}> *</span>}
+            </label>
+            <input id="vi-f-odometer" ref={odoRef} type="number" min={0} step={1} inputMode="numeric"
+              required={odoRequired} aria-required={odoRequired || undefined}
+              aria-invalid={odoMsg && !odoMsg.warn ? true : undefined}
+              aria-describedby={odoMsg ? 'vi-f-odometer-msg' : undefined}
+              style={{ ...INPUT, ...(odoMsg && !odoMsg.warn ? { borderColor: '#dc2626', background: '#fef2f2' } : {}) }}
+              disabled={locked} value={form.odometer ?? ''}
+              onChange={e => { set('odometer', e.target.value); setOdoMsg(null); }} />
+          </div>
+          {/* Right under the field, across the row: the server's message is a sentence or two. */}
+          {odoMsg && (
+            <p id="vi-f-odometer-msg" role={odoMsg.warn ? 'status' : 'alert'}
+              style={{ gridColumn: '1 / -1', margin: '-6px 0 0', fontSize: 12.5, fontWeight: 600, lineHeight: 1.45, color: odoMsg.warn ? '#b45309' : '#b91c1c' }}>
+              {odoMsg.text}
+            </p>
+          )}
         </div>
         <p style={{ margin: '14px 0 0', fontSize: 12.5, color: '#1e3a6b', fontWeight: 600 }}>
           {mode === 'document'
-            ? t('inspection.document_intro', 'The inspection was done on the paper form — upload it above. The details here come from the job card.')
+            ? t('inspection.document_intro_wo', 'The inspection was done on the paper form — upload it above. The details here come from the work order.')
             : t('inspection.form_intro', 'Inspect the vehicle with the customer. Point out and mark on the diagram any current damage or issues.')}
         </p>
       </div>
 
-      {/* ── Diagram + legend (filled in on screen) ── */}
+      {/* ── Diagram (filled in on screen): pick the damage type, then click the car ── */}
       {mode === 'form' && (<>
-      <div className="vi-diagram-row" style={{ marginBottom: 16 }}>
-        <div style={{ ...CARD, marginBottom: 0 }}>
-          <CarDamageDiagram
-            marks={marks}
-            activeCode={locked ? '' : activeCode}
-            selectedMarkId={selectedMarkId}
-            onAddMark={locked ? undefined : addMark}
-            onSelectMark={setSelectedMarkId}
-          />
-          {!locked && (
-            <p className="vi-no-print" role="status" style={{ margin: '10px 2px 0', fontSize: 12, color: activeCode ? '#0e7490' : '#64748b' }}>
+      <div style={CARD}>
+        {!locked && (
+          <div className="vi-type-bar vi-no-print">
+            <label htmlFor="vi-damage-type" style={{ ...LBL, marginBottom: 0 }}>{t('inspection.damage_type', 'Damage type')}</label>
+            <select id="vi-damage-type" className="vi-type-select" style={{ ...INPUT, width: 'auto' }}
+              value={activeCode} onChange={e => setActiveCode(e.target.value)}>
+              <option value="">{t('inspection.damage_type_pick', 'Choose a damage type…')}</option>
+              {CODE_LIST.map(code => <option key={code} value={code}>{damageLabel(t, code)} ({code})</option>)}
+            </select>
+            <p className="vi-type-hint" role="status" style={{ color: activeCode ? '#0e7490' : '#64748b' }}>
               {activeCode
                 ? t('inspection.hint_active', 'Click the spot on the car to mark “{{label}}”.', { label: damageLabel(t, activeCode) })
-                : t('inspection.hint_pick', 'Pick a damage code from the legend, then click the spot on the car.')}
+                : t('inspection.hint_pick_type', 'Choose the damage type in the drop-down, then click the spot on the car.')}
             </p>
-          )}
-        </div>
-
-        {/* Legend */}
-        <div className="vi-legend-card" style={{ ...CARD, padding: 12, marginBottom: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: '#1e3a6b', textAlign: 'center', marginBottom: 8, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-            {t('inspection.legend', 'Legend')}
           </div>
-          <div className="vi-legend-list">
-            {CODE_LIST.map(code => {
-              const on = code === activeCode;
-              const used = marks.filter(m => m.code === code).length;
-              return (
-                <button
-                  key={code}
-                  type="button"
-                  disabled={locked}
-                  aria-pressed={on}
-                  onClick={() => setActiveCode(on ? '' : code)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 6,
-                    border: `1px solid ${on ? '#0e7490' : '#e2e8f0'}`,
-                    background: on ? '#cffafe' : '#fff',
-                    cursor: locked ? 'default' : 'pointer', textAlign: 'start', width: '100%',
-                  }}
-                >
-                  <span style={{
-                    fontSize: 11, fontWeight: 800, color: on ? '#0e7490' : '#334155',
-                    background: on ? '#fff' : '#f1f5f9', borderRadius: 4, padding: '2px 5px', minWidth: 26, textAlign: 'center',
-                  }}>{code}</span>
-                  <span style={{ fontSize: 11.5, color: '#334155', flex: 1 }}>{damageLabel(t, code)}</span>
-                  {used > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: '#dc2626' }}>{used}</span>}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        )}
+        <CarDamageDiagram
+          marks={marks}
+          activeCode={locked ? '' : activeCode}
+          selectedMarkId={selectedMarkId}
+          onAddMark={locked ? undefined : addMark}
+          onSelectMark={setSelectedMarkId}
+        />
       </div>
 
       {/* ── Marked damage list ── */}
@@ -835,10 +864,11 @@ export default function VehicleInspection() {
                   background: m.id === selectedMarkId ? '#f0fdfa' : '#f8fafc', cursor: 'pointer',
                 }}>
                 <span style={{ fontSize: 11, color: '#64748b', minWidth: 16 }}>{i + 1}</span>
-                <span style={{ fontSize: 11, fontWeight: 800, color: '#b91c1c', background: '#fee2e2', borderRadius: 4, padding: '2px 6px', minWidth: 28, textAlign: 'center' }}>
+                {/* The code in the marker's colour, so each row reads against its dot on the car. */}
+                <span className="vi-mark-code" style={{ fontSize: 11, fontWeight: 800, color: '#fff', background: DAMAGE_COLORS[m.code] || '#dc2626', borderRadius: 4, padding: '2px 6px', minWidth: 28, textAlign: 'center' }}>
                   {m.code}
                 </span>
-                <span className="vi-mark-name" style={{ fontSize: 12.5, color: '#334155' }}>{damageLabel(t, m.code)}</span>
+                <span className="vi-mark-name" style={{ fontSize: 12.5, fontWeight: 600, color: '#334155' }}>{damageLabel(t, m.code)}</span>
                 <span className="vi-mark-view" style={{ fontSize: 11.5, color: '#64748b' }}>{viewLabel(t, m.view)}</span>
                 <input
                   className="vi-mark-note"
@@ -1040,7 +1070,7 @@ export default function VehicleInspection() {
             </div>
             {share?.work_order_cancelled ? (
               <span style={{ fontSize: 12.5, color: '#64748b' }}>
-                <WoChip t={t} status="cancelled" />{t('inspection.share_wo_cancelled', 'Nothing is sent to the customer for a cancelled job card.')}
+                <WoChip t={t} status="cancelled" />{t('inspection.share_wo_cancelled_wo', 'Nothing is sent to the customer for a cancelled work order.')}
               </span>
             ) : share && !canShare ? (
               <span style={{ fontSize: 12.5, color: '#64748b' }}>{t('inspection.share_advisor_only', 'The Service Advisor sends it to the customer.')}</span>
@@ -1062,7 +1092,7 @@ export default function VehicleInspection() {
             )}
           </div>
           {canShare && !share.can_email && !share.work_order_cancelled && (
-            <p style={{ margin: '8px 0 0', fontSize: 12, color: '#64748b' }}>{t('inspection.no_email_hint', 'No e-mail on file for this customer — add it on the job card, or use WhatsApp / the link.')}</p>
+            <p style={{ margin: '8px 0 0', fontSize: 12, color: '#64748b' }}>{t('inspection.no_email_hint_wo', 'No e-mail on file for this customer — add it on the work order, or use WhatsApp / the link.')}</p>
           )}
           {shareNote && <p role="status" style={{ margin: '8px 0 0', fontSize: 12.5, color: '#15803d', fontWeight: 600 }}>{shareNote}</p>}
           {errorHere('share')}

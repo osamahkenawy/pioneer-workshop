@@ -394,7 +394,7 @@
     },
     "filters": {
       "all_with_count": "All ({{count}})",
-      "search_placeholder": "Search job card #, customer, phone, plate or VIN…",
+      "search_placeholder": "Search work order #, customer, phone, plate or VIN…",
       "all_types": "All Types",
       "all_customers": "All Customers",
       "to": "to"

@@ -58,7 +58,7 @@ try {
   const cust = (await call('POST', '/customers', advisor, { full_name: 'QA TA Walk-in', phone: '+971500000562', email: 'qa-ta-walkin@example.invalid', customer_class: 'external', customer_subcategory: 'walkin' })).json?.data;
   created.customers.push(cust.id);
   const vehicle = async (plate, vin) => {
-    const v = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Hilux', year: 2020, plate_number: plate, vin })).json?.data;
+    const v = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Hilux', year: 2020, plate_emirate: 'Dubai', plate_number: plate, vin })).json?.data;
     created.vehicles.push(v.id); return v;
   };
   const v1 = await vehicle('QA TA 01', 'TSTTAP00000000101');

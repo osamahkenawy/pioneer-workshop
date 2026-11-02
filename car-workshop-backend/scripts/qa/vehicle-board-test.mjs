@@ -86,7 +86,7 @@ try {
   const plate = `QAVB${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
   const vin = `TSTVBD${crypto.randomBytes(6).toString('hex').toUpperCase().slice(0, 11)}`;
   const cust = (await call('POST', '/customers', advisor, { full_name: 'QA VB Walk-in', phone: '+971500000651', email: 'qa-vb-walkin@example.invalid', customer_class: 'external', customer_subcategory: 'walkin' })).json?.data;
-  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Prado', year: 2022, plate_number: plate, vin })).json?.data;
+  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Prado', year: 2022, plate_emirate: 'Dubai', plate_number: plate, vin })).json?.data;
   const created = await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh.id, customer_name: cust.full_name, customer_phone: cust.phone,
     description: 'Brake noise; AC weak', odometer_in: 41000, payment_method: 'cash', service_fee: 0, items: [] });
   const woId = created.json?.data?.id;
@@ -138,11 +138,9 @@ try {
   await call('PATCH', `/estimates/${estId}/lines/${L['Brake pads']}/pricing`, store, { genuine_price: 220, aftermarket_price: 140 });
   await call('PATCH', `/estimates/${estId}/lines/${L['AC filter']}/pricing`, store, { genuine_price: 60, aftermarket_price: 35 });
   it = await item();
-  expect('priced, external customer → "Needs Supervisor/WM approval"', it?.phase === 'pricing' && it.badges[0]?.key === 'needs_approval' && it.waiting_on?.key === 'supervisor_wm', show(it));
-  await agrees('needs approval', it);
-  await call('POST', `/estimates/${estId}/internal-approve`, supervisor);
-  it = await item();
-  expect('approved inside → "Ready to send", waiting on the Service Advisor', it?.badges[0]?.key === 'ready_to_send' && it.waiting_on?.key === 'service_advisor', show(it));
+  // No Supervisor / WM sign-off since the client's review (2 Nov 2026).
+  expect('priced, external customer → "Ready to send", waiting on the Service Advisor', it?.phase === 'pricing' && it.badges[0]?.key === 'ready_to_send' && it.waiting_on?.key === 'service_advisor', show(it));
+  await agrees('ready to send', it);
   const sent = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'both' });
   it = await item();
   // No SMTP locally → 502 EMAIL_FAILED with the live link; the estimate is sent either way.
@@ -265,7 +263,7 @@ try {
   // work order (estimate_approved) with no job card: Reception, the physical
   // inspection first — not an import's "No job card".
   section = 'inspection first';
-  const vehQ = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Yaris', year: 2019, plate_number: `${plate}Q`, vin: `${vin.slice(0, 16)}Z` })).json?.data;
+  const vehQ = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Yaris', year: 2019, plate_emirate: 'Dubai', plate_number: `${plate}Q`, vin: `${vin.slice(0, 16)}Z` })).json?.data;
   const eq = (await call('POST', '/estimates', advisor, { customer_id: cust.id, vehicle_id: vehQ?.id, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Minor service', quantity: 1, unit_price: 180 }] })).json?.estimateId;
   await call('POST', `/estimates/${eq}/internal-approve`, supervisor);
   await call('POST', `/estimates/${eq}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
@@ -285,7 +283,7 @@ try {
   const fleetRes = await call('POST', '/customers', manager, { full_name: 'QA VB Internal Fleet', phone: '+971500000652', email: 'qa-vb-fleet@example.invalid', customer_class: 'internal', customer_subcategory: 'fleet' });
   const fleet = fleetRes.json?.data;
   expect('QA internal fleet customer created by the manager', !!fleet?.id, `HTTP ${fleetRes.status} ${fleetRes.json?.code || fleetRes.json?.message || ''}`);
-  const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_number: `${plate}X`, vin: `${vin.slice(0, 16)}X` })).json?.data;
+  const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_emirate: 'Dubai', plate_number: `${plate}X`, vin: `${vin.slice(0, 16)}X` })).json?.data;
   const wo2 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh2.id, customer_name: fleet.full_name, customer_phone: fleet.phone, description: 'Service', odometer_in: 90000, payment_method: 'credit', items: [] })).json?.data?.id;
   const e2 = (await call('POST', '/estimates', advisor, { intake_work_order_id: wo2, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Full service', quantity: 1, unit_price: 250 }] })).json?.estimateId;
   let it2 = (await board(advisor)).items.find(i => i.id === wo2);

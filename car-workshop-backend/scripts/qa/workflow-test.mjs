@@ -55,7 +55,7 @@ try {
   // ── Steps 1–3 ──────────────────────────────────────────────────────
   section = '1-3 intake';
   const cust = (await call('POST', '/customers', advisor, { full_name: 'QA WF Walk-in', phone: '+971500000551', email: 'qa-wf-walkin@example.invalid', customer_class: 'external', customer_subcategory: 'walkin' })).json?.data;
-  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Land Cruiser', year: 2021, plate_number: 'QAWF01', vin: 'TSTWFA00000000001' })).json?.data;
+  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Land Cruiser', year: 2021, plate_emirate: 'Dubai', plate_number: 'QAWF01', vin: 'TSTWFA00000000001' })).json?.data;
   const created = await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh.id, customer_name: cust.full_name, customer_phone: cust.phone,
     description: 'AC not cooling; brake noise', odometer_in: 64000, payment_method: 'cash', service_fee: 0, items: [] });
   const woId = created.json?.data?.id;
@@ -135,14 +135,12 @@ try {
   expect('no fallback: Brake pad is Genuine 120 (labour only, flagged not available) / After-Market 270',
     br.total_genuine === 120 && br.total_after_market === 270 && br.genuine_na === true && br.after_market_na === false, `${br.total_genuine} / ${br.total_after_market} na ${br.genuine_na}`);
   expect('workflow: step 4 done, step 5 current', d.steps[3].state === 'done' && d.current_step === 5, stepStates(d));
-  const blocked = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'both' });
-  expect('external customer: advisor cannot send without Supervisor / Manager approval', blocked.status === 409 && blocked.json?.code === 'MANAGER_APPROVAL_REQUIRED', `HTTP ${blocked.status}`);
-  const appr = await call('POST', `/estimates/${estId}/internal-approve`, supervisor);
+  // No Supervisor / Manager sign-off since the client's review (2 Nov 2026): it goes straight out.
   const sent = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'both' });
   // With no SMTP (local), the send answers 502 EMAIL_FAILED with the live link
   // instead of claiming the e-mail went out; the estimate is sent either way.
   const sentOk = sent.status === 200 || (sent.status === 502 && sent.json?.code === 'EMAIL_FAILED' && !!sent.json?.approval_url);
-  expect('after the Supervisor approves, it goes out as Format 3 (both types)', appr.status === 200 && sentOk && sent.json.format === 'both', `approve ${appr.status}, send ${sent.status} ${sent.json?.message || ''}`);
+  expect('external customer: the advisor sends it without a sign-off, as Format 3 (both types)', sentOk && sent.json.format === 'both', `send ${sent.status} ${sent.json?.code || ''} ${sent.json?.message || ''}`);
   const wa = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'both', channel: 'whatsapp' });
   expect('WhatsApp send returns a wa.me link with the approval link', wa.status === 200 && /^https:\/\/wa\.me\/\d+\?text=/.test(wa.json?.whatsapp_url || ''), `HTTP ${wa.status}`);
 
@@ -329,7 +327,7 @@ try {
   section = '6 reject all';
   // A QA fleet account, not a real one: cancelling this job texts and emails the customer.
   const fleet = (await call('POST', '/customers', mgrTok, { full_name: 'QA WF Fleet', phone: '+971500000558', email: 'qa-wf-fleet@example.invalid', customer_class: 'internal', customer_subcategory: 'fleet' })).json?.data;
-  const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_number: 'QAWF02', vin: 'TSTWFA00000000002' })).json?.data;
+  const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_emirate: 'Dubai', plate_number: 'QAWF02', vin: 'TSTWFA00000000002' })).json?.data;
   const wo2 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh2.id, customer_name: fleet.full_name, customer_phone: fleet.phone || '+971500000552', description: 'Service', odometer_in: 120000, payment_method: 'credit', items: [] })).json?.data?.id;
   d = await wf(advisor, wo2);
   expect('internal customer: no physical inspection — the main job card opens with the work order',
@@ -349,7 +347,7 @@ try {
 
   // ── Step 3: a manager opens the job card without the acknowledgement ──
   section = '3 override';
-  const veh3 = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Corolla', year: 2019, plate_number: 'QAWF03', vin: 'TSTWFA00000000003' })).json?.data;
+  const veh3 = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Corolla', year: 2019, plate_emirate: 'Dubai', plate_number: 'QAWF03', vin: 'TSTWFA00000000003' })).json?.data;
   const wo3 = (await call('POST', '/work-orders', advisor, { customer_id: cust.id, vehicle_id: veh3.id, customer_name: cust.full_name, customer_phone: cust.phone,
     description: 'Engine light on', odometer_in: 30000, payment_method: 'cash', service_fee: 0, items: [] })).json?.data?.id;
   const ovAdv = await call('POST', `/workflow/work-orders/${wo3}/job-card`, advisor, { override_reason: 'Customer left the keys' });
@@ -373,7 +371,7 @@ try {
 
   // ── Step 5: parts categories — Used, expected delivery, an alternative ──
   section = '5 parts categories';
-  const veh4 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Patrol', year: 2018, plate_number: 'QAWF04', vin: 'TSTWFA00000000004' })).json?.data;
+  const veh4 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Patrol', year: 2018, plate_emirate: 'Dubai', plate_number: 'QAWF04', vin: 'TSTWFA00000000004' })).json?.data;
   const wo4 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh4.id, customer_name: fleet.full_name, customer_phone: fleet.phone || '+971500000552',
     description: 'Charging fault; mirror broken; wipers', odometer_in: 98000, payment_method: 'credit', items: [] })).json?.data?.id;
   const e4 = await call('POST', '/estimates', advisor, { intake_work_order_id: wo4, parts_preference: 'genuine,used', lines: [

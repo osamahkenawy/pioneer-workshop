@@ -20,6 +20,7 @@ import { jcLabel, timeStateLabel } from '../../lib/statusLabels';
 import { buildStatusMessage } from '../../lib/whatsapp';
 import { customerStatusUrl } from '../../lib/customerLink';
 import { hasModule } from '../../lib/modules';
+import { JOB_TYPES, jobTypeLabel } from '../../lib/intakeOptions';
 import './JobCardWorkflow.css';
 
 const STEP_ICONS = { classification: User, intake: Car, job_card: Page, inspection_pricing: Search, estimate: Mail, work: Wrench, closure: ShieldCheck };
@@ -42,6 +43,7 @@ function rolesFrom(capabilities = []) {
   return {
     can,
     open: can('job.open'), estimate: can('estimate.raise'), approval: can('customer.approval'),
+    techInspect: can('tech.inspect'),
     leader: can('job.assign'), time: can('time.book'), parts: can('parts.request'),
     store: can('store.issue'), qc: can('qc.perform'), handover: can('delivery.handover'),
   };
@@ -50,6 +52,7 @@ function rolesFrom(capabilities = []) {
 const NEXT_CAP = {
   classify: 'job.open', intake: 'job.open', intake_missing: 'job.open', open_job_card: 'job.open',
   physical_inspection: 'job.open', finish_physical_inspection: 'job.open', send_inspection_link: 'estimate.raise', counter_needs_estimate: 'estimate.raise', create_estimate: 'estimate.raise', create_estimate_from_inspection: 'estimate.raise', price_labour: 'estimate.raise',
+  technical_inspection: 'tech.inspect', create_estimate_from_report: 'estimate.raise',
   send_estimate: 'estimate.raise', price_parts: 'estimate.price_parts', price_parts_categories: 'estimate.price_parts', approve_estimate: 'estimate.approve', record_approval: 'customer.approval',
   assign: 'job.assign', parts_waiting: 'store.issue', work: 'time.book', qc_failed: 'job.assign', qc: 'qc.perform',
   contact: 'delivery.handover', payment: 'delivery.handover', gate_pass: 'delivery.handover', close: 'delivery.handover', rejected_all: 'customer.approval',
@@ -195,11 +198,30 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
   const elapsed = Math.floor((Date.now() - loadedAt.current) / 60000);
   const closed = wo.status === 'completed' || wo.status === 'cancelled';
 
+  // Step 4: the technical report's page (routes/technical-inspections.js).
+  const techPage = `/work-orders/${wo.id}/technical-inspection`;
+  /** Start the technical inspection (a draft) and open it. */
+  const startTechnical = async () => {
+    setBusy('ti_start');
+    try {
+      const r = await api.post('/technical-inspections', { work_order_id: wo.id });
+      if (r?.success) { navigate(techPage); return; }
+      setToast({ kind: 'bad', text: r?.message || t('workflow.failed', 'That did not work.') });
+    } catch {
+      setToast({ kind: 'bad', text: t('workflow.network', 'Network error — check the connection.') });
+    } finally { setBusy(''); }
+  };
+
   /** The next-step bar's Go: open the page the step needs, or point at it here. */
   const goNext = () => {
     const action = data.next?.action;
     // Step 3: the physical inspection (walk-around, photos, the customer's signature, the link).
     if (action === 'inspect') { navigate(`/work-orders/${wo.id}/inspection?type=intake`); return; }
+    // Step 4: the technical inspection — its page; the Supervisor / Foreman's Go starts it first.
+    if (action === 'tech_inspect') {
+      if (data.technical_inspection) { navigate(techPage); return; }
+      if (roles.techInspect) { startTechnical(); return; }
+    }
     if (action === 'create_estimate' && roles.estimate && !data.estimate) { navigate(`/estimates?new=1&wo=${wo.id}`); return; }
     if (action === 'open_estimate' && data.estimate?.id && hasModule(user, 'estimates')) {
       navigate(`/estimates?id=${data.estimate.id}`);
@@ -282,6 +304,15 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
             onOpen={() => act('open', () => api.post(`/workflow/work-orders/${wo.id}/job-card`), t('workflow.jc_opened', 'Main job card opened'))}
             onOverride={() => setModal({ type: 'override' })} />
         )}
+        {step.key === 'inspection_pricing' && (
+          <TechInspectionBody data={data} t={t} closed={closed} mayInspect={roles.techInspect} busy={busy}
+            onStart={startTechnical} onOpen={() => navigate(techPage)} />
+        )}
+        {step.key === 'inspection_pricing' && (
+          <JobTypesBody t={t} value={wo.job_types || []} closed={closed} canEdit={roles.estimate || roles.open} busy={busy === 'job_types'}
+            onSave={list => act('job_types', () => api.patch(`/workflow/work-orders/${wo.id}/job-types`, { job_types: list }),
+              t('workflow.jt_saved', 'Job types saved'))} />
+        )}
         {(step.key === 'inspection_pricing' || step.key === 'estimate') && (
           <EstimateBody data={data} t={t} money={money} closed={closed} step={step.key} canRaise={roles.estimate}
             canOpen={hasModule(user, 'estimates')}
@@ -331,7 +362,7 @@ function stepTitle(t, s) {
 }
 
 function actionStep(action, current) {
-  return ({ classify: 1, edit: 2, open_job_card: 3, inspect: 3, create_estimate: 4, price_parts: 4, open_estimate: 5, record_approval: 6, assign: 6, parts: 6, time: 6,
+  return ({ classify: 1, edit: 2, open_job_card: 3, inspect: 3, tech_inspect: 4, create_estimate: 4, price_parts: 4, open_estimate: 5, record_approval: 6, assign: 6, parts: 6, time: 6,
     qc: 7, contact: 7, invoice: 7, gate_pass: 7, close: 7 })[action] || current || 1;
 }
 function stateLabel(s, t) {
@@ -647,6 +678,94 @@ function JobCardList({ data, t, children }) {
 }
 
 /* ── Steps 4–5 ──────────────────────────────────────────────────────── */
+/**
+ * Step 4: the technical inspection (client review, 2 Nov 2026). Once the job
+ * card is open the Supervisor or Workshop Foreman inspects the car and writes
+ * the technical report — each service line a labour with its parts — on its
+ * own page; the Service Advisor raises the estimate from it (pre-filled).
+ * Everyone may read the report once it exists.
+ */
+function TechInspectionBody({ data, t, closed, mayInspect, busy, onStart, onOpen }) {
+  const ti = data.technical_inspection;
+  const p = data.physical_inspection || {};
+  const ready = !!p.job_card_open || !p.needed;   // internal customers' job cards open with the job
+  const done = ti?.status === 'completed';
+  const n = ti?.lines || 0;
+  // An estimate raised without a report (older jobs): nothing to start any more.
+  const skipped = !ti && !!data.estimate;
+  const status = done
+    ? t('workflow.ti_done', 'Completed by {{name}} on {{date}} — {{n}} service line(s).',
+      { name: ti.completed_by_name || '—', date: String(ti.completed_at || '').replace('T', ' ').slice(0, 16), n })
+    : ti ? t('workflow.ti_draft', 'In progress — {{n}} service line(s) so far.', { n })
+    : skipped ? t('workflow.ti_skipped', 'Not recorded — the estimate was raised without a technical report.')
+    : !ready ? t('workflow.ti_wait_jc', 'Starts once the job card is open.')
+    : mayInspect ? t('workflow.ti_not_started', 'Not started. Inspect the car and write the technical report: each service line with its labour and parts.')
+    : t('workflow.ti_waiting', "Waiting for the Supervisor / Foreman's technical inspection.");
+  const [pill, tone] = done ? [t('workflow.ti_state_done', 'Completed'), 'good'] : ti ? [t('workflow.ti_state_draft', 'In progress'), 'warn'] : [t('workflow.ti_state_none', 'Not started'), 'neutral'];
+  const mayWrite = !closed && mayInspect && !done && ready && !skipped;
+  return (
+    <div className="wf-ti">
+      <div className="wf-ti-head">
+        <Wrench width={16} height={16} />
+        <b>{t('workflow.ti_title', 'Technical inspection')}</b>
+        <span className={`wf-pill ${tone}`}>{pill}</span>
+      </div>
+      <p className="wf-note">{status}</p>
+      {(mayWrite || ti) && (
+        <div className="wf-row">
+          {mayWrite && (
+            <button className="wf-btn primary" disabled={busy === 'ti_start'} onClick={ti ? onOpen : onStart}>
+              <Search width={15} height={15} /> {ti ? t('workflow.ti_continue', 'Continue the technical inspection') : t('workflow.ti_start', 'Start the technical inspection')}
+            </button>
+          )}
+          {ti && !mayWrite && (
+            <button className="wf-btn ghost" onClick={onOpen}><Page width={15} height={15} /> {t('workflow.ti_view', 'View the technical report')}</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Step 4: the job types of the visit — a multi-select the Service Advisor
+ * ticks once the car has been inspected (client review, 2 Nov 2026; the list
+ * is provisional until the client sends theirs).
+ */
+function JobTypesBody({ t, value, closed, canEdit, busy, onSave }) {
+  const key = value.join(',');
+  const [sel, setSel] = useState(value);
+  useEffect(() => { setSel(value); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!canEdit || closed) {
+    return value.length ? <p className="wf-note"><b>{t('workflow.jt_title', 'Job type')}:</b> {value.map(jobTypeLabel).join(' · ')}</p> : null;
+  }
+  const dirty = sel.join(',') !== key;
+  const toggle = v => setSel(prev => JOB_TYPES.map(o => o.value).filter(x => (x === v ? !prev.includes(v) : prev.includes(x))));
+  return (
+    <div className="wf-jobtypes">
+      <div className="wf-jobtypes-head">
+        <b>{t('workflow.jt_title', 'Job type')}</b>
+        <span>{t('workflow.jt_hint', 'Tick every type of work this visit needs.')}</span>
+      </div>
+      <div className="wf-jobtypes-chips" role="group" aria-label={t('workflow.jt_title', 'Job type')}>
+        {JOB_TYPES.map(o => {
+          const on = sel.includes(o.value);
+          return (
+            <button key={o.value} type="button" aria-pressed={on} className={`wf-jt-chip${on ? ' on' : ''}`} onClick={() => toggle(o.value)}>
+              {on ? '✓ ' : ''}{o.label}
+            </button>
+          );
+        })}
+        {dirty && (
+          <button type="button" className="wf-btn primary" disabled={busy} onClick={() => onSave(sel)}>
+            {t('workflow.jt_save', 'Save job types')}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, onOpen }) {
   const est = data.estimate;
   const counter = !est && data.job_cards.length && data.steps[3].done;
@@ -666,14 +785,16 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, 
   const catTotal = (row, c) => row?.totals?.[c] ?? (c === 'genuine' ? row?.total_genuine : c === 'after_market' ? row?.total_after_market : null);
   const alternatives = pricing?.alternatives || [];
   const hasParts = (pricing?.partLines || 0) > 0;
+  // The estimate is raised from the technical report (the form is pre-filled
+  // from it); without one it can still be raised — the report guides, it does not hold it.
+  const fromReport = data.technical_inspection?.status === 'completed';
   return (
     <div className="wf-body">
-      {/* The physical inspection (walk-around, signature, link) is Step 3's; the
-          technical inspection's own fields are still to come from the client,
-          so Step 4 starts with the estimate and its findings. */}
       {step === 'inspection_pricing' && !est && !closed && canRaise && (
         <div className="wf-row">
-          <button className="wf-btn primary" onClick={onNew}><Plus width={15} height={15} /> {t('workflow.raise_estimate', 'Raise the estimate')}</button>
+          <button className={`wf-btn ${fromReport ? 'primary' : 'ghost'}`} onClick={onNew}>
+            <Plus width={15} height={15} /> {fromReport ? t('workflow.raise_from_report', 'Raise the estimate from the technical report') : t('workflow.raise_estimate', 'Raise the estimate')}
+          </button>
         </div>
       )}
       {counter ? <p className="wf-note">{t('workflow.counter_priced', 'This job card was priced at the counter when it was opened; no separate estimate.')}</p> : null}

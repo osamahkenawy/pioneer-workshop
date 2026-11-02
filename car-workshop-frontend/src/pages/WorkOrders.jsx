@@ -23,13 +23,14 @@ import { woLabel, woTone, woFilterLabel, WO_FILTERS, WO_STATUSES } from '../lib/
 import { customerStatusUrl } from '../lib/customerLink';
 import { hasModule, isTechnician as isTechnicianUser, MODULES } from '../lib/modules';
 import { buildStatusMessage } from '../lib/whatsapp';
+import { jobTypeLabel } from '../lib/intakeOptions';
+
+/** The job types ticked at Step 4 (work_orders.job_types, JSON), as labels; '' when none. */
+const jobTypesText = o => { try { const v = typeof o?.job_types === 'string' ? JSON.parse(o.job_types) : o?.job_types; return Array.isArray(v) ? v.map(jobTypeLabel).join(' · ') : ''; } catch { return ''; } };
 
 /* ══════════════════════════════════════════════════════════════
    CONSTANTS
    ══════════════════════════════════════════════════════════════ */
-// Job types the job card wizard offers (NewWorkOrderModal, backend
-// VALID_WORK_ORDER_TYPES). 'return' was a courier type, never a workshop one.
-const ORDER_TYPES   = ['standard','express','same_day','scheduled','warranty'];
 // Valid status transitions — mirrors backend VALID_TRANSITIONS
 const VALID_TRANSITIONS_FRONTEND = {
   estimate_approved: ['confirmed', 'cancelled'],
@@ -878,11 +879,6 @@ export default function WorkOrders() {
             value={filters.search} onChange={e => setFilters(f=>({...f, search:e.target.value}))}
             style={{ ...INPUT, [isRTL?'paddingRight':'paddingLeft']:36, background:'#fff' }} />
         </div>
-        <select value={filters.work_order_type} onChange={e=>setFilters(f=>({...f, work_order_type:e.target.value}))}
-          style={{ ...INPUT, width:140, background:'#fff' }}>
-          <option value="">{t('orders.filters.all_types')}</option>
-          {ORDER_TYPES.map(ot => <option key={ot} value={ot}>{fmtType(ot)}</option>)}
-        </select>
         <select value={filters.customer_id} onChange={e=>setFilters(f=>({...f, customer_id:e.target.value}))}
           style={{ ...INPUT, width:180, background:'#fff' }}>
           <option value="">{t('orders.filters.all_customers')}</option>
@@ -972,10 +968,12 @@ export default function WorkOrders() {
                             <MapPin width={11} height={11} color="#94a3b8" /> {o.service_bay_name}
                           </span>
                         )}
-                        <span style={{ padding:'2px 8px', borderRadius:12, fontSize:10, fontWeight:600,
-                          background:'#f1f5f9', color:'#475569' }}>
-                          {fmtType(o.work_order_type)}
-                        </span>
+                        {jobTypesText(o) && (
+                          <span style={{ padding:'2px 8px', borderRadius:12, fontSize:10, fontWeight:600,
+                            background:'#f1f5f9', color:'#475569' }}>
+                            {jobTypesText(o)}
+                          </span>
+                        )}
                         {o.mechanic_name && (
                           <span style={{ display:'inline-flex', alignItems:'center', gap:3, fontSize:11, color:'#475569' }}>
                             <Wrench width={11} height={11} color="#94a3b8" /> {o.mechanic_name}
@@ -1008,7 +1006,7 @@ export default function WorkOrders() {
                       { label: t('orders.table.customer'), key: '' },
                       { label: t('orders.table.vehicle', 'Vehicle'), key: '' },
                       { label: t('orders.table.total_cost', 'Total Cost'), key: 'total_amount' },
-                      { label: t('orders.table.type'), key: '' },
+                      { label: t('orders.table.job_type', 'Job type'), key: '' },
                       { label: t('orders.table.date'), key: 'date' },
                       { label: t('orders.table.closed_at', 'Closed'), key: 'completed_at' },
                       { label: '', key: '' },
@@ -1084,10 +1082,12 @@ export default function WorkOrders() {
                         })()}
                       </td>
                       <td style={{ padding:'13px 16px' }}>
-                        <span style={{ padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600,
-                          background:'#f1f5f9', color:'#475569' }}>
-                          {fmtType(o.work_order_type)}
-                        </span>
+                        {jobTypesText(o) ? (
+                          <span style={{ padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600,
+                            background:'#f1f5f9', color:'#475569' }}>
+                            {jobTypesText(o)}
+                          </span>
+                        ) : <span style={{ color:'#94a3b8' }}>—</span>}
                       </td>
                       <td style={{ padding:'13px 16px', minWidth:110, maxWidth:140 }}>
                         <div style={{ fontSize:12, color:'#475569', whiteSpace:'nowrap' }}>{fmtDate(o.created_at)}</div>
@@ -1337,7 +1337,7 @@ export default function WorkOrders() {
                   <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:18 }}>
                     {[
                       { label:t('orders.drawer.service_fee'), value:fmtAED(drawerFull.total_amount ?? drawerFull.service_fee), color:'#16a34a', bg:'#f0fdf4', Icon:DollarCircle },
-                      { label:t('orders.drawer.type'),         value:fmtType(drawerFull.work_order_type),  color:'#7c3aed', bg:'#faf5ff', Icon:Page },
+                      { label:t('orders.drawer.job_type', 'Job type'), value:jobTypesText(drawerFull) || '—',  color:'#7c3aed', bg:'#faf5ff', Icon:Page },
                     ].map(s => (
                       <div key={s.label} style={{
                         background:s.bg, borderRadius:14, padding:'14px 14px',

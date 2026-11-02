@@ -20,8 +20,9 @@ import { createInAppNotification } from './notify.js';
 import { sendPushToUser } from './push.js';
 import { sendFCMToUser } from './firebase.js';
 import { isManagerRole } from './roles.js';
-import { jobClassification, canApproveEstimates } from './job-card-approval.js';
+import { jobClassification, canApproveEstimates, ESTIMATE_APPROVAL_REQUIRED } from './job-card-approval.js';
 import { acknowledgedVia, openJobCardIfReady } from './physical-inspection.js';
+import { jobTypesOf } from './intake-rules.js';
 
 // Step 1 as recorded on the job (the approval rules read it too).
 export { jobClassification };
@@ -343,7 +344,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     'SELECT job_card_number FROM job_cards WHERE work_order_id = ? AND workshop_id = ? AND parent_job_card_id IS NULL ORDER BY id LIMIT 1',
     [wo.id, workshopId]);
 
-  const [items, timeLogs, qcRows, reqItems, estimates, inspections, invoices, contacts, gatePasses, assignment, sentNotices, [creator]] = await Promise.all([
+  const [items, timeLogs, qcRows, reqItems, estimates, inspections, invoices, contacts, gatePasses, assignment, sentNotices, [creator], [techRow]] = await Promise.all([
     query('SELECT id, name, item_type, quantity, unit_price, job_card_id FROM work_order_items WHERE work_order_id = ? ORDER BY id', [wo.id]),
     jcIds.length ? query(
       `SELECT t.id, t.job_card_id, t.mechanic_id, COALESCE(m.full_name, t.mechanic_name) AS mechanic_name,
@@ -382,6 +383,12 @@ export async function buildWorkflow(workOrderId, workshopId) {
       `SELECT u.role, r.slug AS role_slug, u.is_owner FROM work_order_status_logs sl
          JOIN users u ON u.id = sl.changed_by LEFT JOIN roles r ON r.id = u.role_id
         WHERE sl.work_order_id = ? ORDER BY sl.id LIMIT 1`, [wo.id]),
+    // Step 4: the technical inspection and its report (routes/technical-inspections.js).
+    query(
+      `SELECT ti.id, ti.status, ti.completed_at, ti.service_lines, ui.full_name AS inspected_by_name, uc.full_name AS completed_by_name
+         FROM technical_inspections ti
+         LEFT JOIN users ui ON ui.id = ti.inspected_by LEFT JOIN users uc ON uc.id = ti.completed_by
+        WHERE ti.work_order_id = ? AND ti.workshop_id = ?`, [wo.id, workshopId]),
   ]);
 
   // Estimate pricing summary (Step 5)
@@ -438,7 +445,8 @@ export async function buildWorkflow(workOrderId, workshopId) {
   const counterSignedOff = counterPriced && !isInternal && !!creator && canApproveEstimates(creator);
   // The estimate's account type counts only for a job with no classification at all.
   const estimateInternal = isInternal || (!customerClass && estimate?.customer_type === 'internal_fleet');
-  const managerApproved = estimateInternal || !!estimate?.internal_approved_at || counterSignedOff;
+  // Off since the client's review (2 Nov 2026) unless the .env brings it back (lib/job-card-approval.js).
+  const managerApproved = !ESTIMATE_APPROVAL_REQUIRED || estimateInternal || !!estimate?.internal_approved_at || counterSignedOff;
   const hasVin = !!(wo.vin && String(wo.vin).trim());
   const hasIssue = !!(wo.description && wo.description.trim());
   // Step 2 of the process: the vehicle information and the reported issue.
@@ -480,6 +488,14 @@ export async function buildWorkflow(workOrderId, workshopId) {
     job_card_open: !!main,
   };
   const partsWaiting = reqItems.filter(i => i.availability !== 'available' && Number(i.quantity_issued) < Number(i.quantity_requested));
+  // Step 4: the Supervisor / Foreman's technical inspection, whose report the
+  // estimate is raised from (client review, 2 Nov 2026). lines: how many service lines.
+  const technical = techRow ? {
+    id: techRow.id, status: techRow.status, completed_at: techRow.completed_at || null,
+    completed_by_name: techRow.completed_by_name || null, inspected_by_name: techRow.inspected_by_name || null,
+    lines: countLines(techRow.service_lines),
+  } : null;
+  const techDone = technical?.status === 'completed';
 
   // Every visible string is sent with an i18n key + params (the screen
   // translates it; the English text is the fallback).
@@ -547,20 +563,23 @@ export async function buildWorkflow(workOrderId, workshopId) {
     {
       n: 4, key: 'inspection_pricing', title_key: 'technical_pricing', title: 'Technical inspection & pricing',
       ...sumOf(counterPriced ? L('sum.priced_counter', 'Priced at the counter')
-        : !estimate ? L('sum.no_estimate', 'No estimate yet')
+        : !estimate ? (techDone ? L('sum.tech_report_ready', 'Technical report ready — raise the estimate')
+          : technical ? L('sum.tech_in_progress', 'Technical inspection in progress')
+          : physical.job_card_open || !physical.needed ? L('sum.tech_not_started', 'Technical inspection not started')
+          : L('sum.no_estimate', 'No estimate yet'))
         : pricing.unpricedParts > 0 ? L('sum.parts_waiting_store', `${pricing.unpricedParts} part line(s) waiting for the store`, { n: pricing.unpricedParts })
         : pricing.unpricedLabour > 0 ? L('sum.labour_not_priced', 'Labour not priced')
         : L('sum.estimate_priced', `Estimate ${estimate.estimate_number} priced`, { est: estimate.estimate_number })),
       // A job priced at the counter skipped the estimate: it is priced (the
       // step is done), but the checks say what did not happen — no inspection
       // on record, parts not priced by the Storekeeper.
-      // The technical inspection's own fields are still to come from the
-      // client: until then it counts as done when the estimate with its
-      // findings is raised (the physical inspection is Step 3's).
+      // The technical inspection is the Supervisor / Foreman's report the
+      // estimate is raised from (the physical inspection is Step 3's). Done
+      // when the report is completed — or once an estimate is raised: jobs
+      // from before the report existed, and an estimate raised without it
+      // (the report guides the advisor, it does not hold the estimate).
       checks: [
-        C('technical_inspection', 'Technical inspection', !!estimate,
-          estimate ? `With estimate ${estimate.estimate_number}` : counterPriced ? 'Not recorded — priced at the counter' : null,
-          estimate ? { key: 'val.tech_with_estimate', params: { est: estimate.estimate_number } } : counterPriced ? { key: 'val.inspection_not_recorded' } : null),
+        C('technical_inspection', 'Technical inspection', techDone || !!estimate, ...techInspectionDetail(technical, estimate, counterPriced)),
         // label_key: the screen's workflow.chk.* key for this wording (the check key stays).
         { ...C('parts_priced', `Parts priced by the Storekeeper (${prefText(partsPreference(estimate))})`, !!pricing && pricing.unpricedParts === 0,
           pricing ? `${pricing.partLines - pricing.unpricedParts}/${pricing.partLines} part lines` : counterPriced ? 'Priced at the counter, not by the Storekeeper' : null,
@@ -582,14 +601,15 @@ export async function buildWorkflow(workOrderId, workshopId) {
                                                 : L('sum.counter_no_approval', 'Priced at the counter — no Supervisor / Workshop Manager approval'))
         : !estimate ? L('sum.raw', '—', { v: '—' })
         : estimate.sent_to_customer_at ? L('sum.sent_pref', `Sent — ${prefText(partsPreference(estimate))}`, { pref: prefText(partsPreference(estimate)) })
-        : !estimateInternal && !estimate.internal_approved_at ? L('sum.needs_approval', 'Needs Supervisor / Workshop Manager approval')
+        : ESTIMATE_APPROVAL_REQUIRED && !estimateInternal && !estimate.internal_approved_at ? L('sum.needs_approval', 'Needs Supervisor / Workshop Manager approval')
         : L('sum.ready_to_send', 'Ready to send')),
       checks: [
-        C('manager_approval', 'Supervisor / Workshop Manager approval (external customers)', estimateInternal || managerApproved,
+        // The Supervisor / Workshop Manager sign-off — only while it is switched on.
+        ...(ESTIMATE_APPROVAL_REQUIRED ? [C('manager_approval', 'Supervisor / Workshop Manager approval (external customers)', estimateInternal || managerApproved,
           estimateInternal ? 'Not needed — internal customer' : estimate?.internal_approved_at ? 'Approved'
             : counterSignedOff ? 'Priced by a Supervisor / Workshop Manager at the counter' : counterPriced ? 'Not given — priced at the counter' : null,
           estimateInternal ? { key: 'val.not_needed_internal' } : estimate?.internal_approved_at ? { key: 'val.approved' }
-            : counterSignedOff ? { key: 'val.counter_signed_off' } : counterPriced ? { key: 'val.counter_no_approval' } : null),
+            : counterSignedOff ? { key: 'val.counter_signed_off' } : counterPriced ? { key: 'val.counter_no_approval' } : null)] : []),
         C('sent', 'Sent by WhatsApp or Email', counterPriced || !!estimate?.sent_to_customer_at,
           estimate?.sent_to_customer_at ? prefText(partsPreference(estimate)) : counterPriced ? 'Shown at the counter' : null,
           estimate?.sent_to_customer_at ? { key: 'val.pref', params: { pref: prefText(partsPreference(estimate)) } } : counterPriced ? { key: 'val.shown_counter' } : null),
@@ -667,6 +687,9 @@ export async function buildWorkflow(workOrderId, workshopId) {
     work_order: {
       id: wo.id, work_order_number: wo.work_order_number, status: wo.status, billing_basis: wo.billing_basis,
       completed_at: wo.completed_at, cancelled_at: wo.cancelled_at,
+      // Asked at the enquiry / work order; ticked by the advisor at Step 4 (client review, 2 Nov 2026).
+      parts_preference: wo.parts_preference ? String(wo.parts_preference).split(',') : null,
+      job_types: jobTypesOf(wo),
       customer_id: wo.customer_id, customer_name: wo.customer_full_name || wo.customer_name, customer_phone: wo.customer_phone,
       // Step 1 as the job records it (classification_from_job: false = no
       // complete intake snapshot, the customer's current classification).
@@ -680,9 +703,11 @@ export async function buildWorkflow(workOrderId, workshopId) {
     },
     steps,
     current_step: steps.find(s => s.state === 'current')?.n || null,
-    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, customerClass, physical }),
+    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, customerClass, physical, techDone }),
     // Step 3: where the physical inspection and the customer's acknowledgement stand.
     physical_inspection: physical,
+    // Step 4: the technical inspection (null = not started).
+    technical_inspection: technical,
     job_cards: cards,
     estimate: estimate ? { ...estimate, pricing } : null,
     estimates,
@@ -711,10 +736,11 @@ export const PART_CATEGORIES = ['genuine', 'after_market', 'used'];
 export const PART_CATEGORY_LABEL = { genuine: 'Genuine', after_market: 'After-Market', used: 'Used' };
 const CATEGORY_COLUMN = { genuine: 'genuine', after_market: 'aftermarket', used: 'used' };
 
-/** The estimate_lines columns of one category: { price, available, expected }. */
+/** The estimate_lines columns of one category: { price, available, expected, partNumber }. */
 export function categoryColumns(category) {
   const p = CATEGORY_COLUMN[category];
-  return { price: `${p}_price`, available: `${p}_available`, expected: `${p}_expected_date` };
+  // Each part type has its own part number (client review, 2 Nov 2026).
+  return { price: `${p}_price`, available: `${p}_available`, expected: `${p}_expected_date`, partNumber: `${p}_part_number` };
 }
 
 /**
@@ -752,6 +778,7 @@ export function partCategory(l, category) {
   const price = unavailable ? null : priceOrNull(l[col.price]);
   return {
     option: category, price,
+    part_number: l[col.partNumber] || null,
     available: unavailable ? false : price != null ? true : null,
     expected_date: !unavailable && l[col.expected] ? String(l[col.expected]).slice(0, 10) : null,
     decided: unavailable || price != null,
@@ -939,6 +966,13 @@ function nextAction(c) {
     }
     case 'inspection_pricing':
       if (!c.estimate) {
+        // The Supervisor / Foreman's technical report comes first, once the
+        // job card is open; the advisor raises the estimate from it. An
+        // estimate raised without it is not refused (older jobs were).
+        if (c.techDone) return N('service_advisor', 'Service Advisor', 'create_estimate_from_report',
+          'Raise the estimate from the technical report: price the labour; the parts go to the Store.', 'create_estimate');
+        if (c.physical.job_card_open || !c.physical.needed) return N('supervisor_foreman', 'Supervisor / Foreman', 'technical_inspection',
+          'Carry out the technical inspection and write the technical report — each service line with its labour and parts.', 'tech_inspect');
         return N('service_advisor', 'Service Advisor', 'create_estimate', 'Carry out the technical inspection and raise the estimate with the findings.', 'create_estimate');
       }
       if (c.pricing?.unpricedParts > 0) {
@@ -992,6 +1026,26 @@ function physicalAckDetail(p, jobCardOpened) {
   if (p.status === 'draft') return ['In progress', { key: 'val.pi_in_progress' }];
   if (jobCardOpened) return ['Not recorded — the job card was opened before it was required', { key: 'val.pi_before_rule' }];
   return [null, null];
+}
+
+/** Step 4's "Technical inspection" check: [detail, detail_i18n]. */
+function techInspectionDetail(technical, estimate, counterPriced) {
+  if (technical?.status === 'completed') {
+    const name = technical.completed_by_name || '';
+    const lines = `${technical.lines} service line${technical.lines === 1 ? '' : 's'}`;
+    return [`Completed${name ? ` by ${name}` : ''} · ${lines}`, { key: 'val.tech_report_done', params: { name, n: technical.lines } }];
+  }
+  if (estimate) return [`With estimate ${estimate.estimate_number}`, { key: 'val.tech_with_estimate', params: { est: estimate.estimate_number } }];
+  if (technical) {
+    return [`In progress — ${technical.lines} service line${technical.lines === 1 ? '' : 's'} so far`, { key: 'val.tech_in_progress', params: { n: technical.lines } }];
+  }
+  if (counterPriced) return ['Not recorded — priced at the counter', { key: 'val.inspection_not_recorded' }];
+  return [null, null];
+}
+
+/** How many service lines a technical report has (technical_inspections.service_lines, JSON). */
+function countLines(v) {
+  try { const a = typeof v === 'string' ? JSON.parse(v) : v; return Array.isArray(a) ? a.length : 0; } catch { return 0; }
 }
 
 function timeByCardRunning(cards) { return cards.some(c => c.time.state === 'running'); }

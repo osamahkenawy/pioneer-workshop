@@ -12,6 +12,7 @@ import PortalRedirect from './pages/CustomerPortal/PortalRedirect';
 const WorkOrders        = lazy(() => import('./pages/WorkOrders'));
 const WorkOrderDetail   = lazy(() => import('./pages/WorkOrderDetail'));
 const VehicleInspection = lazy(() => import('./pages/VehicleInspection'));
+const TechnicalInspection = lazy(() => import('./pages/TechnicalInspection'));
 const TeamLeader = lazy(() => import('./pages/TeamLeader'));
 const FleetIntake = lazy(() => import('./pages/FleetIntake'));
 const FleetIntakeQueue = lazy(() => import('./pages/FleetIntakeQueue'));
@@ -157,6 +158,8 @@ export default function App() {
         <Route path="/work-orders" element={<Protected><WorkOrders /></Protected>} />
         <Route path="/work-orders/:id" element={<Protected><WorkOrderDetail /></Protected>} />
         <Route path="/work-orders/:id/inspection" element={<Protected><VehicleInspection /></Protected>} />
+        {/* Step 4: the Supervisor / Foreman's technical inspection; printed, it is the technical report */}
+        <Route path="/work-orders/:id/technical-inspection" element={<Protected><TechnicalInspection /></Protected>} />
         <Route path="/enquiries" element={<Protected><Enquiries /></Protected>} />
         <Route path="/customer-feedback" element={<Protected><CustomerFeedback /></Protected>} />
         <Route path="/customers" element={<Protected><Customers /></Protected>} />

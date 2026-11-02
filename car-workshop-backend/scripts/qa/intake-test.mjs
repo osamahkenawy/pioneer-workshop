@@ -58,7 +58,7 @@ try {
   const mech = (await q(`INSERT INTO mechanics (workshop_id, user_id, full_name, phone, is_active, status) VALUES (1,?,'QA Intake Technician',?,1,'available')`, [users.tech.id, phone()])).insertId;
 
   const mkCust = async (tok, body) => (await call('POST', '/customers', tok, { email: `qa-intake-${rnd(6)}@example.invalid`, phone: phone(), ...body })).json?.data;
-  const mkVeh = async (customerId, plate) => (await call('POST', '/vehicles', advisor, { customer_id: customerId, make: 'Toyota', model: 'Corolla', year: 2021, plate_number: plate, vin: vin(), mileage: 50000 })).json?.data;
+  const mkVeh = async (customerId, plate) => (await call('POST', '/vehicles', advisor, { customer_id: customerId, make: 'Toyota', model: 'Corolla', year: 2021, plate_emirate: 'Dubai', plate_number: plate, vin: vin(), mileage: 50000 })).json?.data;
   const walkA = await mkCust(advisor, { full_name: 'QA Intake Walk-in A', customer_class: 'external', customer_subcategory: 'walkin' });
   const walkB = await mkCust(advisor, { full_name: 'QA Intake Walk-in B', customer_class: 'external', customer_subcategory: 'walkin' });
   const extFleet = await mkCust(advisor, { full_name: 'QA Intake Outside Fleet', customer_class: 'external', customer_subcategory: 'fleet' });
@@ -133,10 +133,15 @@ try {
   expect('the customer signs from the link (name required) → the main job card opens, logged as signed from the link',
     noName.status === 400 && s1.status === 200 && !!jc1 && /signed by the customer from the link/.test(log1?.note || ''), `${noName.status}/${s1.status} ${log1?.note}`);
   expect('…department from the category (bodywork → body_paint), with the plate', jc1?.department === 'body_paint' && jc1?.vehicle_plate === vA.plate_number, JSON.stringify(jc1 && { department: jc1.department, plate: jc1.vehicle_plate }));
+  // The odometer may not go below the car's previous reading (client review, 2 Nov 2026) — only a manager may confirm a lower one.
   r = await create(advisor, { odometer_in: 40000 });
+  expect('second job on the same car, reading below the last one (advisor) → 400 ODOMETER_BELOW_LAST', r.status === 400 && r.json.code === 'ODOMETER_BELOW_LAST', `${r.status} ${r.json.code}`);
+  const noOdo = await create(advisor, { odometer_in: null });
+  expect('no reading with the car → 400 ODOMETER_REQUIRED', noOdo.status === 400 && noOdo.json.code === 'ODOMETER_REQUIRED', `${noOdo.status} ${noOdo.json.code}`);
+  r = await create(manager, { odometer_in: 40000 });
   const w2 = r.json.data;
   const codes = (r.json.warnings || []).map(w => w.code);
-  expect('second job on the same car: OPEN_JOB_CARD and ODOMETER_BELOW_LAST warnings', r.status === 201 && codes.includes('OPEN_JOB_CARD') && codes.includes('ODOMETER_BELOW_LAST'), codes.join(','));
+  expect('…a manager may confirm it: OPEN_JOB_CARD and ODOMETER_BELOW_LAST warnings', r.status === 201 && codes.includes('OPEN_JOB_CARD') && codes.includes('ODOMETER_BELOW_LAST'), codes.join(','));
   const pf = (await create(advisor, { customer_id: extFleet.id, vehicle_id: vF.id })).json.data;
   const pn = (await create(advisor, { customer_id: extIns.id, vehicle_id: vN.id })).json.data;
   expect('payer from the classification: outside fleet → fleet, insurer → insurance (C5j)', pf?.payer_type === 'fleet' && pn?.payer_type === 'insurance', `${pf?.payer_type} ${pn?.payer_type}`);
@@ -152,7 +157,7 @@ try {
   const w5 = r.json.data;
   expect('a manager may price an external job at the counter', r.status === 201, `${r.status} ${r.json.code || ''}`);
   // An internal customer's job card opens with the job, so this races the job card numbers too.
-  const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => create(advisor, { customer_id: internal.id, vehicle_id: vI.id, odometer_in: 70000 + i })));
+  const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => create(advisor, { customer_id: internal.id, vehicle_id: vI.id, odometer_in: 70000 })));
   const burstCards = await q('SELECT DISTINCT job_card_number FROM job_cards WHERE parent_job_card_id IS NULL AND work_order_id IN (?)', [burst.map(b => b.json.data?.id || 0)]);
   expect('12 creates at once (internal customer: job card with the job) all get a work order and a distinct job card number (no duplicate-number failures, C5g)',
     burst.every(b => b.status === 201) && burstCards.length === 12,
@@ -179,7 +184,7 @@ try {
     `${r.status} ${r.json.code} ${r.json.message || ''} / ${rc1.status}`);
   // Before that, they can change: an internal job (its job card opens with the job) …
   const vI2 = await mkVeh(internal.id, `QAIN${rnd(3)}J`);
-  const wI = (await create(advisor, { customer_id: internal.id, vehicle_id: vI.id })).json.data;
+  const wI = (await create(advisor, { customer_id: internal.id, vehicle_id: vI.id, odometer_in: 80000 })).json.data;
   cur = await get(wI.id);
   r = await put(wI.id, { vehicle_id: vI2.id, odometer_in: 52000, expected_updated_at: cur.updated_at });
   const [jcV] = await q('SELECT vehicle_id, vehicle_plate FROM job_cards WHERE work_order_id = ? AND parent_job_card_id IS NULL', [wI.id]);
@@ -196,7 +201,7 @@ try {
   const wX = (await create(advisor, { customer_id: extFleet.id, vehicle_id: vF.id })).json.data;
   const iX = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: wX.id, inspection_type: 'intake' })).json?.data;
   cur = await get(wX.id);
-  r = await put(wX.id, { vehicle_id: vF2.id, expected_updated_at: cur.updated_at });
+  r = await put(wX.id, { vehicle_id: vF2.id, odometer_in: 51000, expected_updated_at: cur.updated_at });
   const [insX] = await q('SELECT vehicle_id, plate_number, vin FROM vehicle_inspections WHERE id = ?', [iX?.id || 0]);
   expect('vehicle change with a draft inspection: the draft follows (car, plate, VIN)',
     r.status === 200 && insX?.vehicle_id === vF2.id && insX.plate_number === vF2.plate_number && insX.vin === vF2.vin, `${r.status} ${JSON.stringify(insX)}`);
@@ -270,11 +275,12 @@ try {
   expect('no VIN: the VIN check is open ("No VIN on file") and does not hold Step 2', d.steps[1].state === 'done' && chk(d, 2, 'vin')?.done === false
     && chk(d, 2, 'vin')?.detail === 'No VIN on file' && !/VIN/.test(d.next?.text || ''), `${d.steps[1].state} ${chk(d, 2, 'vin')?.detail} / next: ${d.next?.text}`);
   d = await wf(advisor, w5.id);
-  expect('external job priced by the Workshop Manager: Supervisor / WM approval ticked', chk(d, 5, 'manager_approval')?.done, chk(d, 5, 'manager_approval')?.detail);
+  // The Supervisor / WM sign-off is switched off since the client's review (2 Nov 2026): no such check.
+  expect('no Supervisor / WM approval check on Step 5 (sign-off switched off)', !chk(d, 5, 'manager_approval'), JSON.stringify(chk(d, 5, 'manager_approval') || null));
   await q("UPDATE work_order_status_logs SET changed_by = ? WHERE work_order_id = ? AND note = 'Work order created'", [users.advisor.id, w5.id]);
   d = await wf(advisor, w5.id);
-  expect('external job priced at the counter by an advisor (legacy): approval, inspection and Storekeeper pricing NOT ticked',
-    !chk(d, 5, 'manager_approval').done && !chk(d, 4, 'technical_inspection').done && !chk(d, 4, 'parts_priced').done, '');
+  expect('external job priced at the counter by an advisor (legacy): inspection and Storekeeper pricing NOT ticked',
+    !chk(d, 4, 'technical_inspection').done && !chk(d, 4, 'parts_priced').done, '');
 
   // ── C8 technician ──────────────────────────────────────────────────
   section = 'C8 technician';

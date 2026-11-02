@@ -90,6 +90,8 @@ export default function Estimates() {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState([]);
   const [counts, setCounts] = useState({});
+  // The Supervisor / Workshop Manager sign-off is off since the client's review (2 Nov 2026); the server says.
+  const [approvalRequired, setApprovalRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
   const [showNew, setShowNew] = useState(false);
@@ -122,7 +124,8 @@ export default function Estimates() {
           const res = await api.post(`/enquiries/${encodeURIComponent(enquiryId)}/prepare-quote`);
           if (!res?.success) { flash(res?.message || t('estimates.err_load_enquiry', 'Could not open that enquiry.')); return; }
           setIntakeWO(null);
-          setFromEnquiry({ id: res.data.enquiry_id, enquiry_number: res.data.enquiry_number, customer: res.data.customer, vehicle_id: res.data.vehicle_id });
+          setFromEnquiry({ id: res.data.enquiry_id, enquiry_number: res.data.enquiry_number, customer: res.data.customer, vehicle_id: res.data.vehicle_id,
+            parts_preference: res.data.parts_preference || null }); // as the customer asked at the enquiry
           setShowNew(true);
         } catch { flash(t('estimates.err_load_enquiry', 'Could not open that enquiry.')); }
       })();
@@ -156,7 +159,7 @@ export default function Estimates() {
       if (search.trim()) q.set('search', search.trim());
       const res = await api.get(`/estimates?${q}`);
       if (req !== reqRef.current) return;
-      if (res.success) { setRows(res.estimates || []); setCounts(res.counts || {}); }
+      if (res.success) { setRows(res.estimates || []); setCounts(res.counts || {}); setApprovalRequired(res.approval_required === true); }
     } catch { /* the empty state covers it */ }
     finally { if (req === reqRef.current) setLoading(false); }
   }, [view, search]);
@@ -169,7 +172,7 @@ export default function Estimates() {
   }, [counts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const open = id => setParams(id ? { id: String(id) } : {});
-  const views = VIEWS.filter(v => !v.store || canParts);
+  const views = VIEWS.filter(v => (!v.store || canParts) && (v.key !== 'needs_approval' || approvalRequired));
   const countOf = key => counts[key] ?? 0;
 
   return (
@@ -680,7 +683,7 @@ function OptionPills({ t, line, pref }) {
       {requested.map(o => (
         <span key={o.option} className={`es-opt${eff?.option === o.option ? ' es-optOn' : ''}${o.usable ? '' : ' es-optNA'}`}>
           {categoryLabel(t, o.option)} <b>{o.usable ? aed(o.price) : t('estimates.not_available_short', 'Not available')}</b>
-          {o.usable && <span className="es-optWhen"> · {whenText(t, o)}</span>}
+          {o.usable && <span className="es-optWhen"> · {whenText(t, o)}{line[partNoCol(o.option)] ? ` · P/N ${line[partNoCol(o.option)]}` : ''}</span>}
         </span>
       ))}
       {alternative && (
@@ -688,7 +691,7 @@ function OptionPills({ t, line, pref }) {
           {alternative.for
             ? t('estimates.alt_for', 'Alternative to {{cat}}', { cat: categoryLabel(t, alternative.for) })
             : t('estimates.alt_short', 'Alternative')}: {categoryLabel(t, alternative.option)} <b>{aed(alternative.price)}</b>
-          <span className="es-optWhen"> · {whenText(t, alternative)} · {alternative.approved === true ? t('estimates.alt_approved', 'approved by the customer')
+          <span className="es-optWhen"> · {whenText(t, alternative)}{line[partNoCol(alternative.option)] ? ` · P/N ${line[partNoCol(alternative.option)]}` : ''} · {alternative.approved === true ? t('estimates.alt_approved', 'approved by the customer')
             : alternative.approved === false ? t('estimates.alt_not_taken', 'not taken') : t('estimates.alt_needs_ok', 'needs the customer’s approval')}</span>
         </span>
       )}
@@ -757,13 +760,16 @@ function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
  * category is not available, an optional alternative category for the
  * customer to approve.
  */
+/** The estimate_lines column of a type's own part number (client review, 2 Nov 2026). */
+const partNoCol = c => ({ genuine: 'genuine_part_number', after_market: 'aftermarket_part_number', used: 'used_part_number' }[c]);
+
 function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
   const str = v => (v === null || v === undefined || v === '' ? '' : String(Number(v)));
   const [cats, setCats] = useState(() => Object.fromEntries(pref.map(c => {
     const col = catCols(c);
     const na = line[col.available] !== null && line[col.available] !== undefined && Number(line[col.available]) === 0;
     const date = line[col.expected] ? String(line[col.expected]).slice(0, 10) : '';
-    return [c, { avail: na ? 'no' : 'yes', price: str(line[col.price]), when: date ? 'date' : 'stock', date }];
+    return [c, { avail: na ? 'no' : 'yes', price: str(line[col.price]), when: date ? 'date' : 'stock', date, partNo: line[partNoCol(c)] || '' }];
   })));
   const others = PART_CATEGORIES.filter(c => !pref.includes(c));
   const oldAlt = line.alternative_option && others.includes(line.alternative_option) ? line.alternative_option : null;
@@ -775,9 +781,9 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
     price: oldAlt ? str(line[altCol(oldAlt).price]) : '',
     when: oldAlt && line[altCol(oldAlt).expected] ? 'date' : 'stock',
     date: oldAlt && line[altCol(oldAlt).expected] ? String(line[altCol(oldAlt).expected]).slice(0, 10) : '',
+    partNo: oldAlt ? (line[partNoCol(oldAlt)] || '') : '',
   }));
   const [qty, setQty] = useState(str(line.quantity) || '1');
-  const [partNo, setPartNo] = useState(line.part_number || '');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -786,23 +792,25 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
   const setCat = (c, patch) => setCats(prev => ({ ...prev, [c]: { ...prev[c], ...patch } }));
 
   async function save() {
-    const body = { part_number: partNo.trim() || undefined };
+    const body = {};
     for (const c of pref) {
       const s = cats[c];
       const col = catCols(c);
-      if (s.avail === 'no') { body[col.available] = false; body[col.price] = null; body[col.expected] = null; continue; }
+      if (s.avail === 'no') { body[col.available] = false; body[col.price] = null; body[col.expected] = null; body[partNoCol(c)] = null; continue; }
       if (s.price.trim() === '' || !(Number(s.price) >= 0)) {
         setErr(t('estimates.err_cat_price', 'Enter the {{cat}} price, or mark it not available.', { cat: categoryLabel(t, c) })); return;
       }
       if (s.when === 'date' && !s.date) { setErr(t('estimates.err_cat_date', 'Enter the expected delivery date for {{cat}}, or choose In stock.', { cat: categoryLabel(t, c) })); return; }
       body[col.available] = true; body[col.price] = Number(s.price); body[col.expected] = s.when === 'date' ? s.date : null;
+      body[partNoCol(c)] = s.partNo.trim() || null;
     }
     if (!(Number(qty) > 0)) { setErr(t('estimates.err_qty_store', 'The quantity must be more than zero.')); return; }
     if (Number(qty) !== Number(line.quantity)) body.quantity = Number(qty);
     if (canOffer && alt.on) {
       if (alt.price.trim() === '' || !(Number(alt.price) >= 0)) { setErr(t('estimates.err_alt_price', 'Enter the alternative’s price.')); return; }
       if (alt.when === 'date' && !alt.date) { setErr(t('estimates.err_alt_date', 'Enter the alternative’s expected delivery date, or choose In stock.')); return; }
-      body.alternative = { option: alt.option, for: unavailable.includes(alt.for) ? alt.for : unavailable[0], price: Number(alt.price), expected_date: alt.when === 'date' ? alt.date : null };
+      body.alternative = { option: alt.option, for: unavailable.includes(alt.for) ? alt.for : unavailable[0], price: Number(alt.price), expected_date: alt.when === 'date' ? alt.date : null,
+        part_number: alt.partNo.trim() || null };
     } else if (oldAlt) {
       body.alternative = null;
     }
@@ -845,6 +853,11 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
                     value={s.price} onChange={ev => setCat(c, { price: ev.target.value })} aria-label={`${label} — ${t('estimates.unit_price', 'Price (each)')}`} />
                 </div>
                 <DeliveryField t={t} label={label} value={s.when} date={s.date} onWhen={v => setCat(c, { when: v })} onDate={v => setCat(c, { date: v })} />
+                <div className="es-priceField">
+                  <span>{t('estimates.part_no_type', 'Part no.')}</span>
+                  <input className="es-input es-inputSm es-inputPn" value={s.partNo} maxLength={100} dir="ltr"
+                    onChange={ev => setCat(c, { partNo: ev.target.value })} aria-label={`${label} — ${t('estimates.part_no_type', 'Part no.')}`} />
+                </div>
               </>
             )}
           </div>
@@ -855,10 +868,6 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
         <div className="es-priceField">
           <span>{t('estimates.qty_store', 'Quantity')}</span>
           <input className="es-input es-inputSm es-inputQty" type="number" min="0" step="1" inputMode="decimal" value={qty} onChange={ev => setQty(ev.target.value)} />
-        </div>
-        <div className="es-priceField">
-          <span>{t('estimates.part_no', 'Part no.')}</span>
-          <input className="es-input es-inputSm es-inputPn" value={partNo} onChange={ev => setPartNo(ev.target.value)} />
         </div>
       </div>
 
@@ -891,6 +900,11 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
               </div>
               <DeliveryField t={t} label={t('estimates.alt_category', 'Alternative')} value={alt.when} date={alt.date}
                 onWhen={v => setAlt(a => ({ ...a, when: v }))} onDate={v => setAlt(a => ({ ...a, date: v }))} />
+              <div className="es-priceField">
+                <span>{t('estimates.part_no_type', 'Part no.')}</span>
+                <input className="es-input es-inputSm es-inputPn" value={alt.partNo} maxLength={100} dir="ltr"
+                  onChange={ev => setAlt(a => ({ ...a, partNo: ev.target.value }))} aria-label={`${t('estimates.alt_category', 'Alternative')} — ${t('estimates.part_no_type', 'Part no.')}`} />
+              </div>
             </div>
           )}
         </div>

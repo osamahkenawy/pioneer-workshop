@@ -98,8 +98,8 @@ export default function CustomerDashboard() {
                   <p className="cp-action-title">{t('portal.home.sign_title', 'Sign your vehicle inspection')}</p>
                   <p className="cp-action-text">
                     {s.type === 'joint'
-                      ? t('portal.home.sign_text_handover', 'The handover inspection of your {{vehicle}} (job card {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })
-                      : t('portal.home.sign_text_dropoff', 'The drop-off inspection of your {{vehicle}} (job card {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })}
+                      ? t('portal.home.sign_text_handover_wo', 'The handover inspection of your {{vehicle}} (work order {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })
+                      : t('portal.home.sign_text_dropoff_wo', 'The drop-off inspection of your {{vehicle}} (work order {{job}}) is ready. Check it and sign.', { vehicle: vehicleText(s.vehicle) || t('serviceStatus.your_car', 'Your car'), job: s.work_order_number })}
                   </p>
                   <div className="cp-btn-row">
                     <Link className="cp-btn cp-btn-primary" to={`${PORTAL.job(s.work_order_id)}?sign=${s.id}#inspection-${s.id}`}>

@@ -10,8 +10,14 @@
  *
  *  2. Internal sign-off on an estimate for an EXTERNAL customer before it is
  *     sent: "Supervisor or Workshop Manager approves it first". Internal
- *     (fleet / asset) customers' estimates go straight out.
+ *     (fleet / asset) customers' estimates go straight out. Switched OFF by
+ *     the client's review (2 Nov 2026: "once the parts estimation is
+ *     submitted there is no need for any approval") — ESTIMATE_APPROVAL_REQUIRED
+ *     below; set ESTIMATE_APPROVAL_REQUIRED=true in the API's .env to bring it back.
  */
+
+/** Process step 5's Supervisor / Workshop Manager sign-off of external estimates (off unless the .env turns it on). */
+export const ESTIMATE_APPROVAL_REQUIRED = String(process.env.ESTIMATE_APPROVAL_REQUIRED || '').toLowerCase() === 'true';
 import { query, execute } from './database.js';
 
 // 'estimate' is written only by the estimate conversion, never by hand.

@@ -1,9 +1,11 @@
 /**
  * Car damage diagram — the clickable part of the Vehicle Inspection Form.
  *
- * Five photographic views (top, both sides, front, rear). Pick a damage code
- * from the legend, click anywhere on the car, and a coloured marker is dropped
- * on the spot.
+ * Five photographic views (top, both sides, front, rear). Pick a damage type
+ * (the staff form's drop-down), click anywhere on the car, and a coloured
+ * marker with its code is dropped on the spot. There is no legend: the
+ * selected marker shows its damage name beside it, and the pages list every
+ * marker by name under the diagram.
  *
  * Marker coordinates are stored NORMALISED (x/y between 0 and 1). New markers
  * carry coord: 'img' and are relative to the car picture itself, which is
@@ -24,7 +26,7 @@ import {
 } from '../lib/inspectionMarks';
 import './CarDamageDiagram.css';
 
-/* Damage legend, from the printed walk-around sheet. Two deliberate fixes:
+/* Damage types (code → name), from the printed walk-around sheet. Two deliberate fixes:
    the paper form used "GC" for BOTH Glass Chip and Gouges/Crease, which makes
    a marker ambiguous once it's on the diagram — Gouges/Crease is "GO" here.
    "Pant Chip" on the sheet is a typo for Paint Chip. English defaults; the
@@ -88,8 +90,8 @@ const VIEWS = [
 
 /**
  * @param {Array}   marks          [{id, view, code, x, y, coord?, note}]
- * @param {string}  activeCode     currently selected legend code ('' = none)
- * @param {string}  selectedMarkId highlighted marker
+ * @param {string}  activeCode     the damage type being placed ('' = none)
+ * @param {string}  selectedMarkId highlighted marker; it shows its damage name
  * @param {Func}    onAddMark      (view, x, y, coord) — x/y relative to the car
  *                                 picture, coord is 'img'. Omit to make the
  *                                 diagram read-only.
@@ -114,6 +116,11 @@ export default function CarDamageDiagram({
     onAddMark(view.key, x, y, IMAGE_COORD);
   };
 
+  // The selected marker's name tag leans away from the nearer side of the
+  // picture (physical left / right, as the markers) and drops below the
+  // marker near the top, so the panel does not cut it off.
+  const tagClass = (m) => `cdd-tag${m.x < 0.3 ? ' cdd-tag-near-left' : m.x > 0.7 ? ' cdd-tag-near-right' : ''}${m.y < 0.2 ? ' cdd-tag-below' : ''}`;
+
   const renderMark = (m) => {
     const on = m.id === selectedMarkId;
     const name = damageLabel(t, m.code);
@@ -130,6 +137,7 @@ export default function CarDamageDiagram({
         style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: DAMAGE_COLORS[m.code] || '#dc2626' }}
       >
         {m.code}
+        {on && <span className={tagClass(m)} aria-hidden="true">{name}</span>}
       </button>
     );
   };

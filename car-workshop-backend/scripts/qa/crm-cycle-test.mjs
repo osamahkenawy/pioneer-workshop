@@ -194,11 +194,13 @@ try {
     && e4Wo.enq_wo === back.json.work_order.id && e4Wo.vehicle_id === vehRow.vehicle_id && e4Wo.status === 'pending', JSON.stringify(back.json?.work_order));
   const [dueRem] = await q("SELECT id FROM service_reminders WHERE id = (SELECT MAX(id) FROM service_reminders)");
   const r5 = await q("INSERT INTO service_reminders (workshop_id, customer_id, vehicle_id, service_type, due_at, status, send_channel) VALUES (1, ?, ?, 'tire_service', CURDATE(), 'due', 'sms')", [custId, vehId]);
-  await q("UPDATE vehicles SET vin = 'TSTCRM10000000001' WHERE id = ?", [vehId]); // new job cards need the VIN
+  // New work orders need the car's VIN, emirate and model year (client review, 2 Nov 2026).
+  await q("UPDATE vehicles SET vin = 'TSTCRM10000000001', plate_emirate = 'Dubai', year = 2020 WHERE id = ?", [vehId]);
   const newWo = await call('POST', '/work-orders', advisor, { customer_id: custId, vehicle_id: vehId, customer_name: 'QA CRM Lead', customer_phone: phone, description: 'Tyres', odometer_in: 31000, payment_method: 'cash', items: [] });
   let r5row = null;
   for (let i = 0; i < 20; i++) { [r5row] = await q('SELECT status, converted_work_order_id FROM service_reminders WHERE id = ?', [r5.insertId]); if (r5row.status === 'booked') break; await new Promise(r => setTimeout(r, 150)); }
-  expect('a new job card for the car marks its open reminder booked', newWo.status === 201 && r5row.status === 'booked' && r5row.converted_work_order_id === newWo.json?.data?.id, r5row.status);
+  expect('a new job card for the car marks its open reminder booked', newWo.status === 201 && r5row.status === 'booked' && r5row.converted_work_order_id === newWo.json?.data?.id,
+    `${r5row.status} (work order ${newWo.status} ${newWo.json?.code || ''})`);
   void dueRem;
 
   // ── After the visit: an unhappy customer ──────────────────────────

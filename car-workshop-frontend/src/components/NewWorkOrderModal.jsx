@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
+import { VEHICLE_TYPES, PART_CATEGORIES, prefList } from '../lib/intakeOptions';
 import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
 import './NewWorkOrderModal.css';
 
@@ -22,27 +23,6 @@ import './NewWorkOrderModal.css';
  * changed, PUT /work-orders/:id/items). It never assigns a technician: that
  * is the Team Leader's, in process Step 6.
  */
-
-const WORK_ORDER_TYPES = [
-  { value: 'standard',  label: 'Standard' },
-  { value: 'express',   label: 'Express' },
-  { value: 'same_day',  label: 'Same day' },
-  { value: 'scheduled', label: 'Scheduled' },
-  { value: 'warranty',  label: 'Warranty' },
-];
-
-const SERVICE_CATEGORIES = [
-  { value: 'general_maintenance', label: 'General maintenance' },
-  { value: 'oil_change',          label: 'Oil change' },
-  { value: 'brake_repair',        label: 'Brake repair' },
-  { value: 'diagnostic',          label: 'Diagnostic' },
-  { value: 'bodywork',            label: 'Bodywork' },
-  { value: 'tire_service',        label: 'Tire service' },
-  { value: 'engine_repair',       label: 'Engine repair' },
-  { value: 'transmission',        label: 'Transmission' },
-  { value: 'electrical',          label: 'Electrical' },
-  { value: 'other',               label: 'Other' },
-];
 
 const PAYMENT_METHODS = [
   { value: 'cash',    label: 'Cash' },
@@ -107,8 +87,8 @@ const STEPS = [
   { n: 1, title: 'Customer',       process: 'Process step 1 · Classification',      icon: User },
   { n: 2, title: 'Vehicle',        process: 'Process step 2 · Vehicle information', icon: Car },
   { n: 3, title: 'Reported issue', process: 'Process step 2 · Reported issue',      icon: Wrench },
-  { n: 4, title: 'Pricing',        process: 'Counter pricing on this job card',     icon: Coins },
-  { n: 5, title: 'Review & open',  process: 'Process step 3 · Job card',            icon: PageSearch },
+  { n: 4, title: 'Pricing',        process: 'Counter pricing on this work order',  icon: Coins },
+  { n: 5, title: 'Review & open',  process: 'Process steps 1–2 · Work order',       icon: PageSearch },
 ];
 
 const ORANGE = '#f97316';
@@ -118,9 +98,10 @@ const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ra
 
 const EMPTY_VEHICLE = {
   make: '', model: '', year: '', plate_number: '', plate_code: '', plate_emirate: '',
-  vin: '', engine_no: '', fleet_code: '', color: '',
+  vin: '', engine_no: '', fleet_code: '', color: '', vehicle_type: '',
   fuel_type: 'petrol', transmission: 'automatic',
 };
+const EMPTY_DETAILS_FIX = { plate_number: '', plate_emirate: '', year: '' };
 
 let itemSeq = 0;
 const newItem = (over = {}) => ({ key: `i${++itemSeq}`, name: '', item_type: '', quantity: '1', unit_price: '', notes: '', ...over });
@@ -379,6 +360,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   // mandatory VIN unusable — instead the wizard asks, and saves it back onto
   // the vehicle on submit, one car at a time as each one comes in.
   const [vinFix, setVinFix] = useState('');
+  // A car on file without its plate, emirate or model year: asked for once and saved onto it.
+  const [detailsFix, setDetailsFix] = useState(EMPTY_DETAILS_FIX);
   // Mileage at THIS visit — not the vehicle's stored mileage, which is only
   // "last known reading". Mandatory, never pre-filled.
   const [odometerIn, setOdometerIn] = useState('');
@@ -394,6 +377,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   const [serviceCategory, setServiceCategory] = useState('general_maintenance');
   const [description, setDescription] = useState('');
   const [specialInstructions, setSpecialInstructions] = useState('');
+  // The parts the customer accepts (client review, 2 Nov 2026): any combination, at least one.
+  const [partsPref, setPartsPref] = useState([]);
   const [scheduledAt, setScheduledAt] = useState('');
 
   // ── Page 4: counter pricing (internal accounts) ──
@@ -512,6 +497,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           setIntakeChannel(wo.intake_channel || 'advisor');
           setWorkOrderType(wo.work_order_type || 'standard');
           setServiceCategory(wo.service_category || 'general_maintenance');
+          setPartsPref(prefList(wo.parts_preference));
           setDescription(wo.description || '');
           setSpecialInstructions(wo.special_instructions || '');
           setScheduledAt(wo.scheduled_at ? String(wo.scheduled_at).slice(0, 16) : '');
@@ -718,6 +704,13 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   const vehicleChanged = editMode && String(editInfo?.origVehicle?.id || '') !== vehicleId;
   const enteringVehicle = customerMode === 'new' || (customerMode === 'existing' && addingVehicle);
   const pickedNeedsVin = !enteringVehicle && !!pickedVehicle && !real(pickedVehicle.vin);
+  // Required on the car booked in: plate, emirate and model year (asked only
+  // when the car is being booked in — an unchanged car on an edit is left be).
+  const pickedMissing = (!enteringVehicle && pickedVehicle && (!editMode || vehicleChanged))
+    ? { plate_number: !real(pickedVehicle.plate_number), plate_emirate: !real(pickedVehicle.plate_emirate), year: !pickedVehicle.year }
+    : {};
+  const pickedNeedsDetails = Object.values(pickedMissing).some(Boolean);
+  useEffect(() => { setDetailsFix(EMPTY_DETAILS_FIX); }, [pickedVehicle?.id]);
   const lastKm = (!enteringVehicle && pickedVehicle?.mileage != null && pickedVehicle.mileage !== '') ? Number(pickedVehicle.mileage) : null;
   const odoNorm = normOdo(odometerIn);
   // In Edit the vehicle's stored mileage may already be this visit's (or a
@@ -961,12 +954,14 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         if (!v.make.trim()) { f.push('make'); missing.push('Make'); }
         if (!v.model.trim()) { f.push('model'); missing.push('Model'); }
         if (!v.plate_number.trim()) { f.push('plate'); missing.push('Plate number'); }
+        if (!v.plate_emirate) { f.push('emirate'); missing.push('Emirate'); }
+        if (!v.year) { f.push('year'); missing.push('Year'); }
         if (!normVin(v.vin)) { f.push('vin'); missing.push('VIN / chassis number'); }
         if (missing.length) return { msg: `Missing: ${missing.join(', ')}.`, fields: f };
         if (v.make.trim().toLowerCase() === 'other') return { msg: 'Type the actual make (e.g. JAC or Exeed) rather than "Other".', fields: ['make'] };
         if (vinBad(v.vin)) return { msg: VIN_MSG, fields: ['vin'] };
-        if (v.year && (!/^\d{4}$/.test(v.year) || Number(v.year) < 1950 || Number(v.year) > THIS_YEAR + 1)) {
-          return { msg: `Year must be between 1950 and ${THIS_YEAR + 1}, or left empty.`, fields: ['year'] };
+        if (!/^\d{4}$/.test(v.year) || Number(v.year) < 1950 || Number(v.year) > THIS_YEAR + 1) {
+          return { msg: `Year must be between 1950 and ${THIS_YEAR + 1}.`, fields: ['year'] };
         }
       } else if (customerMode === 'existing') {
         if (!pickedVehicle) return { msg: 'Select the vehicle, or add a new one.', fields: ['vehicle'] };
@@ -982,13 +977,27 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           if (!normVin(vinFix)) { f.push('vinFix'); missing.push('VIN / chassis number'); }
           else if (vinBad(vinFix)) return { msg: VIN_MSG, fields: ['vinFix'] };
         }
+        if (pickedMissing.plate_number && !detailsFix.plate_number.trim()) { f.push('fixPlate'); missing.push('Plate number'); }
+        if (pickedMissing.plate_emirate && !detailsFix.plate_emirate) { f.push('fixEmirate'); missing.push('Emirate'); }
+        if (pickedMissing.year) {
+          if (!detailsFix.year) { f.push('fixYear'); missing.push('Year'); }
+          else if (!/^\d{4}$/.test(detailsFix.year) || Number(detailsFix.year) < 1950 || Number(detailsFix.year) > THIS_YEAR + 1) {
+            return { msg: `Year must be between 1950 and ${THIS_YEAR + 1}.`, fields: ['fixYear'] };
+          }
+        }
       }
       if (missing.length) return { msg: `Missing: ${missing.join(', ')}.`, fields: f };
-      // The odometer reading is optional; when typed it must make sense.
+      // The odometer reading is required with the car (client review,
+      // 2 Nov 2026) and never below the car's previous reading — only a
+      // manager may confirm a lower one (a replaced cluster, an old typo).
       const odo = normOdo(odometerIn);
-      if (!odo) return null;
+      const hasCar = enteringVehicle || !!pickedVehicle;
+      if (!odo) return hasCar ? { msg: 'Enter the odometer reading — read it from the dashboard.', fields: ['odometer'] } : null;
       if (!/^\d+$/.test(odo)) return { msg: 'The odometer reading must be a whole number of kilometres — digits only, no decimals or signs.', fields: ['odometer'] };
       if (Number(odo) > 9999999) return { msg: 'That odometer reading looks wrong — check the dashboard.', fields: ['odometer'] };
+      if (odoLow && !isManagerUser(user)) {
+        return { msg: `The reading is lower than the car's previous reading (${fmtKm(lastKm)}). Check the dashboard — it must be the same or higher.`, fields: ['odometer'] };
+      }
       if (odoLow && !odoLowAck) {
         return { msg: `The reading is lower than the last one on file (${fmtKm(lastKm)}). Check the dashboard; if it is right, tick the box to confirm.`, fields: ['odoAck'] };
       }
@@ -997,7 +1006,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
 
     /* ── 3. What is wrong with it ── */
     if (s === 3) {
-      if (!description.trim()) return { msg: 'Describe the customer complaint or the work requested.', fields: ['description'] };
+      if (!description.trim()) return { msg: 'Write the customer complaint.', fields: ['description'] };
+      if (!partsPref.length) return { msg: 'Ask the customer which parts they accept: Genuine, After-Market and/or Used (at least one).', fields: ['partsPref'] };
       if (description.length > 5000) return { msg: 'The complaint is longer than 5,000 characters — shorten it.', fields: ['description'] };
       if (specialInstructions.length > 5000) return { msg: 'The notes are longer than 5,000 characters — shorten them.', fields: ['notes'] };
       if (channelEditable && !INTAKE_CHANNELS.some(c => c.value === intakeChannel)) return { msg: 'Choose how the request was received.', fields: ['channel'] };
@@ -1143,6 +1153,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           plate_number: v.plate_number.trim().replace(/\s+/g, ' ').toUpperCase(),
           plate_code: v.plate_code.trim().toUpperCase() || null,
           plate_emirate: v.plate_emirate || null,
+          vehicle_type: v.vehicle_type || null,
           vin: normVin(v.vin),
           engine_no: v.engine_no.trim() || null, fleet_code: v.fleet_code.trim() || null, color: v.color.trim() || null,
           fuel_type: v.fuel_type, transmission: v.transmission,
@@ -1171,8 +1182,11 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
             // so this is a question, not a block.
             return stop(res.message || 'This plate is already on file.', { notice: { kind: 'plate', existing: res.existing || res.data || {}, sameCustomer: String(dupCust) === String(custId) } });
           }
-          const field = { VIN_INVALID: 'vin', VIN_REQUIRED: 'vin', YEAR_INVALID: 'year', MILEAGE_INVALID: 'odometer' }[res.code];
-          return stop(res.message || 'Could not save the vehicle.', { toStep: 2, fields: field ? [field] : [] });
+          const field = { VIN_INVALID: 'vin', VIN_REQUIRED: 'vin', YEAR_INVALID: 'year', MILEAGE_INVALID: 'odometer', EMIRATE_INVALID: 'emirate' }[res.code];
+          // The vehicles API names the missing details by body key; the form's fields are named for the page.
+          const missingFields = res.code === 'VEHICLE_DETAILS_REQUIRED'
+            ? (res.fields || []).map(k => ({ plate_number: 'plate', plate_emirate: 'emirate', year: 'year', vin: 'vin' }[k] || k)) : [];
+          return stop(res.message || 'Could not save the vehicle.', { toStep: 2, fields: field ? [field] : missingFields });
         }
         const created = res.data;
         vId = created.id;
@@ -1194,8 +1208,24 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         setPickedVehicle(pv => (pv && String(pv.id) === String(vId) ? { ...pv, vin } : pv));
         setVinFix('');
       }
+      // 4b. The same for a missing plate, emirate or model year.
+      if (vId && pickedNeedsDetails) {
+        const fix = {};
+        if (pickedMissing.plate_number) fix.plate_number = detailsFix.plate_number.trim().replace(/\s+/g, ' ').toUpperCase();
+        if (pickedMissing.plate_emirate) fix.plate_emirate = detailsFix.plate_emirate;
+        if (pickedMissing.year) fix.year = Number(detailsFix.year);
+        let res = await api.put(`/vehicles/${vId}`, fix);
+        // A plate, unlike a VIN, can legitimately move to another car: a question, not a block.
+        if (!res.success && res.code === 'PLATE_DUPLICATE'
+          && window.confirm(`${res.message || 'This plate is already on file for another vehicle.'}\n\nIs this a different car? OK saves the plate anyway.`)) {
+          res = await api.put(`/vehicles/${vId}`, { ...fix, confirm_duplicate_plate: true });
+        }
+        if (!res.success) return stop(res.message || 'Could not save the details onto the vehicle.', { toStep: 2, fields: ['fixPlate', 'fixEmirate', 'fixYear'] });
+        setPickedVehicle(pv => (pv && String(pv.id) === String(vId) ? { ...pv, ...fix } : pv));
+        setDetailsFix(EMPTY_DETAILS_FIX);
+      }
 
-      const odometer = normOdo(odometerIn) ? Number(normOdo(odometerIn)) : null; // optional
+      const odometer = normOdo(odometerIn) ? Number(normOdo(odometerIn)) : null; // required with a car (checked above)
       const counterPayload = counterAllowed ? {
         service_fee: totals.fee,
         discount: totals.disc,
@@ -1225,6 +1255,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           description: description.trim(),
           special_instructions: specialInstructions.trim() || null,
           odometer_in: odometer,
+          parts_preference: partsPref,
           payment_method: paymentMethod,
           ...(channelEditable ? { intake_channel: intakeChannel } : {}),
           ...(counterAllowed ? { service_fee: totals.fee, discount: totals.disc, cash_amount: totals.itemsTotal } : {}),
@@ -1256,6 +1287,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         special_instructions: specialInstructions.trim() || null,
         scheduled_at: scheduledAt || null,
         odometer_in: odometer,
+        parts_preference: partsPref,
         intake_channel: intakeChannel,
         payment_method: paymentMethod,
         ...(approvalOffered && approvalChannel ? { customer_approval_channel: approvalChannel } : {}),
@@ -1267,6 +1299,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         if (res.code === 'VEHICLE_NOT_CUSTOMERS') { setPickedVehicle(null); return stop(res.message || 'That vehicle is not on file for this customer — select one of theirs.', { toStep: 2, fields: ['vehicle'] }); }
         if (res.code === 'PRICE_ON_ESTIMATE') return stop(res.message || 'This customer\'s job is priced on the estimate after the inspection.', { toStep: 4 });
         if (res.code === 'VIN_REQUIRED') return stop(res.message || 'The vehicle needs a VIN.', { toStep: 2, fields: pickedNeedsVin ? ['vinFix'] : [] });
+        if (['ODOMETER_REQUIRED', 'ODOMETER_BELOW_LAST'].includes(res.code)) return stop(res.message, { toStep: 2, fields: ['odometer'] });
+        if (res.code === 'VEHICLE_DETAILS_REQUIRED') return stop(res.message, { toStep: 2 });
         // Anything else: the customer and vehicle (if new) are already saved
         // and selected, so pressing Create again does not duplicate them.
         return stop(res.message || 'Could not create the job card. Press Create to try again.');
@@ -1885,6 +1919,41 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                         {vinHint(vinFix) && <div style={st.softWarn}>{vinHint(vinFix)}</div>}
                       </div>
                     )}
+
+                    {pickedNeedsDetails && (
+                      <div style={st.vinPrompt}>
+                        <div style={st.vinPromptTitle}>
+                          <WarningCircle width={15} height={15} style={{ verticalAlign: -2, marginInlineEnd: 6 }} />
+                          This vehicle's details are incomplete <span style={st.req}>*</span>
+                        </div>
+                        <div style={st.vinPromptBody}>
+                          The plate number, emirate and model year are required. They are saved onto the vehicle, so they are only asked for once.
+                        </div>
+                        <div className="nwo-grid2" style={{ marginTop: 8 }}>
+                          {pickedMissing.plate_number && (
+                            <Field label="Plate number" required>
+                              <input style={{ ...st.input, textTransform: 'uppercase' }} className={badCls('fixPlate')} data-field="fixPlate" dir="ltr" maxLength={20}
+                                value={detailsFix.plate_number} onChange={e => setDetailsFix(d => ({ ...d, plate_number: e.target.value }))} placeholder="87345" />
+                            </Field>
+                          )}
+                          {pickedMissing.plate_emirate && (
+                            <Field label="Emirate" required>
+                              <select style={st.input} className={badCls('fixEmirate')} data-field="fixEmirate"
+                                value={detailsFix.plate_emirate} onChange={e => setDetailsFix(d => ({ ...d, plate_emirate: e.target.value }))}>
+                                <option value="">Select emirate…</option>
+                                {EMIRATES.map(em => <option key={em} value={em}>{em}</option>)}
+                              </select>
+                            </Field>
+                          )}
+                          {pickedMissing.year && (
+                            <Field label="Year" required>
+                              <input style={st.input} className={badCls('fixYear')} data-field="fixYear" inputMode="numeric" dir="ltr" maxLength={4}
+                                value={detailsFix.year} onChange={e => setDetailsFix(d => ({ ...d, year: toLatinDigits(e.target.value).replace(/\s/g, '') }))} placeholder="2022" />
+                            </Field>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
 
@@ -1892,17 +1961,17 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                   <div style={st.openJobNote}>
                     <InfoCircle width={15} height={15} style={{ flexShrink: 0, marginTop: 1 }} />
                     <span>
-                      This car already has an open job card: {openJobs.slice(0, 3).map(w => `${w.work_order_number} (${String(w.status).replace(/_/g, ' ')})`).join(', ')}.
+                      This car already has an open work order: {openJobs.slice(0, 3).map(w => `${w.work_order_number} (${String(w.status).replace(/_/g, ' ')})`).join(', ')}.
                       Open another one only if this is a separate visit.
                     </span>
                   </div>
                 )}
 
                 <div style={{ ...st.blockLabel, marginTop: 22 }}>
-                  <label htmlFor="nwo-odometer">Odometer reading <span style={st.optional}>(optional)</span></label>
+                  <label htmlFor="nwo-odometer">Odometer reading <span style={st.req} aria-hidden="true">*</span></label>
                 </div>
                 <div style={st.blockHint}>
-                  What the dashboard reads today.
+                  What the dashboard reads today — the same as or higher than the car's previous reading.
                   {lastKm != null && <> Last recorded for this car: <bdi dir="ltr">{fmtKm(lastKm)}</bdi>.</>}
                 </div>
                 <div style={st.mileageRow}>
@@ -1913,11 +1982,11 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     placeholder={lastKm != null ? `Last: ${lastKm}` : 'e.g. 45320'} />
                   <span style={st.mileageUnit}>KM</span>
                 </div>
-                {odoLow && (
+                {odoLow && isManagerUser(user) && (
                   <label style={{ ...st.odoWarn, ...(bad('odoAck') ? { borderColor: '#ef4444' } : {}) }}>
                     <input type="checkbox" checked={odoLowAck} data-field="odoAck" onChange={e => setOdoLowAck(e.target.checked)} style={{ marginTop: 2 }} />
                     <span>
-                      This is lower than the last recorded reading (<bdi dir="ltr">{fmtKm(lastKm)}</bdi>). I have checked the dashboard — the reading is right.
+                      This is lower than the last recorded reading (<bdi dir="ltr">{fmtKm(lastKm)}</bdi>). I have checked the dashboard — the reading is right (managers only).
                     </span>
                   </label>
                 )}
@@ -1988,27 +2057,36 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     </select>
                   )}
                 </Field>
-                <Field label="Service category">
-                  <select style={st.input} value={serviceCategory} onChange={e => setServiceCategory(e.target.value)}>
-                    {SERVICE_CATEGORIES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </Field>
               </div>
-              <div className="nwo-grid2">
-                <Field label="Job type">
-                  <select style={st.input} value={workOrderType} onChange={e => setWorkOrderType(e.target.value)}>
-                    {WORK_ORDER_TYPES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </Field>
-              </div>
-              <Field label="Customer complaint / work requested" required
-                hint={`${description.length.toLocaleString('en-US')} / 5,000`}>
+              {/* Job type and service category left this form (client review,
+                  2 Nov 2026): the job types are ticked at Step 4, once the car
+                  has been inspected. */}
+              <Field label="Customer complaint" required
+                hint={`In the customer's words — any detail. ${description.length.toLocaleString('en-US')} / 5,000`}>
                 <textarea style={{ ...st.input, minHeight: 96, resize: 'vertical' }} className={badCls('description')} data-field="description"
                   maxLength={5000} aria-invalid={bad('description') || undefined}
                   value={description} onChange={e => setDescription(e.target.value)}
                   placeholder="e.g. Car pulls to the left when braking; grinding noise from the front wheels." />
               </Field>
-              <Field label="Notes for the technician" hint={`${specialInstructions.length.toLocaleString('en-US')} / 5,000`}>
+              <div style={st.field} data-field="partsPref">
+                <span style={st.fieldLabel}>Parts the customer accepts<span style={st.req} aria-hidden="true"> *</span></span>
+                <div role="group" aria-label="Parts the customer accepts" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {PART_CATEGORIES.map(c => {
+                    const on = partsPref.includes(c.value);
+                    return (
+                      <label key={c.value} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, cursor: 'pointer',
+                        border: `1.5px solid ${on ? '#ea580c' : bad('partsPref') ? '#ef4444' : '#e2e8f0'}`, background: on ? '#fff7ed' : '#fff',
+                        fontWeight: 600, fontSize: 13.5, color: on ? '#c2410c' : '#334155' }}>
+                        <input type="checkbox" checked={on}
+                          onChange={e => setPartsPref(prev => prefList(e.target.checked ? [...prev, c.value] : prev.filter(x => x !== c.value)))} />
+                        {c.label}
+                      </label>
+                    );
+                  })}
+                </div>
+                <span style={st.fieldHint}>Ask the customer: genuine only, after-market only, used only, or any combination. The estimate offers only these.</span>
+              </div>
+              <Field label="Note for workshop" hint={`${specialInstructions.length.toLocaleString('en-US')} / 5,000`}>
                 <textarea style={{ ...st.input, minHeight: 64, resize: 'vertical' }} className={badCls('notes')} data-field="notes"
                   maxLength={5000} value={specialInstructions} onChange={e => setSpecialInstructions(e.target.value)}
                   placeholder="Internal notes, parts to check, warranty details…" />
@@ -2154,10 +2232,10 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                 <ReviewRow icon={Car} label="Vehicle" value={reviewVehicle ? <VehicleLine v={reviewVehicle} /> : '—'} />
                 <ReviewRow icon={DashboardSpeed} label="Odometer" value={/^\d+$/.test(odoNorm) ? <bdi dir="ltr">{fmtKm(odoNorm)}</bdi> : '—'} />
                 <ReviewRow icon={Antenna} label="Received via" value={CHANNEL_LABELS[intakeChannel] || intakeChannel} />
-                <ReviewRow icon={Wrench} label="Service"
-                  value={`${SERVICE_CATEGORIES.find(s => s.value === serviceCategory)?.label || serviceCategory} · ${WORK_ORDER_TYPES.find(w => w.value === workOrderType)?.label || workOrderType}`} />
-                <ReviewRow icon={Notes} label="Reported issue" value={description.trim() || '—'} pre />
-                {specialInstructions.trim() && <ReviewRow icon={Notes} label="Notes for the technician" value={specialInstructions.trim()} pre />}
+                <ReviewRow icon={Notes} label="Customer complaint" value={description.trim() || '—'} pre />
+                <ReviewRow icon={Wrench} label="Parts accepted"
+                  value={partsPref.length ? PART_CATEGORIES.filter(c => partsPref.includes(c.value)).map(c => c.label).join(' · ') : '—'} />
+                {specialInstructions.trim() && <ReviewRow icon={Notes} label="Note for workshop" value={specialInstructions.trim()} pre />}
                 {scheduledAt && <ReviewRow icon={Calendar} label="Scheduled" value={new Date(scheduledAt).toLocaleString()} />}
                 <ReviewRow icon={Coins} label="Pricing" value={counterAllowed
                   ? (hasCounterLines || totals.fee > 0
@@ -2216,7 +2294,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                 </button>
               : !closedJob && (
                 <button type="button" style={{ ...st.primaryBtn, opacity: submitting ? 0.7 : 1 }} disabled={submitting} onClick={submit}>
-                  {submitting ? (editMode ? 'Saving…' : 'Creating…') : (editMode ? 'Save changes' : jobClass === 'internal' ? 'Create job card' : 'Create work order')}
+                  {submitting ? (editMode ? 'Saving…' : 'Creating…') : (editMode ? 'Save changes' : 'Create work order')}
                 </button>
               )}
           </div>
@@ -2351,15 +2429,23 @@ function VehicleFormFields({ newVehicle, setNewVehicle, badCls, bad }) {
         </Field>
       </div>
       <div className="nwo-grid2">
-        <Field label="Emirate">
-          <select style={st.input} value={newVehicle.plate_emirate} onChange={e => set('plate_emirate', e.target.value)}>
+        <Field label="Emirate" required>
+          <select style={st.input} className={badCls('emirate')} data-field="emirate" value={newVehicle.plate_emirate} onChange={e => set('plate_emirate', e.target.value)}>
             <option value="">Select emirate…</option>
             {EMIRATES.map(em => <option key={em} value={em}>{em}</option>)}
           </select>
         </Field>
-        <Field label="Year">
+        <Field label="Year" required>
           <input style={st.input} className={badCls('year')} data-field="year" inputMode="numeric" dir="ltr" maxLength={4}
             value={newVehicle.year} onChange={e => set('year', toLatinDigits(e.target.value).replace(/\s/g, ''))} placeholder="2022" />
+        </Field>
+      </div>
+      <div className="nwo-grid2">
+        <Field label="Vehicle type">
+          <select style={st.input} value={newVehicle.vehicle_type || ''} onChange={e => set('vehicle_type', e.target.value)}>
+            <option value="">Select type…</option>
+            {VEHICLE_TYPES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
         </Field>
       </div>
       <div className="nwo-grid2">

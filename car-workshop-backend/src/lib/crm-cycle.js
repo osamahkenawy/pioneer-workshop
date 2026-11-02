@@ -207,8 +207,9 @@ const ymd = () => { const d = new Date(); return `${d.getFullYear()}${String(d.g
  * back in `info.conflict`), and a 'pending' work order linked both ways,
  * with the source in intake_channel (`channel`, else from the contact
  * method) and the Step 1 classification snapshot. The reported issue is
- * `complaint`, else the enquiry's description — it may still be empty, and
- * Step 2 then asks for it.
+ * `complaint`, else the enquiry's description (the customer complaint, line
+ * breaks kept) — it may still be empty, and Step 2 then asks for it. The
+ * parts the customer accepts (parts_preference) are copied from the enquiry.
  *
  * No job card here: after the commit, announceEnquiryWorkOrder() opens it
  * when the rule allows (internal customer) and tells the Service Advisors.
@@ -247,13 +248,15 @@ export async function workOrderForEnquiry(enq, { conn = null, userId = null, cha
       const ins = await q(
         `INSERT INTO work_orders
            (workshop_id, work_order_number, customer_id, vehicle_id, customer_name, customer_phone, customer_email,
-            description, service_tier, payer_type, enquiry_id, service_fee, intake_channel, status, service_status_token, notes)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?, 'pending', ?, ?)`,
+            description, service_tier, payer_type, enquiry_id, service_fee, intake_channel, status, service_status_token, notes,
+            parts_preference)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?, 'pending', ?, ?, ?)`,
         [enq.workshop_id, number, customerId, vehicleId || null,
          cust?.full_name || enq.contact_name, realPhone(cust?.phone) || enq.contact_phone || cust?.phone || '',
          cust?.email || enq.contact_email || null,
          issue ? issue.slice(0, 5000) : null, enq.service_tier || null, payer, enq.id,
-         channel || intakeChannelFor(enq.contact_method), serviceStatusToken(), notes]);
+         channel || intakeChannelFor(enq.contact_method), serviceStatusToken(), notes,
+         enq.parts_preference || null]);
       workOrderId = ins.insertId; workOrderNumber = number;
     } catch (e) {
       if (e.code !== 'ER_DUP_ENTRY' || !/work_order_number/.test(e.message)) throw e; // a number collision: draw another

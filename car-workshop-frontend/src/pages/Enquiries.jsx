@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useContext } from 'react';
+import { useState, useEffect, useCallback, useMemo, useContext, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -8,6 +8,7 @@ import {
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
+import { PART_CATEGORIES, prefList } from '../lib/intakeOptions';
 
 /**
  * Enquiries — journey stages 01-02.
@@ -55,11 +56,13 @@ const TIERS = {
 
 const PAYERS = { self_pay: 'Self-pay', insurance: 'Insurance', corporate: 'Corporate', fleet: 'Fleet' };
 const CONTACT_METHODS = { phone: 'Phone', whatsapp: 'WhatsApp', website_form: 'Website form', walk_in: 'Walk-in', partner_handoff: 'Partner hand-off', email: 'Email', reminder: 'Reply to a service reminder', referral: 'Referral' };
-const ENQUIRY_TYPES = { service: 'Service', repair: 'Repair', diagnostic: 'Diagnostic', bodywork: 'Bodywork', accident: 'Accident', other: 'Other' };
 const LOST_REASONS = { price: 'Price', timing: 'Timing / lead time', location: 'Location', went_elsewhere: 'Went elsewhere', no_response: 'No response', not_needed: 'No longer needed', other: 'Other' };
 
 const fmt = (n, cur = 'AED') => `${cur} ${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtDate = (d) => d ? new Date(String(d).replace(' ', 'T')).toLocaleDateString('en-AE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+// The customer complaint on one line, for the list (it may run to 5,000 characters over several lines).
+const oneLine = (s, max = 300) => { const v = String(s || '').replace(/\s+/g, ' ').trim(); return v.length > max ? `${v.slice(0, max - 1)}…` : v; };
+const COMPLAINT_MAX = 5000;
 
 function KPICard({ icon: Icon, label, value, sub, color }) {
   return (
@@ -330,8 +333,10 @@ export default function Enquiries() {
                   <tr key={r.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
                     <td style={st.td}>
                       <div style={{ fontWeight: 700, color: '#1e293b' }}>{r.enquiry_number}</div>
-                      <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
-                        {ENQUIRY_TYPES[r.enquiry_type] || r.enquiry_type} · {CONTACT_METHODS[r.contact_method] || r.contact_method}
+                      <div style={{ fontSize: 11.5, color: '#94a3b8', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={r.description ? oneLine(r.description) : undefined}>
+                        {CONTACT_METHODS[r.contact_method] || r.contact_method}
+                        {r.description && <span style={{ color: '#64748b' }}> · {oneLine(r.description, 120)}</span>}
                       </div>
                     </td>
                     <td style={st.td}>
@@ -427,7 +432,10 @@ export default function Enquiries() {
 }
 
 /* ── Create / edit enquiry ── */
+// The enquiry type is no longer asked: the column keeps its value ('service'
+// on a new enquiry), and the job types are ticked later on the work order.
 function EnquiryModal({ enquiry, onClose, onSaved }) {
+  const { t } = useTranslation();
   const isEdit = !!enquiry;
   const [f, setF] = useState({
     contact_name: enquiry?.contact_name || '',
@@ -435,9 +443,11 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
     contact_email: enquiry?.contact_email || '',
     vehicle_description: enquiry?.vehicle_description || '',
     vehicle_plate: enquiry?.vehicle_plate || '',
-    enquiry_type: enquiry?.enquiry_type || 'service',
     service_tier: enquiry?.service_tier || '',
     description: enquiry?.description || '',
+    // The parts the customer accepts — any of Genuine / After-Market / Used,
+    // at least one. Nothing is ticked for them: the advisor asks.
+    parts_preference: prefList(enquiry?.parts_preference),
     quoted_amount: enquiry?.quoted_amount ?? '',
     source_channel: enquiry?.source_channel || '',
     source_detail: enquiry?.source_detail || '',
@@ -450,11 +460,28 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  // "Tick at least one" shows once a save was tried or the last box unticked.
+  const [prefTouched, setPrefTouched] = useState(false);
+  const prefRef = useRef(null);
+  const prefError = prefTouched && f.parts_preference.length === 0;
+  const togglePart = c => {
+    setPrefTouched(true);
+    setF(p => ({ ...p, parts_preference: prefList(p.parts_preference.includes(c) ? p.parts_preference.filter(x => x !== c) : [...p.parts_preference, c]) }));
+  };
 
   const submit = async () => {
+    setPrefTouched(true);
     if (!f.contact_name.trim()) { setErr('Contact name is required.'); return; }
     if (!String(f.contact_phone || '').trim() && !String(f.contact_email || '').trim()) { setErr('A phone number or an e-mail is required.'); return; }
     if (!f.source_channel) { setErr('Select how this enquiry reached you — it is what makes conversion measurable.'); return; }
+    if (f.description.trim().length > COMPLAINT_MAX) { setErr(t('enquiries.complaint_too_long', 'The customer complaint is longer than 5,000 characters — shorten it.')); return; }
+    if (!f.parts_preference.length) {
+      // The error is under the boxes; bring them into view.
+      setErr('');
+      prefRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      prefRef.current?.querySelector('input')?.focus({ preventScroll: true });
+      return;
+    }
     setSaving(true); setErr('');
     try {
       const payload = {
@@ -522,12 +549,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
 
           <div style={{ height: 1, background: '#f1f5f9', margin: '4px 0' }} />
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-            <Field label="Enquiry type">
-              <select style={st.input} value={f.enquiry_type} onChange={e => set('enquiry_type', e.target.value)}>
-                {Object.entries(ENQUIRY_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-            </Field>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Field label="Service tier" hint="Decides which stages apply">
               <select style={st.input} value={f.service_tier} onChange={e => set('service_tier', e.target.value)}>
                 <option value="">Not yet triaged</option>
@@ -541,7 +563,39 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
             </Field>
           </div>
 
-          <Field label="What they asked for"><input style={st.input} value={f.description} onChange={e => set('description', e.target.value)} placeholder="Reported symptom or requested service" /></Field>
+          {/* Becomes the work order's complaint. */}
+          <Field label={t('enquiries.complaint_label', 'Customer complaint')}
+            hint={`${f.description.length.toLocaleString('en-US')} / 5,000`}>
+            <textarea style={{ ...st.input, minHeight: 96, resize: 'vertical' }} maxLength={COMPLAINT_MAX}
+              value={f.description} onChange={e => set('description', e.target.value)}
+              placeholder={t('enquiries.complaint_placeholder', 'What the customer reports — any detail, in their words')} />
+          </Field>
+
+          <div ref={prefRef} role="group" aria-labelledby="enq-parts-label" aria-describedby="enq-parts-note"
+            style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span id="enq-parts-label" style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>
+              {t('enquiries.parts_label', 'Parts the customer accepts')} *
+            </span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {PART_CATEGORIES.map(c => {
+                const on = f.parts_preference.includes(c.value);
+                return (
+                  <label key={c.value} style={{ ...st.checkChip, ...(on ? st.checkChipOn : null), ...(prefError ? { borderColor: '#fca5a5' } : null) }}>
+                    <input type="checkbox" checked={on} onChange={() => togglePart(c.value)} aria-invalid={prefError || undefined}
+                      style={{ margin: 0, accentColor: ORANGE }} />
+                    {t(`estimates.cat_${c.value}`, c.label)}
+                  </label>
+                );
+              })}
+            </div>
+            {prefError
+              ? <span id="enq-parts-note" role="alert" style={{ fontSize: 12, fontWeight: 600, color: '#b91c1c' }}>
+                  {t('enquiries.parts_required', 'Tick at least one — ask the customer which parts they accept.')}
+                </span>
+              : <span id="enq-parts-note" style={{ fontSize: 11, color: '#94a3b8' }}>
+                  {t('enquiries.parts_hint', 'Any combination. Goes on the work order; the estimate starts from it.')}
+                </span>}
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Field label="Quoted amount"><input style={st.input} type="number" min="0" step="0.01" value={f.quoted_amount} onChange={e => set('quoted_amount', e.target.value)} placeholder="0.00" /></Field>
@@ -710,6 +764,11 @@ const st = {
   emptyCell: { textAlign: 'center', padding: '48px 16px', color: '#94a3b8', fontSize: 13.5 },
   pill: { display: 'inline-flex', alignItems: 'center', padding: '4px 11px', borderRadius: 20, fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap' },
   iconBtn: { width: 30, height: 30, borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#475569', flexShrink: 0 },
+  // Border in parts, not the shorthand: the ticked / error states swap borderColor alone.
+  checkChip: { display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 10,
+    borderWidth: 1.5, borderStyle: 'solid', borderColor: '#e2e8f0',
+    background: '#fff', color: '#334155', cursor: 'pointer', fontSize: 13.5, fontWeight: 600, userSelect: 'none' },
+  checkChipOn: { borderColor: ORANGE, background: '#fff7ed', color: '#c2410c' },
   // z-index must clear the sidebar (1065) and topbar (1060) in Layout.css.
   overlay: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 16 },
   modal: { background: '#fff', borderRadius: 20, width: '100%', maxWidth: 620, maxHeight: '92vh', overflowY: 'auto', boxShadow: '0 24px 70px rgba(0,0,0,0.28)' },

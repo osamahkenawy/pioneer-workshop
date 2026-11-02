@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { requireManager } from '../lib/access.js';
 import { requireCapability, isManagerRole, effectiveRole } from '../lib/roles.js';
 import { stripMarkupFields, clampTextFields } from '../lib/sanitize.js';
+import { parseVehicleType, missingVehicleDetails, vehicleDetailsRequired } from '../lib/intake-rules.js';
 
 // SR-01/SR-16 — sanitise at the write boundary. Identity fields can never
 // legitimately contain markup, so it is stripped; free text is stored verbatim
@@ -47,6 +48,30 @@ const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
 // counts as a duplicate of 'JT3…0001'.
 const VIN_KEY_SQL = "UPPER(REGEXP_REPLACE(COALESCE(v.vin, ''), '[^A-Za-z0-9]', ''))";
 
+// The emirate is part of the plate (87345 / A / Abu Dhabi), so it is one of
+// the seven the job card wizard and Fleet Intake offer — free text ("AD",
+// "Abu Dabi") would make one plate several in the duplicate check. Case,
+// spacing and hyphens are forgiven: 'ras al-khaimah' is stored as 'Ras Al Khaimah'.
+const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
+const emirateKey = v => String(v).toLowerCase().replace(/[^a-z]/g, '');
+
+// missingVehicleDetails() names → the body fields, so a form can mark them.
+const DETAIL_FIELD = { 'plate number': 'plate_number', emirate: 'plate_emirate', 'model year': 'year' };
+/**
+ * VEHICLE_DETAILS_REQUIRED as work orders send it (same code and `missing`),
+ * worded for the vehicle form; `cleared` = a recorded value being removed.
+ */
+function detailsRequired(missing, cleared = false) {
+  const list = missing.length > 1 ? `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]}` : missing[0];
+  return {
+    ...vehicleDetailsRequired(missing),
+    fields: missing.map(m => DETAIL_FIELD[m]).filter(Boolean),
+    message: cleared
+      ? `A recorded ${list} cannot be removed. Correct ${missing.length > 1 ? 'them' : 'it'} instead.`
+      : `The vehicle's ${list} ${missing.length > 1 ? 'are' : 'is'} required.`,
+  };
+}
+
 /** Arabic-Indic digits from an Arabic keyboard, as ASCII. */
 function asciiDigits(s) {
   return String(s)
@@ -60,6 +85,11 @@ const normVin = v => (v === undefined || v === null ? null : (asciiDigits(v).toU
 const normPlate = v => (v === undefined || v === null ? null : (asciiDigits(v).trim().replace(/\s+/g, ' ').toUpperCase() || null));
 /** Letters and digits only: "A 12345", "a-12345" and "A12345" are one plate. */
 const plateKey = v => asciiDigits(v == null ? '' : v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+/** Emirate as stored: the canonical name when it is one, else as typed (fieldProblem refuses it). */
+const normEmirate = v => {
+  const t = text(v);
+  return t && (EMIRATES.find(e => emirateKey(e) === emirateKey(t)) || t);
+};
 const blank = v => v === undefined || v === null || v === '';
 
 /**
@@ -91,6 +121,9 @@ function fieldProblem(fields) {
   }
   if (fields.vin && !VIN_RE.test(fields.vin)) {
     return { code: 'VIN_INVALID', message: 'VIN must be 17 characters, letters and digits only (never I, O or Q). Check the chassis plate.' };
+  }
+  if (fields.plate_emirate && !EMIRATES.includes(fields.plate_emirate)) {
+    return { code: 'EMIRATE_INVALID', message: `Emirate must be one of: ${EMIRATES.join(', ')}.` };
   }
   return null;
 }
@@ -342,18 +375,31 @@ router.get('/:id', async (req, res) => {
     );
     if (!vehicle) return res.status(404).json({ success: false, message: 'Vehicle not found' });
 
+    // last_service_at as the list sends it — the drawer's "Last service"
+    // read it from here and always showed "Never".
     const [workOrderStats] = await query(
       `SELECT COUNT(*) as total_work_orders,
-              SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed_work_orders
+              SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed_work_orders,
+              MAX(created_at) AS last_service_at
        FROM work_orders WHERE vehicle_id = ? AND workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
     const workOrders = await query(
-      `SELECT id, work_order_number, status, customer_approved_at, service_fee, total_amount, cash_amount, payment_method, created_at
+      `SELECT id, work_order_number, status, customer_approved_at, service_fee, total_amount, cash_amount, payment_method, odometer_in, created_at
        FROM work_orders WHERE vehicle_id = ? AND workshop_id = ? ORDER BY created_at DESC LIMIT 20`,
       [req.params.id, req.workshopId]
     );
-    return res.json({ success: true, data: { ...vehicle, ...workOrderStats, work_orders: workOrders } });
+    // The odometer (client review, 2 Nov 2026): vehicles.mileage is the
+    // latest reading on file; this is where and when the car was last read
+    // at a visit (cancelled ones aside), or null.
+    const [lastOdometer] = await query(
+      `SELECT odometer_in AS reading, id AS work_order_id, work_order_number, created_at AS read_at
+       FROM work_orders
+       WHERE vehicle_id = ? AND workshop_id = ? AND odometer_in IS NOT NULL AND status <> 'cancelled'
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [req.params.id, req.workshopId]
+    );
+    return res.json({ success: true, data: { ...vehicle, ...workOrderStats, last_odometer: lastOdometer || null, work_orders: workOrders } });
   } catch (err) {
     console.error('[Vehicles] Fetch error:', err);
     return res.status(500).json({ success: false, message: 'Failed to fetch vehicle' });
@@ -400,7 +446,7 @@ router.post('/', canEditVehicles, async (req, res) => {
       mileage: blank(body.mileage) ? null : body.mileage,
       plate_number: normPlate(body.plate_number),
       plate_code: normPlate(body.plate_code),
-      plate_emirate: text(body.plate_emirate),
+      plate_emirate: normEmirate(body.plate_emirate),
       vin: normVin(body.vin),
       engine_no: text(body.engine_no),
       fleet_code: text(body.fleet_code),
@@ -408,6 +454,7 @@ router.post('/', canEditVehicles, async (req, res) => {
       fuel_type: blank(body.fuel_type) ? 'petrol' : String(body.fuel_type).trim().toLowerCase(),
       transmission: blank(body.transmission) ? 'automatic' : String(body.transmission).trim().toLowerCase(),
     };
+    const type = parseVehicleType(body.vehicle_type);
 
     if (!customer_id || !v.make || !v.model) {
       return res.status(400).json({ success: false, message: 'Customer, make and model required' });
@@ -430,6 +477,16 @@ router.post('/', canEditVehicles, async (req, res) => {
         message: 'VIN / chassis number is required.',
       });
     }
+    // ── Plate number, emirate and model year too (client review, 2 Nov 2026) ──
+    // On the same footing as the VIN: required on every new vehicle, the
+    // records already on file are left as they are, and the importer's flag
+    // covers them (supplier files carry no emirate either). Only this route —
+    // the portal, Fleet Intake and enquiry conversion add cars their own way.
+    if (!allowMissingVin) {
+      const missing = missingVehicleDetails(v);
+      if (missing.length) return res.status(400).json({ success: false, ...detailsRequired(missing) });
+    }
+    if (type.error) return res.status(400).json({ success: false, code: 'VEHICLE_TYPE_INVALID', message: type.error });
     const problem = fieldProblem(v);
     if (problem) return res.status(400).json({ success: false, ...problem });
 
@@ -453,11 +510,11 @@ router.post('/', canEditVehicles, async (req, res) => {
         if (dupPlate) return { send: () => duplicatePlate(res, dupPlate, customer_id) };
       }
       const result = await run(
-        `INSERT INTO vehicles (workshop_id, customer_id, make, model, year, plate_number,
+        `INSERT INTO vehicles (workshop_id, customer_id, make, model, vehicle_type, year, plate_number,
           plate_code, plate_emirate, vin, engine_no, fleet_code,
           color, mileage, fuel_type, transmission, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [req.workshopId, customer_id, v.make, v.model, toInt(v.year), v.plate_number,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.workshopId, customer_id, v.make, v.model, type.value ?? null, toInt(v.year), v.plate_number,
          v.plate_code, v.plate_emirate, v.vin,
          v.engine_no, v.fleet_code,
          v.color, toInt(v.mileage), v.fuel_type, v.transmission, notes || null]
@@ -486,16 +543,19 @@ router.put('/:id', canEditVehicles, async (req, res) => {
     const body = _clean(raw);
     const sent = k => Object.prototype.hasOwnProperty.call(raw, k) && raw[k] !== undefined;
     const manager = isManagerRole(req.user);
+    const type = parseVehicleType(raw.vehicle_type);
+    if (type.error) return res.status(400).json({ success: false, code: 'VEHICLE_TYPE_INVALID', message: type.error });
 
     // What will be stored: each field sent (normalised), else the row as it is.
     const next = {
       customer_id: sent('customer_id') && !blank(raw.customer_id) ? Number(raw.customer_id) : existing.customer_id,
       make: sent('make') ? text(body.make) : existing.make,
       model: sent('model') ? text(body.model) : existing.model,
+      vehicle_type: type.value !== undefined ? type.value : existing.vehicle_type,
       year: sent('year') ? (blank(body.year) ? null : body.year) : existing.year,
       plate_number: sent('plate_number') ? normPlate(body.plate_number) : existing.plate_number,
       plate_code: sent('plate_code') ? normPlate(body.plate_code) : existing.plate_code,
-      plate_emirate: sent('plate_emirate') ? text(body.plate_emirate) : existing.plate_emirate,
+      plate_emirate: sent('plate_emirate') ? normEmirate(body.plate_emirate) : existing.plate_emirate,
       vin: sent('vin') ? normVin(body.vin) : existing.vin,
       engine_no: sent('engine_no') ? text(body.engine_no) : existing.engine_no,
       fleet_code: sent('fleet_code') ? text(body.fleet_code) : existing.fleet_code,
@@ -530,6 +590,13 @@ router.put('/:id', canEditVehicles, async (req, res) => {
     if (vinChanged && !next.vin && existing.vin && !manager) {
       return res.status(400).json({ success: false, code: 'VIN_REQUIRED', message: 'A recorded VIN cannot be removed. Correct it instead.' });
     }
+    // Plate number, emirate and model year (required on new vehicles since
+    // 2 Nov 2026): an older record without them is still saved — the job card
+    // wizard fills them in when the car comes back — but once recorded they
+    // stay.
+    const had = missingVehicleDetails(existing);
+    const cleared = missingVehicleDetails(next).filter(m => !had.includes(m));
+    if (cleared.length) return res.status(400).json({ success: false, ...detailsRequired(cleared, true) });
     const problem = fieldProblem(changed);
     if (problem) return res.status(400).json({ success: false, ...problem });
 
@@ -540,9 +607,13 @@ router.put('/:id', canEditVehicles, async (req, res) => {
       if (custErr) return res.status(400).json({ success: false, ...custErr });
     }
 
+    // Filling in a missing emirate (the wizard's backfill) is not a plate
+    // change: a blank emirate already matched every emirate in the
+    // duplicate check, so it can only narrow the plate, never make a new twin.
+    const emirateOf = r => String(r.plate_emirate || '').trim().toLowerCase();
     const plateChanged = plateKey(next.plate_number) !== plateKey(existing.plate_number)
       || plateKey(next.plate_code) !== plateKey(existing.plate_code)
-      || String(next.plate_emirate || '').trim().toLowerCase() !== String(existing.plate_emirate || '').trim().toLowerCase();
+      || (emirateOf(next) !== emirateOf(existing) && emirateOf(existing) !== '');
 
     const write = async (run) => {
       // Filling in a missing VIN is the main reason this endpoint gets called
@@ -559,11 +630,11 @@ router.put('/:id', canEditVehicles, async (req, res) => {
         if (dupPlate) return { send: () => duplicatePlate(res, dupPlate, next.customer_id) };
       }
       await run(
-        `UPDATE vehicles SET customer_id=?, make=?, model=?, year=?, plate_number=?,
+        `UPDATE vehicles SET customer_id=?, make=?, model=?, vehicle_type=?, year=?, plate_number=?,
          plate_code=?, plate_emirate=?, vin=?, engine_no=?, fleet_code=?,
          color=?, mileage=?, fuel_type=?, transmission=?, notes=?, is_active=?
          WHERE id = ? AND workshop_id = ?`,
-        [next.customer_id, next.make, next.model, toInt(next.year), next.plate_number,
+        [next.customer_id, next.make, next.model, next.vehicle_type, toInt(next.year), next.plate_number,
          next.plate_code, next.plate_emirate,
          next.vin, next.engine_no, next.fleet_code,
          next.color, toInt(next.mileage), next.fuel_type, next.transmission, next.notes || null,

@@ -25,10 +25,12 @@ import { syncWorkOrderFromJobCards } from '../lib/workflow-sync.js';
 import { can, requireCapability, capabilitiesOf, isManagerRole } from '../lib/roles.js';
 import { ASSIGN_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE } from '../lib/floor-queues.js';
 import { jobCardGate, openJobCardIfReady, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
+import { ESTIMATE_APPROVAL_REQUIRED } from '../lib/job-card-approval.js';
 
 const anyCapability = caps => (req, res, next) => caps.some(c => can(req.user, c)) ? next()
   : res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: "Your role can't do this." });
 import { applyStatusChange } from './work-orders.js';
+import { parseJobTypes, jobTypesOf } from '../lib/intake-rules.js';
 import { createInvoiceFromWorkOrder } from './invoices.js';
 
 const router = express.Router();
@@ -81,16 +83,42 @@ router.get('/my-tasks', async (req, res) => {
       `SELECT i.id, i.description, i.quantity_requested, i.availability, i.expected_date, wo.work_order_number, wo.id AS wo_id, r.created_at AS at ${REQ} ORDER BY r.created_at`,
       [W], r => ({ id: r.id, title: `${Number(r.quantity_requested)} × ${r.description}`, subtitle: `${r.work_order_number}${r.availability === 'not_available' ? ' · re-check — expected date reached' : ''}`, link: '/store', at: r.at }));
 
-    // Supervisor / managers: external estimates waiting for sign-off
-    const APPROVE = `FROM service_estimates e LEFT JOIN customers c ON c.id = e.customer_id
-                     WHERE e.workshop_id = ? AND e.status = 'draft' AND e.internal_approved_at IS NULL
-                       AND COALESCE(c.customer_class, 'external') <> 'internal' AND e.customer_type <> 'internal_fleet'
-                       AND EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id)
-                       AND NOT EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id AND ${UNPRICED})`;
-    await add('estimate.approve', 'approve_estimate', 'Approve estimates (external customers)',
-      `SELECT COUNT(*) n ${APPROVE}`,
-      `SELECT e.id, e.estimate_number, e.customer_name, e.vehicle_plate, e.total_amount, e.updated_at AS at ${APPROVE} ORDER BY e.updated_at`,
-      [W], r => ({ id: r.id, title: r.estimate_number, subtitle: [r.vehicle_plate, r.customer_name].filter(Boolean).join(' · '), link: `/estimates?id=${r.id}`, at: r.at }));
+    // Supervisor / managers: external estimates waiting for sign-off — only
+    // while that sign-off is switched on (lib/job-card-approval.js; off since
+    // the client's review, 2 Nov 2026).
+    if (ESTIMATE_APPROVAL_REQUIRED) {
+      const APPROVE = `FROM service_estimates e LEFT JOIN customers c ON c.id = e.customer_id
+                       WHERE e.workshop_id = ? AND e.status = 'draft' AND e.internal_approved_at IS NULL
+                         AND COALESCE(c.customer_class, 'external') <> 'internal' AND e.customer_type <> 'internal_fleet'
+                         AND EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id)
+                         AND NOT EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id AND ${UNPRICED})`;
+      await add('estimate.approve', 'approve_estimate', 'Approve estimates (external customers)',
+        `SELECT COUNT(*) n ${APPROVE}`,
+        `SELECT e.id, e.estimate_number, e.customer_name, e.vehicle_plate, e.total_amount, e.updated_at AS at ${APPROVE} ORDER BY e.updated_at`,
+        [W], r => ({ id: r.id, title: r.estimate_number, subtitle: [r.vehicle_plate, r.customer_name].filter(Boolean).join(' · '), link: `/estimates?id=${r.id}`, at: r.at }));
+    }
+
+    // Supervisor / Workshop Foreman (Step 4): the technical inspection and its
+    // report (routes/technical-inspections.js), once the main job card is open
+    // — an internal customer's opens with the work order — until the report
+    // is completed or an estimate is raised. A job priced at the counter or
+    // already agreed has no estimate to raise, so it needs no report here.
+    const TECH = `FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id LEFT JOIN customers c ON c.id = wo.customer_id
+                  LEFT JOIN technical_inspections ti ON ti.work_order_id = wo.id
+                  WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled') AND wo.customer_approved_at IS NULL
+                    AND (ti.id IS NULL OR ti.status <> 'completed')
+                    AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
+                    AND NOT EXISTS (SELECT 1 FROM service_estimates e WHERE (e.intake_work_order_id = wo.id OR e.work_order_id = wo.id)
+                                       AND e.status NOT IN ('rejected','expired'))
+                    AND (EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL AND jc.status <> 'cancelled')
+                      OR ((CASE WHEN wo.intake_customer_class IS NOT NULL AND wo.intake_customer_subcategory IS NOT NULL THEN wo.intake_customer_class
+                                ELSE COALESCE(c.customer_class, wo.intake_customer_class, 'external') END) = 'internal'
+                          AND NOT EXISTS (SELECT 1 FROM job_cards jx WHERE jx.work_order_id = wo.id)
+                          AND wo.created_at >= COALESCE((SELECT MIN(jf.created_at) FROM job_cards jf WHERE jf.workshop_id = wo.workshop_id), wo.created_at)))`;
+    await add('tech.inspect', 'technical_inspection', 'Technical inspection & report',
+      `SELECT COUNT(*) n ${TECH}`,
+      `SELECT wo.id, wo.work_order_number, wo.customer_name, v.plate_number, wo.created_at AS at, ti.status AS ti_status ${TECH} ORDER BY wo.created_at`,
+      [W], r => ({ ...woItem(r), subtitle: [r.plate_number, r.customer_name, r.ti_status ? 'report in progress' : 'not started'].filter(Boolean).join(' · ') }));
 
     // Service Advisor
     // Step 3: external jobs whose job card waits for the physical inspection
@@ -114,17 +142,26 @@ router.get('/my-tasks', async (req, res) => {
          ${PHYSICAL} ORDER BY wo.created_at`,
       [W], r => ({ id: r.id, title: r.work_order_number, subtitle: [r.plate_number, r.customer_name, physicalState(r)].filter(Boolean).join(' · '),
                    link: `/work-orders/${r.id}/inspection?type=intake`, at: r.at }));
+    // With where the technical report stands (Step 4): the estimate is raised
+    // from it, so the jobs whose report is ready come first. Raising one
+    // without it is not refused.
+    const TI_STATUS = '(SELECT ti.status FROM technical_inspections ti WHERE ti.work_order_id = wo.id)';
     await add('estimate.raise', 'raise_estimate', 'Raise the estimate',
       `SELECT COUNT(*) n ${WO_BASE} AND wo.customer_approved_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
          AND NOT EXISTS (SELECT 1 FROM service_estimates e WHERE e.intake_work_order_id = wo.id AND e.status NOT IN ('rejected','expired'))`,
-      `${WO_COLS} ${WO_BASE} AND wo.customer_approved_at IS NULL
+      `${WO_COLS}, ${TI_STATUS} AS ti_status ${WO_BASE} AND wo.customer_approved_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
          AND NOT EXISTS (SELECT 1 FROM service_estimates e WHERE e.intake_work_order_id = wo.id AND e.status NOT IN ('rejected','expired'))
-       ORDER BY wo.created_at`, [W], woItem);
+       ORDER BY ti_status = 'completed' DESC, wo.created_at`, [W],
+      r => ({ ...woItem(r), subtitle: [r.plate_number, r.customer_name, r.ti_status === 'completed' ? 'technical report ready' : 'waiting for the technical report'].filter(Boolean).join(' · ') }));
+    // Priced estimates ready to go out: an external customer's needs the
+    // sign-off first only while that is switched on (above).
+    const SIGNED_OFF = ESTIMATE_APPROVAL_REQUIRED
+      ? "AND (e.internal_approved_at IS NOT NULL OR COALESCE(c.customer_class, 'external') = 'internal' OR e.customer_type = 'internal_fleet')" : '';
     const SEND = `FROM service_estimates e LEFT JOIN customers c ON c.id = e.customer_id
                   WHERE e.workshop_id = ? AND e.status = 'draft'
-                    AND (e.internal_approved_at IS NOT NULL OR COALESCE(c.customer_class, 'external') = 'internal' OR e.customer_type = 'internal_fleet')
+                    ${SIGNED_OFF}
                     AND EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id)
                     AND NOT EXISTS (SELECT 1 FROM estimate_lines l WHERE l.estimate_id = e.id AND ${UNPRICED})`;
     await add('estimate.raise', 'send_estimate', 'Send estimates to the customer',
@@ -236,6 +273,30 @@ router.post('/work-orders/:id/job-card', requireCapability('job.open'), async (r
 });
 
 // POST /api/workflow/work-orders/:id/sub-job-cards — { title, department, mechanic_id, item_ids }
+/**
+ * PATCH /api/workflow/work-orders/:id/job-types — the job types of the visit
+ * (multi-select, process step 4: the Service Advisor ticks them once the car
+ * has been inspected). Body { job_types: ['service','repair'] }; [] clears.
+ */
+router.patch('/work-orders/:id/job-types', anyCapability(['estimate.raise', 'job.open']), async (req, res) => {
+  try {
+    const parsed = parseJobTypes(req.body?.job_types ?? null);
+    if (parsed.error) return res.status(400).json({ success: false, code: 'JOB_TYPES_INVALID', message: parsed.error });
+    const [wo] = await query('SELECT id, status, job_types FROM work_orders WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (['completed', 'cancelled'].includes(wo.status)) {
+      return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: `This work order is ${wo.status}.` });
+    }
+    await execute('UPDATE work_orders SET job_types = ? WHERE id = ? AND workshop_id = ?', [parsed.value ?? null, wo.id, req.workshopId]);
+    await logAudit({ workshopId: req.workshopId, userId: req.user.id, action: 'JOB_TYPES', entityType: 'work_orders', entityId: wo.id,
+      oldValue: { job_types: jobTypesOf(wo) }, newValue: { job_types: parsed.value ? JSON.parse(parsed.value) : [] } }).catch(() => {});
+    return res.json({ success: true, data: { job_types: parsed.value ? JSON.parse(parsed.value) : [] } });
+  } catch (err) {
+    console.error('PATCH /workflow/work-orders/:id/job-types error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save the job types' });
+  }
+});
+
 router.post('/work-orders/:id/sub-job-cards', anyCapability(['job.open', 'job.assign']), async (req, res) => {
   try {
     const wo = await loadWorkOrder(req.params.id, req.workshopId);

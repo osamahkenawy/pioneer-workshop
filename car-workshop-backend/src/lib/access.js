@@ -41,10 +41,12 @@ const MECHANIC_ROUTES = [
   '/api/auth', '/api/user-notifications', '/api/service-status',
   '/api/uploads', '/api/job-cards',
 ];
-// Read-only for mechanics: the plan banner every screen loads. The staff
-// work order and vehicle lists are not theirs (no technician screen calls
-// them since the technician app replaced the courier screens).
-const MECHANIC_READ_ROUTES = ['/api/workshops/usage'];
+// Read-only for mechanics: the plan banner every screen loads, and the
+// technical report of a job that is theirs (routes/technical-inspections.js
+// checks that, and leaves out the customer's name). The staff work order and
+// vehicle lists are not theirs (no technician screen calls them since the
+// technician app replaced the courier screens).
+const MECHANIC_READ_ROUTES = ['/api/workshops/usage', '/api/technical-inspections'];
 
 // The courier mobile API (routes/mechanic-app.js): reject, fail, collect cash
 // and deliver, with statuses a workshop job does not have. No longer mounted

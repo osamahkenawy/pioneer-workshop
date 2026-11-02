@@ -16,6 +16,7 @@ import { customerAppBase } from '../lib/customer-link.js';
 import { woLabel } from '../lib/status-labels.js';
 import { IMAGE_COORD, DAMAGE_CODES } from '../lib/inspection-marks.js';
 import { openJobCardIfReady } from '../lib/physical-inspection.js';
+import { checkOdometer, ODOMETER_REQUIRED } from '../lib/intake-rules.js';
 
 /* The paper inspection form, uploaded instead of (or as well as) filling it
  * in on screen: scans, photos of the pages or a PDF. Kept out of the public
@@ -57,7 +58,7 @@ const photoUpload = multer({
  * ═══════════════════════════════════════════════════════════════════
  *
  * Backs the visual inspection form: a car diagram the inspector clicks to
- * drop damage markers (legend codes: DS deep scratch, DD dents/dings, ...),
+ * drop damage markers (damage codes: DS deep scratch, DD dents/dings, ...),
  * with vehicle photos, done with the customer present at drop-off — the
  * physical inspection, inspection_type 'intake' (Step 3) — and again at
  * handover (Step 7).
@@ -74,6 +75,14 @@ const photoUpload = multer({
  * Completing an intake inspection stamps work_orders.intake_inspection_at, and
  * a joint inspection stamps joint_inspection_at, so the Customer Journey
  * checklist on the work order stays in sync without a second manual step.
+ *
+ * The odometer (client review, 2026-11-02): required on the physical
+ * inspection — the work order's reading is taken when the form has none —
+ * and never below the car's previous reading (lib/intake-rules.js; a manager
+ * may still confirm a lower one, and is warned). Completing it fills the work
+ * order's odometer_in when that is empty and raises the car's mileage. The
+ * handover inspection keeps the odometer optional; a reading saved on any
+ * inspection gets the same check.
  *
  * The walk-around ends with the customer's sign-off: on the screen at the car,
  * or — when they could not stay — from the link POST /:id/share sends them
@@ -152,7 +161,7 @@ export function inspectionLinkUrl(token) {
   return `${customerAppBase()}/inspection/${token}`;
 }
 
-// Damage legend (lib/inspection-marks.js), re-exported for public-inspections.js.
+// The damage types (lib/inspection-marks.js), re-exported for public-inspections.js.
 export { DAMAGE_CODES };
 
 // Keeps a stray click or a malformed payload from being persisted: anything
@@ -190,7 +199,52 @@ function parseMarks(row) {
   return row;
 }
 
-// GET /api/vehicle-inspections/codes — the damage legend (single source of truth)
+/* ── The odometer ── */
+const MAX_ODOMETER = 9999999;   // as routes/work-orders.js: a stray digit, not a reading
+
+/**
+ * The reading as typed, read as routes/work-orders.js parseOdometer does: a
+ * whole number of km, Arabic-Indic digits and thousands separators accepted;
+ * '12.5', '1e5' and '-500' are refused rather than stored as something else.
+ * { value } (null when blank) or { error }.
+ */
+function parseReading(v) {
+  if (v === undefined || v === null) return { value: null };
+  let s = String(v).trim()
+    .replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x06F0));
+  if (!s) return { value: null };
+  if (/^\d{1,3}([,٬ ]\d{3})+$/.test(s)) s = s.replace(/[,٬ ]/g, '');
+  if (/^-\s*\d/.test(s)) return { error: 'The odometer reading cannot be negative.' };
+  if (!/^\d+$/.test(s)) return { error: 'The odometer reading must be a whole number of kilometres.' };
+  if (Number(s) > MAX_ODOMETER) return { error: 'The odometer reading looks wrong — check it on the dashboard.' };
+  return { value: Number(s) };
+}
+
+/** The inspection's work order, as far as the odometer goes. */
+async function workOrderOf(row) {
+  const [wo] = await query('SELECT id, vehicle_id, odometer_in FROM work_orders WHERE id = ? AND workshop_id = ?',
+    [row.work_order_id, row.workshop_id]);
+  return wo || null;
+}
+
+/**
+ * Not below the car's previous reading (lib/intake-rules.js): null when the
+ * reading may be saved, else { warning } — a manager confirmed a lower one —
+ * or { status, body }. The work order's own reading passed this check when
+ * the work order took it (a manager may have confirmed it there), so the same
+ * reading is not questioned again here.
+ */
+async function odometerCheck(reading, row, wo, user) {
+  if (reading == null) return null;
+  if (wo?.odometer_in != null && Number(wo.odometer_in) === reading) return null;
+  return checkOdometer({
+    reading, vehicleId: wo?.vehicle_id || row.vehicle_id, workshopId: row.workshop_id,
+    workOrderId: row.work_order_id, user,
+  });
+}
+
+// GET /api/vehicle-inspections/codes — the damage types (single source of truth)
 router.get('/codes', (req, res) => {
   return res.json({ success: true, data: DAMAGE_CODES });
 });
@@ -310,7 +364,8 @@ router.post('/', async (req, res) => {
         b.vehicle_model  ?? wo.v_model ?? null,
         b.vin            ?? wo.v_vin   ?? null,
         b.plate_number   ?? wo.v_plate ?? null,
-        b.odometer       ?? wo.v_mileage ?? null,
+        // The physical inspection starts from this visit's reading, else the car's last.
+        b.odometer       ?? (inspection_type === 'intake' ? wo.odometer_in : null) ?? wo.v_mileage ?? null,
         b.service_recommended ?? wo.description ?? null,
         b.service_accepted ?? null,
         JSON.stringify(sanitizeMarks(b.marks)),
@@ -343,7 +398,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', recordGuard, async (req, res) => {
   try {
     const [row] = await query(
-      'SELECT id, status FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
+      'SELECT id, workshop_id, work_order_id, vehicle_id, status, odometer FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
@@ -351,7 +406,7 @@ router.put('/:id', recordGuard, async (req, res) => {
 
     const editable = [
       'estimate_date', 'original_estimate', 'customer_name', 'customer_phone', 'customer_email',
-      'vehicle_year', 'vehicle_make', 'vehicle_model', 'vin', 'plate_number', 'odometer',
+      'vehicle_year', 'vehicle_make', 'vehicle_model', 'vin', 'plate_number',
       'service_recommended', 'service_accepted', 'notes', 'job_card_id',
     ];
     // Not signature_url: the signature is written only by PATCH /:id/signature
@@ -360,6 +415,21 @@ router.put('/:id', recordGuard, async (req, res) => {
     const values = [];
     for (const f of editable) {
       if (req.body[f] !== undefined) { fields.push(`${f} = ?`); values.push(req.body[f] === '' ? null : req.body[f]); }
+    }
+    // The odometer: a whole number, never below the car's previous reading.
+    // Checked when it changes — the reading already on the form passed, or a
+    // manager confirmed it. Blank is allowed on a draft; completing the
+    // physical inspection asks for it.
+    let odometerWarning = null;
+    if (req.body.odometer !== undefined) {
+      const odo = parseReading(req.body.odometer);
+      if (odo.error) return res.status(400).json({ success: false, code: 'INVALID_ODOMETER', message: odo.error });
+      if (odo.value != null && odo.value !== (row.odometer == null ? null : Number(row.odometer))) {
+        const chk = await odometerCheck(odo.value, row, await workOrderOf(row), req.user);
+        if (chk?.status) return res.status(chk.status).json(chk.body);
+        odometerWarning = chk?.warning || null;
+      }
+      fields.push('odometer = ?'); values.push(odo.value);
     }
     // Filled in on screen, or done on paper and uploaded.
     if (req.body.entry_mode !== undefined) {
@@ -386,7 +456,7 @@ router.put('/:id', recordGuard, async (req, res) => {
     await execute(`UPDATE vehicle_inspections SET ${fields.join(', ')} WHERE id = ? AND workshop_id = ?`, values);
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: parseMarks(updated) });
+    return res.json({ success: true, data: parseMarks(updated), ...(odometerWarning ? { warning: odometerWarning } : {}) });
   } catch (err) {
     console.error('[VehicleInspections] Update error:', err);
     return res.status(500).json({ success: false, message: 'Failed to save inspection' });
@@ -583,6 +653,9 @@ async function jobCardAfter(row, userId) {
  * Also stamps the matching Customer Journey checkpoint on the work order, and
  * a physical inspection signed at the car or done on paper opens an external
  * customer's job card (response job_card, see jobCardAfter()).
+ * The physical inspection needs the odometer (400 ODOMETER_REQUIRED /
+ * ODOMETER_BELOW_LAST); a lower reading a manager confirms comes back as
+ * warning.
  */
 router.patch('/:id/complete', recordGuard, async (req, res) => {
   try {
@@ -604,13 +677,45 @@ router.patch('/:id/complete', recordGuard, async (req, res) => {
     if (row.entry_mode !== 'document' && CUSTOMER_FACING.includes(row.inspection_type) && customerPresent && !row.signature_url) {
       return res.status(400).json({ success: false, code: 'SIGNATURE_REQUIRED', message: SIGNATURE_REQUIRED_MSG });
     }
+    // The physical inspection records the odometer (client review, 2 Nov
+    // 2026): the form's reading, else the work order's; none at all is
+    // refused, and so is one below the car's previous reading unless a
+    // manager confirms it. The handover inspection keeps it optional.
+    let odometer = row.odometer == null ? null : Number(row.odometer);
+    let odometerWarning = null;
+    let wo = null;
+    if (row.inspection_type === 'intake') {
+      wo = await workOrderOf(row);
+      if (odometer == null && wo?.odometer_in != null) odometer = Number(wo.odometer_in);
+      if (odometer == null) return res.status(400).json({ success: false, ...ODOMETER_REQUIRED });
+      const chk = await odometerCheck(odometer, row, wo, req.user);
+      if (chk?.status) return res.status(chk.status).json(chk.body);
+      odometerWarning = chk?.warning || null;
+    }
 
     await execute(
       `UPDATE vehicle_inspections
-          SET status = 'completed', completed_at = NOW(), inspected_by = ?, customer_present = ?
+          SET status = 'completed', completed_at = NOW(), inspected_by = ?, customer_present = ?, odometer = ?
         WHERE id = ? AND workshop_id = ?`,
-      [req.user.id, customerPresent, req.params.id, req.workshopId]
+      [req.user.id, customerPresent, odometer, req.params.id, req.workshopId]
     );
+
+    // The reading goes on the work order when it has none yet (a booking or
+    // an enquiry can become the visit without one), and the car's own
+    // mileage rises to it — never winds back (as routes/work-orders.js).
+    if (row.inspection_type === 'intake') {
+      try {
+        await execute('UPDATE work_orders SET odometer_in = ? WHERE id = ? AND workshop_id = ? AND odometer_in IS NULL',
+          [odometer, row.work_order_id, req.workshopId]);
+        const vehicleId = wo?.vehicle_id || row.vehicle_id;
+        if (vehicleId) {
+          await execute('UPDATE vehicles SET mileage = GREATEST(COALESCE(mileage, 0), ?) WHERE id = ? AND workshop_id = ?',
+            [odometer, vehicleId, req.workshopId]);
+        }
+      } catch (e) {
+        console.error('[VehicleInspections] Odometer to the work order failed:', e.message);
+      }
+    }
 
     // Keep the work order's journey checklist in step with the inspection
     const journeyColumn = row.inspection_type === 'joint' ? 'joint_inspection_at'
@@ -669,7 +774,7 @@ router.patch('/:id/complete', recordGuard, async (req, res) => {
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
     const jobCard = await jobCardAfter(updated, req.user.id);
-    return res.json({ success: true, data: parseMarks(updated), job_card: jobCard });
+    return res.json({ success: true, data: parseMarks(updated), job_card: jobCard, ...(odometerWarning ? { warning: odometerWarning } : {}) });
   } catch (err) {
     console.error('[VehicleInspections] Complete error:', err);
     return res.status(500).json({ success: false, message: 'Failed to complete inspection' });
@@ -812,7 +917,7 @@ router.post('/:id/share', async (req, res) => {
     }
     // The customer's page closes for a cancelled job (public-inspections.js), so there is nothing to send.
     if (row.wo_status === 'cancelled') {
-      return res.status(409).json({ success: false, code: 'WORK_ORDER_CANCELLED', message: 'This job card is cancelled — the inspection is no longer sent to the customer.' });
+      return res.status(409).json({ success: false, code: 'WORK_ORDER_CANCELLED', message: 'This work order is cancelled — the inspection is no longer sent to the customer.' });
     }
     if (channel === 'email' && !row.to_email) {
       return res.status(400).json({ success: false, code: 'NO_EMAIL', message: 'No e-mail on file for this customer — send it by WhatsApp, or copy the link.' });
@@ -834,6 +939,7 @@ router.post('/:id/share', async (req, res) => {
     const plate = stripMarkup(row.plate_number || '', 30);
     const vehicle = plate ? `your vehicle (${plate})` : 'your vehicle';
     // The customer's words for the two walk-arounds: check-in (intake) and handover.
+    // WO-… is the work order; "job card" is the JC-… the workshop opens later.
     const moment = handover ? 'at handover' : 'at check-in';
 
     if (channel === 'email') {
@@ -842,7 +948,7 @@ router.post('/:id/share', async (req, res) => {
         tenantId: req.workshopId,
         subject: `Vehicle inspection — ${row.work_order_number}`,
         title: `Your vehicle ${moment}`,
-        body: `Here is the inspection of ${vehicle} ${moment}, job card ${row.work_order_number}: ` +
+        body: `Here is the inspection of ${vehicle} ${moment}, work order ${row.work_order_number}: ` +
           'the condition we recorded, with any damage marked. ' +
           (toSign ? 'Please check it and sign to confirm.' : 'Keep this link as your copy.'),
         ctaText: toSign ? 'View and sign' : 'View the inspection',
@@ -863,7 +969,7 @@ router.post('/:id/share', async (req, res) => {
     if (channel === 'whatsapp') {
       // No number on file: wa.me without one lets the advisor pick the chat.
       const phone = waDigits(row.to_phone);
-      const text = `The inspection of ${vehicle} ${moment} (job card ${row.work_order_number}) is ready. ` +
+      const text = `The inspection of ${vehicle} ${moment} (work order ${row.work_order_number}) is ready. ` +
         `${toSign ? 'Please check it and sign to confirm' : 'Your copy'}: ${url}`;
       out.whatsapp_url = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
       if (!phone) out.message = 'No phone number on file — choose the chat in WhatsApp.';

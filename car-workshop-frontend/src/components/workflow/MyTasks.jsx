@@ -1,12 +1,14 @@
 /**
  * MyTasks — "Your tasks": what is waiting on the logged-in person's role in
  * the Steps 1–7 workflow (GET /api/workflow/my-tasks). The Storekeeper sees
- * parts to price and issue, the Supervisor estimates to approve and quality
- * checks, the Team Leader technicians to assign and rework, the Service
- * Advisor physical inspections waiting for the customer's acknowledgement
- * (Step 3), estimates to raise/send and cars ready for collection (Step 7.2:
- * the collection call, payment, gate pass). Group titles come from the
- * server; the 'delivery' kind is that Step 7.2 group's internal key.
+ * parts to price and issue, the Supervisor / Workshop Foreman technical
+ * inspections to carry out (Step 4) and quality checks (and estimates to
+ * approve, while that sign-off is switched on), the Team Leader technicians
+ * to assign and rework, the Service Advisor physical inspections waiting for
+ * the customer's acknowledgement (Step 3), estimates to raise/send and cars
+ * ready for collection (Step 7.2: the collection call, payment, gate pass).
+ * Group titles come from the server; the 'delivery' kind is that Step 7.2
+ * group's internal key.
  */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -16,7 +18,7 @@ import api from '../../lib/api';
 import './MyTasks.css';
 
 const KIND_TONE = {
-  price_parts: 'store', store: 'store', approve_estimate: 'approve', physical_inspection: 'advisor', raise_estimate: 'advisor', send_estimate: 'advisor',
+  price_parts: 'store', store: 'store', approve_estimate: 'approve', technical_inspection: 'floor', physical_inspection: 'advisor', raise_estimate: 'advisor', send_estimate: 'advisor',
   record_approval: 'advisor', convert_partial: 'advisor', delivery: 'good', assign: 'floor', assign_sub: 'floor', qc: 'approve', rework: 'bad',
 };
 

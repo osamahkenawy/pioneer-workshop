@@ -39,6 +39,7 @@ import arabicReshaper from 'arabic-reshaper';
 import { query } from './database.js';
 import { customerStatusUrl } from './customer-link.js';
 import { markPointInFrame, DAMAGE_CODES } from './inspection-marks.js';
+import { JOB_TYPES, jobTypesOf } from './intake-rules.js';
 const { convertArabic } = arabicReshaper;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -348,8 +349,12 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
     // ─────────────────────────────────────────────────────────
     // 3. WORK ORDER META — job type and kind of work
     // ─────────────────────────────────────────────────────────
-    const metaParts = [order.work_order_type || order.order_type, order.service_category]
-      .filter(v => v && v !== 'other').map(v => humanize(v).toUpperCase());
+    // The job types ticked at Step 4; an older job's own type and category
+    // (the form's defaults, "standard" / "general maintenance", say nothing).
+    const jobTypes = jobTypesOf(order).map(k => JOB_TYPES[k] || humanize(k));
+    const metaParts = (jobTypes.length ? jobTypes
+      : [order.work_order_type || order.order_type, order.service_category].filter(v => v && !['other', 'standard', 'general_maintenance'].includes(v)).map(humanize))
+      .map(v => String(v).toUpperCase());
     if (metaParts.length > 0) {
       doc.fillColor(GRAY).fontSize(5).font(FR)
          .text(metaParts.join('   ·   '), M, y, { width: CW, align: 'left' });

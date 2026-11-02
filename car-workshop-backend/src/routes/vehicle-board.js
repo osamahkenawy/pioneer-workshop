@@ -35,6 +35,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { effectiveRole, isManagerRole } from '../lib/roles.js';
 import { jobClassification, departmentFor, paymentSettled, UNPRICED_PART_SQL } from '../lib/workflow.js';
 import { pauseReasonLabel } from '../lib/status-labels.js';
+import { ESTIMATE_APPROVAL_REQUIRED } from '../lib/job-card-approval.js';
 import { extractStatusToken } from '../lib/customer-link.js';
 import {
   PHASES, PHASE_LABELS, PHASE_STEPS, WHO, LATE_MINUTES, boardPhase, isLate, isLegacyJob, JC_WORK_DONE, JC_QC_PASSED,
@@ -271,7 +272,7 @@ function toItem(row, ctx) {
     lines: num(row.est_line_count),
     unpricedParts: num(row.unpriced_parts),
     unpricedLabour: num(row.unpriced_labour),
-    needsApproval: !(cls.cls === 'internal' || (!cls.cls && row.est_customer_type === 'internal_fleet')) && !num(row.est_internal_approved),
+    needsApproval: ESTIMATE_APPROVAL_REQUIRED && !(cls.cls === 'internal' || (!cls.cls && row.est_customer_type === 'internal_fleet')) && !num(row.est_internal_approved),
   } : null;
   const approved = !!num(row.wo_approved)
     || (!!estimate && ['approved', 'partially_approved', 'converted'].includes(estimate.status) && !!num(row.est_customer_approved));

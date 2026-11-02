@@ -58,9 +58,9 @@ try {
   section = 'setup';
   const phone = `+97158${rnd7()}`;
   const cust = (await call('POST', '/customers', advisor, { full_name: 'QA Status Customer', phone, email: `qa-cs-${Date.now()}@example.invalid`, customer_class: 'external', customer_subcategory: 'walkin' })).json?.data;
-  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust?.id, make: 'Nissan', model: 'Patrol', year: 2023, plate_number: 'QACS01', vin: 'TSTCSA00000000001' })).json?.data;
+  const veh = (await call('POST', '/vehicles', advisor, { customer_id: cust?.id, make: 'Nissan', model: 'Patrol', year: 2023, plate_emirate: 'Dubai', plate_number: 'QACS01', vin: 'TSTCSA00000000001' })).json?.data;
   const created = await call('POST', '/work-orders', advisor, { customer_id: cust?.id, vehicle_id: veh?.id, customer_name: cust?.full_name, customer_phone: phone,
-    description: 'Vibration at 100 km/h; check the front suspension', payment_method: 'cash', service_fee: 0, items: [] });
+    description: 'Vibration at 100 km/h; check the front suspension', odometer_in: 41000, payment_method: 'cash', service_fee: 0, items: [] });
   const woId = created.json?.data?.id;
   const [wo] = await q('SELECT service_status_token FROM work_orders WHERE id = ?', [woId]);
   const token = wo?.service_status_token;

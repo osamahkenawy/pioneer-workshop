@@ -14,6 +14,11 @@
  * told. Converting it later fills that work order in; marking it lost (or
  * deleting it) cancels the work order if nothing has happened on it yet.
  *
+ * The enquiry's customer complaint (description) becomes the work order's
+ * complaint, and the parts the customer accepts (parts_preference: Genuine /
+ * After-Market / Used) go with it. Until an estimate is raised on the work
+ * order, editing them on the enquiry updates the work order too.
+ *
  * Mounted at: /api/enquiries
  */
 import express from 'express';
@@ -22,6 +27,8 @@ import { authMiddleware } from '../middleware/auth.js';
 import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { requireCapability } from '../lib/roles.js';
 import { serviceStatusToken } from '../lib/tokens.js';
+import { parsePartsPreference } from '../lib/intake-rules.js';
+import { clampText } from '../lib/sanitize.js';
 import {
   onEnquiryCreated, onEnquiryNurture, closeTasks, markEnquiryConverted, customerForEnquiry, vehicleForEnquiry,
   notePlateConflict, intakeChannelFor, payerTypeForClass, snapshotIntakeClass, enquiryContactMethods,
@@ -67,6 +74,16 @@ async function enumProblem(f) {
 }
 // 'social_media' is what the CRM activity log calls it.
 const normMethod = m => (m === 'social_media' ? 'social' : m);
+
+// The customer complaint (description) is kept as written, line breaks and
+// all, and refused rather than cut short when it is longer than the work
+// order's complaint it becomes (5,000 characters).
+const COMPLAINT_MAX = 5000;
+const complaintTooLong = v => typeof v === 'string' && v.trim().length > COMPLAINT_MAX;
+const complaintOf = v => (v == null ? null : clampText(String(v).trim()) || null);
+const COMPLAINT_TOO_LONG = { success: false, code: 'TEXT_TOO_LONG',
+  message: `The customer complaint is too long (${COMPLAINT_MAX.toLocaleString('en-US')} characters at most).` };
+const prefInvalid = error => ({ success: false, code: 'PARTS_PREFERENCE_INVALID', message: error });
 
 // GET /api/enquiries — list with filters
 router.get('/', async (req, res) => {
@@ -205,6 +222,12 @@ router.get('/:id', async (req, res) => {
  * channel, else the Service Advisor): data.work_order_id, and
  * work_order { id, work_order_number, created } — null if it could not be
  * opened (the enquiry is kept; Convert opens it later).
+ *
+ *   description       — the customer complaint, up to 5,000 characters
+ *   parts_preference  — the parts the customer accepts: ['genuine','used'] or
+ *                       'genuine,used' (any of genuine / after_market / used);
+ *                       none = not asked. Both are copied to the work order.
+ * enquiry_type is no longer on the form; it stays 'service' unless sent.
  */
 router.post('/', async (req, res) => {
   try {
@@ -212,7 +235,7 @@ router.post('/', async (req, res) => {
       customer_id, vehicle_id, contact_name, contact_phone, contact_email, vehicle_description, vehicle_plate,
       enquiry_type, service_tier, description, quoted_amount,
       source_channel, source_detail, referred_by, contact_method,
-      payer_type, status, follow_up_at, assigned_to,
+      payer_type, status, follow_up_at, assigned_to, parts_preference,
     } = req.body;
 
     // Website leads can arrive with only an e-mail address; either way the
@@ -226,6 +249,9 @@ router.post('/', async (req, res) => {
     const method = normMethod(contact_method) || 'phone';
     const problem = await enumProblem({ source_channel, enquiry_type, service_tier, payer_type, status, contact_method: method });
     if (problem) return res.status(400).json({ success: false, code: 'INVALID_VALUE', message: problem });
+    if (complaintTooLong(description)) return res.status(400).json(COMPLAINT_TOO_LONG);
+    const pref = parsePartsPreference(parts_preference);
+    if (pref.error) return res.status(400).json(prefInvalid(pref.error));
 
     // Enquiry numbers are a random draw per day; a collision draws again.
     let result;
@@ -234,14 +260,14 @@ router.post('/', async (req, res) => {
         result = await execute(
           `INSERT INTO enquiries
              (workshop_id, enquiry_number, customer_id, vehicle_id, contact_name, contact_phone, contact_email,
-              vehicle_description, vehicle_plate, enquiry_type, service_tier, description, quoted_amount, quoted_at,
-              source_channel, source_detail, referred_by, contact_method, payer_type, status,
+              vehicle_description, vehicle_plate, enquiry_type, service_tier, description, parts_preference,
+              quoted_amount, quoted_at, source_channel, source_detail, referred_by, contact_method, payer_type, status,
               follow_up_at, assigned_to, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [req.workshopId, genEnquiryNumber(), customer_id || null, vehicle_id || null,
            contact_name.trim(), String(contact_phone || '').trim() || null, contact_email || null, vehicle_description || null,
            vehicle_plate ? String(vehicle_plate).trim().toUpperCase().slice(0, 30) : null,
-           enquiry_type || 'service', service_tier || null, description || null,
+           enquiry_type || 'service', service_tier || null, complaintOf(description), pref.value ?? null,
            quoted_amount != null && quoted_amount !== '' ? quoted_amount : null,
            quoted_amount != null && quoted_amount !== '' ? new Date() : null,
            source_channel, source_detail || null, referred_by || null,
@@ -269,7 +295,8 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT /api/enquiries/:id
+// PUT /api/enquiries/:id — fields not sent keep their value. description and
+// parts_preference as on POST; parts_preference null / [] clears it.
 router.put('/:id', async (req, res) => {
   try {
     const [existing] = await query('SELECT * FROM enquiries WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
@@ -280,23 +307,48 @@ router.put('/:id', async (req, res) => {
     const problem = await enumProblem(Object.fromEntries(Object.keys({ ...ENUMS, contact_method: 1 })
       .filter(k => req.body[k] !== undefined).map(k => [k, f[k]])));
     if (problem) return res.status(400).json({ success: false, code: 'INVALID_VALUE', message: problem });
+    if (complaintTooLong(req.body.description)) return res.status(400).json(COMPLAINT_TOO_LONG);
+    if (req.body.description !== undefined) f.description = complaintOf(req.body.description);
+    const pref = parsePartsPreference(req.body.parts_preference);
+    if (pref.error) return res.status(400).json(prefInvalid(pref.error));
+    f.parts_preference = pref.value !== undefined ? pref.value : (existing.parts_preference || null);
     const quotedChanged = req.body.quoted_amount != null && String(req.body.quoted_amount) !== String(existing.quoted_amount);
 
     await execute(
       `UPDATE enquiries SET
          customer_id=?, vehicle_id=?, contact_name=?, contact_phone=?, contact_email=?, vehicle_description=?, vehicle_plate=?,
-         enquiry_type=?, service_tier=?, description=?, quoted_amount=?, quoted_at=?,
+         enquiry_type=?, service_tier=?, description=?, parts_preference=?, quoted_amount=?, quoted_at=?,
          source_channel=?, source_detail=?, referred_by=?, contact_method=?, payer_type=?,
          status=?, lost_reason=?, lost_notes=?, follow_up_at=?, assigned_to=?
        WHERE id = ? AND workshop_id = ?`,
       [f.customer_id || null, f.vehicle_id || null, f.contact_name, f.contact_phone || null, f.contact_email || null,
        f.vehicle_description || null, f.vehicle_plate ? String(f.vehicle_plate).trim().toUpperCase().slice(0, 30) : null, f.enquiry_type, f.service_tier || null, f.description || null,
+       f.parts_preference || null,
        f.quoted_amount != null && f.quoted_amount !== '' ? f.quoted_amount : null,
        quotedChanged ? new Date() : (existing.quoted_at || null),
        f.source_channel, f.source_detail || null, f.referred_by || null, f.contact_method, f.payer_type,
        f.status, f.lost_reason || null, f.lost_notes || null, f.follow_up_at || null, f.assigned_to || null,
        req.params.id, req.workshopId]
     );
+
+    // Until an estimate is raised on the enquiry's work order, a changed parts
+    // preference or complaint goes onto it too (the estimate then carries its
+    // own preference). A complaint already reworded on the work order stays.
+    const woId = existing.converted_work_order_id || existing.work_order_id;
+    const prefChanged = pref.value !== undefined && (pref.value || null) !== (existing.parts_preference || null);
+    const complaintChanged = req.body.description !== undefined && !!f.description && f.description !== (existing.description || null);
+    if (woId && (prefChanged || complaintChanged)) {
+      await execute(
+        `UPDATE work_orders wo
+            SET wo.parts_preference = IF(?, ?, wo.parts_preference),
+                wo.description = IF(? AND (wo.description IS NULL OR TRIM(wo.description) = '' OR wo.description = ?), ?, wo.description)
+          WHERE wo.id = ? AND wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled')
+            AND NOT EXISTS (SELECT 1 FROM service_estimates se
+                             WHERE se.workshop_id = wo.workshop_id AND (se.intake_work_order_id = wo.id OR se.work_order_id = wo.id)
+                               AND se.status NOT IN ('rejected','expired'))`,
+        [prefChanged ? 1 : 0, pref.value || null, complaintChanged ? 1 : 0, existing.description || '', f.description,
+         woId, req.workshopId]);
+    }
 
     // Marked lost here (rather than through /lost): its work order goes as there.
     let workOrder = null;
@@ -365,7 +417,7 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
     const info = {};
     const customerId = await customerForEnquiry(enq, { conn });
     const vehicleId = await vehicleForEnquiry(enq, customerId, { conn, info });
-    const [[enqWo]] = await conn.query("SELECT id FROM work_orders WHERE id = ? AND status NOT IN ('completed','cancelled')", [enq.work_order_id || 0]);
+    const [[enqWo]] = await conn.query("SELECT id, parts_preference FROM work_orders WHERE id = ? AND status NOT IN ('completed','cancelled')", [enq.work_order_id || 0]);
     await conn.commit();
     if (info.conflict) await notePlateConflict({ enq: { ...enq, customer_id: customerId }, conflict: info.conflict, userId: req.user?.id });
     const [customer] = await query(
@@ -376,6 +428,9 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
               payer_type: enq.payer_type, description: enq.description,
               // The enquiry's work order (opened when it was submitted), for the estimate's intake_work_order_id.
               work_order_id: enqWo?.id || null,
+              // The parts the customer accepts (the work order's, else the enquiry's): ['genuine','used'], null = not asked.
+              parts_preference: (enqWo?.parts_preference || enq.parts_preference)
+                ? String(enqWo?.parts_preference || enq.parts_preference).split(',') : null,
               vehicle_conflict: info.conflict || null },
     });
   } catch (err) {
@@ -397,8 +452,9 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
  *
  * Step 2 of the process: the job carries the reported issue and the channel
  * the request came through (WhatsApp, website, social media, else the
- * advisor). The odometer and the VIN may still be missing — the car is often
- * not in yet — and the workflow keeps Step 2 open until they are recorded.
+ * advisor), and the parts the customer accepts when it has none yet. The
+ * odometer and the VIN may still be missing — the car is often not in yet —
+ * and the workflow keeps Step 2 open until they are recorded.
  *
  * Every job card has a customer record: the one on the enquiry, else the one
  * on file with the same phone / e-mail, else a new one (the old "untick to
@@ -503,12 +559,14 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
                 customer_id = ?, vehicle_id = COALESCE(?, vehicle_id), service_bay_id = COALESCE(?, service_bay_id),
                 customer_name = ?, customer_phone = ?, customer_email = ?, description = ?,
                 service_tier = COALESCE(service_tier, ?), payer_type = ?,
+                parts_preference = COALESCE(parts_preference, ?),
                 scheduled_at = COALESCE(?, scheduled_at), odometer_in = COALESCE(?, odometer_in),
                 notes = COALESCE(?, notes)
           WHERE id = ? AND workshop_id = ?`,
         [customerId, customerId, customerId, vehicleId || null, b.service_bay_id || null,
          cust.full_name || enq.contact_name, realPhone(cust.phone) || enq.contact_phone || cust.phone || '',
          cust.email || enq.contact_email || null, complaint.slice(0, 5000), enq.service_tier || null, payer,
+         enq.parts_preference || null,
          b.scheduled_at ? String(b.scheduled_at).replace('T', ' ') : null, odometer, notes,
          live.id, req.workshopId]);
     }
@@ -520,15 +578,16 @@ router.post('/:id/convert', requireCapability('job.open'), async (req, res) => {
              (workshop_id, work_order_number, customer_id, vehicle_id, service_bay_id,
               customer_name, customer_phone, customer_email, description,
               service_tier, payer_type, enquiry_id, scheduled_at, service_fee, odometer_in,
-              intake_channel, status, service_status_token, notes)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?, 'pending', ?, ?)`,
+              intake_channel, status, service_status_token, notes, parts_preference)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?, 'pending', ?, ?, ?)`,
           [req.workshopId, number, customerId, vehicleId || null, b.service_bay_id || null,
            cust.full_name || enq.contact_name, realPhone(cust.phone) || enq.contact_phone || cust.phone || '',
            cust.email || enq.contact_email || null,
            complaint.slice(0, 5000), enq.service_tier || null, payer,
            enq.id, b.scheduled_at ? String(b.scheduled_at).replace('T', ' ') : null, odometer,
            // Step 2: how the request reached the workshop
-           intakeChannelFor(enq.contact_method), serviceStatusToken(), notes]
+           intakeChannelFor(enq.contact_method), serviceStatusToken(), notes,
+           enq.parts_preference || null]
         );
         workOrderId = ins.insertId; work_order_number = number;
       } catch (e) {

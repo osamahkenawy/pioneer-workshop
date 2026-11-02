@@ -11,6 +11,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { onEnquiryCreated, findCustomerByContact, enquiryContactMethods, openEnquiryWorkOrder } from '../lib/crm-cycle.js';
+import { parsePartsPreference } from '../lib/intake-rules.js';
 import { query, execute } from '../lib/database.js';
 import { sendEmail, buildEmailTemplate, getWorkshopBranding, getLogoCidAttachment } from '../lib/email.js';
 import { config } from '../config.js';
@@ -768,7 +769,10 @@ router.post('/check-availability', async (req, res) => {
    Accepts the flat shape the website already sends
      { customerName, email, phone, service, notes, website, source }
    as well as the nested { customer: { name, phone, email } } shape, so the
-   site only has to change the URL it posts to.
+   site only has to change the URL it posts to. Optional: partsPreference
+   (or parts_preference) — the parts the customer accepts, ['genuine',
+   'after_market', 'used'] in any combination or 'genuine,used'; carried to
+   the work order. Without it the Service Advisor asks.
    =========================================== */
 
 // CORS for this route is mounted in server.js, ahead of the global cors()
@@ -815,6 +819,10 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     }
     if (!blank(preferredDate) && !/^\d{4}-\d{2}-\d{2}$/.test(String(preferredDate).trim())) {
       errors.push({ field: 'preferredDate', message: 'Use the format YYYY-MM-DD' });
+    }
+    const partsPref = parsePartsPreference(b.partsPreference ?? b.parts_preference);
+    if (partsPref.error) {
+      errors.push({ field: b.partsPreference != null ? 'partsPreference' : 'parts_preference', message: partsPref.error });
     }
     if (errors.length) {
       return res.status(422).json({ success: false, message: 'Please check the form', errors });
@@ -871,14 +879,14 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
              (workshop_id, enquiry_number, external_reference, customer_id,
               contact_name, contact_phone, contact_email,
               vehicle_description, vehicle_plate,
-              enquiry_type, description,
+              enquiry_type, description, parts_preference,
               source_channel, source_detail, contact_method,
               branch, service_requested, preferred_date,
               intake_origin, raw_payload, status, created_by)
            -- intake_origin is enum('internal','api'); this arrives over the API.
            -- source_detail plus contact_method='website_form' (or 'social') identify
            -- it as the public form rather than a keyed server-to-server caller.
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
           [
             workshopId, enquiryNumber, extRef, known ? known.id : null,
             stripMarkup(String(name).trim()), cleanPhone, cleanEmail,
@@ -886,6 +894,7 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
             blank(vehicle.plateNumber) ? null : stripMarkup(String(vehicle.plateNumber).trim(), 30),
             mapEnquiryType(service),
             blank(note) ? null : clampText(String(note).trim()),
+            partsPref.value ?? null,
             mapSourceChannel(source),
             blank(source) ? null : stripMarkup(String(source).trim(), 120),
             contactMethod,

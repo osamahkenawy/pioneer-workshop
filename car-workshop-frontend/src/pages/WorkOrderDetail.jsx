@@ -16,8 +16,12 @@ import { isTechnician } from '../lib/modules';
 import './CRMPages.css';
 import './WorkOrderDetail.css';
 import JobCardWorkflow from '../components/workflow/JobCardWorkflow';
+import { jobTypeLabel, PART_CATEGORIES, prefList } from '../lib/intakeOptions';
 import { useTranslation } from 'react-i18next';
 import { fmtCurrency } from '../utils/currency';
+
+/** work_orders.job_types as an array (JSON). */
+const jobTypesOf = o => { try { const v = typeof o?.job_types === 'string' ? JSON.parse(o.job_types) : o?.job_types; return Array.isArray(v) ? v : []; } catch { return []; } };
 
 /* ── WhatsApp SVG Icon ── */
 const WhatsAppIcon = ({ width = 16, height = 16, color = 'currentColor' }) => (
@@ -347,7 +351,8 @@ export default function WorkOrderDetail() {
               <StatusBadge wo={order} size="lg" />
             </div>
             <div className="od-hero-meta">
-              <span className="od-meta-chip type">{fmtType(order.work_order_type)}</span>
+              {/* The job types the advisor ticked at Step 4 (the single "Job type" left the form, 2 Nov 2026). */}
+              {jobTypesOf(order).map(jt => <span key={jt} className="od-meta-chip type">{jobTypeLabel(jt)}</span>)}
               {order.service_bay_name && <span className="od-meta-chip bay">{order.service_bay_name}</span>}
               {statusLink && <button type="button" className="od-meta-chip token" onClick={copyLink} title={t('orderDetail.copy_link_hint', 'Copy the link the customer uses to follow this job')}><Copy width={11} height={11} /> {copied ? t('orderDetail.link_copied', 'Link copied') : t('orderDetail.copy_customer_link', 'Customer link')}</button>}
             </div>
@@ -464,7 +469,9 @@ export default function WorkOrderDetail() {
                 <div className="od-card-header"><div className="od-card-icon info"><Page width={16} height={16} /></div><h4>{t('orderDetail.section.order_info')}</h4></div>
                 <div className="od-card-body">
                   <InfoRow icon={Hashtag} label={t('orderDetail.order_num')} value={order.work_order_number} mono />
-                  <InfoRow icon={Box3dPoint} label={t('orderDetail.type')} value={fmtType(order.work_order_type)} />
+                  <InfoRow icon={Box3dPoint} label={t('orderDetail.job_types', 'Job type')} value={jobTypesOf(order).map(jobTypeLabel).join(' · ') || '—'} />
+                  <InfoRow icon={Box3dPoint} label={t('orderDetail.parts_accepted', 'Parts accepted')}
+                    value={PART_CATEGORIES.filter(c => prefList(order.parts_preference).includes(c.value)).map(c => c.label).join(' · ') || '—'} />
                   <InfoRow icon={CreditCard} label={t('orderDetail.payment')} value={paymentLabel(t, order.payment_method)} />
                   {order.customer_name && <InfoRow icon={User} label={t('orderDetail.customer')} value={order.customer_name} />}
                 </div>
