@@ -230,17 +230,16 @@ async function workOrderOf(row) {
 
 /**
  * Not below the car's previous reading (lib/intake-rules.js): null when the
- * reading may be saved, else { warning } — a manager confirmed a lower one —
- * or { status, body }. The work order's own reading passed this check when
- * the work order took it (a manager may have confirmed it there), so the same
- * reading is not questioned again here.
+ * reading may be saved, else { status, body }. The work order's own reading
+ * passed this check when the work order took it, so the same reading is not
+ * questioned again here.
  */
-async function odometerCheck(reading, row, wo, user) {
+async function odometerCheck(reading, row, wo) {
   if (reading == null) return null;
   if (wo?.odometer_in != null && Number(wo.odometer_in) === reading) return null;
   return checkOdometer({
     reading, vehicleId: wo?.vehicle_id || row.vehicle_id, workshopId: row.workshop_id,
-    workOrderId: row.work_order_id, user,
+    workOrderId: row.work_order_id,
   });
 }
 
@@ -417,17 +416,15 @@ router.put('/:id', recordGuard, async (req, res) => {
       if (req.body[f] !== undefined) { fields.push(`${f} = ?`); values.push(req.body[f] === '' ? null : req.body[f]); }
     }
     // The odometer: a whole number, never below the car's previous reading.
-    // Checked when it changes — the reading already on the form passed, or a
-    // manager confirmed it. Blank is allowed on a draft; completing the
-    // physical inspection asks for it.
-    let odometerWarning = null;
+    // Checked when it changes — the reading already on the form passed.
+    // Blank is allowed on a draft; completing the physical inspection asks
+    // for it.
     if (req.body.odometer !== undefined) {
       const odo = parseReading(req.body.odometer);
       if (odo.error) return res.status(400).json({ success: false, code: 'INVALID_ODOMETER', message: odo.error });
       if (odo.value != null && odo.value !== (row.odometer == null ? null : Number(row.odometer))) {
-        const chk = await odometerCheck(odo.value, row, await workOrderOf(row), req.user);
+        const chk = await odometerCheck(odo.value, row, await workOrderOf(row));
         if (chk?.status) return res.status(chk.status).json(chk.body);
-        odometerWarning = chk?.warning || null;
       }
       fields.push('odometer = ?'); values.push(odo.value);
     }
@@ -456,7 +453,7 @@ router.put('/:id', recordGuard, async (req, res) => {
     await execute(`UPDATE vehicle_inspections SET ${fields.join(', ')} WHERE id = ? AND workshop_id = ?`, values);
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: parseMarks(updated), ...(odometerWarning ? { warning: odometerWarning } : {}) });
+    return res.json({ success: true, data: parseMarks(updated) });
   } catch (err) {
     console.error('[VehicleInspections] Update error:', err);
     return res.status(500).json({ success: false, message: 'Failed to save inspection' });
@@ -653,9 +650,8 @@ async function jobCardAfter(row, userId) {
  * Also stamps the matching Customer Journey checkpoint on the work order, and
  * a physical inspection signed at the car or done on paper opens an external
  * customer's job card (response job_card, see jobCardAfter()).
- * The physical inspection needs the odometer (400 ODOMETER_REQUIRED /
- * ODOMETER_BELOW_LAST); a lower reading a manager confirms comes back as
- * warning.
+ * The physical inspection needs the odometer, never below the car's
+ * previous reading (400 ODOMETER_REQUIRED / ODOMETER_BELOW_LAST).
  */
 router.patch('/:id/complete', recordGuard, async (req, res) => {
   try {
@@ -682,15 +678,13 @@ router.patch('/:id/complete', recordGuard, async (req, res) => {
     // refused, and so is one below the car's previous reading unless a
     // manager confirms it. The handover inspection keeps it optional.
     let odometer = row.odometer == null ? null : Number(row.odometer);
-    let odometerWarning = null;
     let wo = null;
     if (row.inspection_type === 'intake') {
       wo = await workOrderOf(row);
       if (odometer == null && wo?.odometer_in != null) odometer = Number(wo.odometer_in);
       if (odometer == null) return res.status(400).json({ success: false, ...ODOMETER_REQUIRED });
-      const chk = await odometerCheck(odometer, row, wo, req.user);
+      const chk = await odometerCheck(odometer, row, wo);
       if (chk?.status) return res.status(chk.status).json(chk.body);
-      odometerWarning = chk?.warning || null;
     }
 
     await execute(
@@ -774,7 +768,7 @@ router.patch('/:id/complete', recordGuard, async (req, res) => {
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
     const jobCard = await jobCardAfter(updated, req.user.id);
-    return res.json({ success: true, data: parseMarks(updated), job_card: jobCard, ...(odometerWarning ? { warning: odometerWarning } : {}) });
+    return res.json({ success: true, data: parseMarks(updated), job_card: jobCard });
   } catch (err) {
     console.error('[VehicleInspections] Complete error:', err);
     return res.status(500).json({ success: false, message: 'Failed to complete inspection' });

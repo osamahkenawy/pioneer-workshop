@@ -133,15 +133,17 @@ try {
   expect('the customer signs from the link (name required) → the main job card opens, logged as signed from the link',
     noName.status === 400 && s1.status === 200 && !!jc1 && /signed by the customer from the link/.test(log1?.note || ''), `${noName.status}/${s1.status} ${log1?.note}`);
   expect('…department from the category (bodywork → body_paint), with the plate', jc1?.department === 'body_paint' && jc1?.vehicle_plate === vA.plate_number, JSON.stringify(jc1 && { department: jc1.department, plate: jc1.vehicle_plate }));
-  // The odometer may not go below the car's previous reading (client review, 2 Nov 2026) — only a manager may confirm a lower one.
+  // The odometer may not go below the car's previous reading (client review, 2 Nov 2026) — whoever enters it.
   r = await create(advisor, { odometer_in: 40000 });
   expect('second job on the same car, reading below the last one (advisor) → 400 ODOMETER_BELOW_LAST', r.status === 400 && r.json.code === 'ODOMETER_BELOW_LAST', `${r.status} ${r.json.code}`);
   const noOdo = await create(advisor, { odometer_in: null });
   expect('no reading with the car → 400 ODOMETER_REQUIRED', noOdo.status === 400 && noOdo.json.code === 'ODOMETER_REQUIRED', `${noOdo.status} ${noOdo.json.code}`);
   r = await create(manager, { odometer_in: 40000 });
+  expect('…a manager is refused a lower reading too (no override) → 400 ODOMETER_BELOW_LAST', r.status === 400 && r.json.code === 'ODOMETER_BELOW_LAST', `${r.status} ${r.json.code}`);
+  r = await create(manager, { odometer_in: 61500 }); // w1's reading
   const w2 = r.json.data;
   const codes = (r.json.warnings || []).map(w => w.code);
-  expect('…a manager may confirm it: OPEN_JOB_CARD and ODOMETER_BELOW_LAST warnings', r.status === 201 && codes.includes('OPEN_JOB_CARD') && codes.includes('ODOMETER_BELOW_LAST'), codes.join(','));
+  expect('…the same reading as last time is fine; the open job card is a warning, not a refusal', r.status === 201 && codes.includes('OPEN_JOB_CARD') && !codes.includes('ODOMETER_BELOW_LAST'), `${r.status} ${codes.join(',')}`);
   const pf = (await create(advisor, { customer_id: extFleet.id, vehicle_id: vF.id })).json.data;
   const pn = (await create(advisor, { customer_id: extIns.id, vehicle_id: vN.id })).json.data;
   expect('payer from the classification: outside fleet → fleet, insurer → insurance (C5j)', pf?.payer_type === 'fleet' && pn?.payer_type === 'insurance', `${pf?.payer_type} ${pn?.payer_type}`);
@@ -153,7 +155,7 @@ try {
   expect("history reads 'created' then 'approval recorded'", /created/.test(logs[0]?.note) && /approval/i.test(logs[1]?.note || ''), logs.map(l => l.note).join(' | '));
   const approvedNote = (await q("SELECT COUNT(*) n FROM user_notifications WHERE user_id = ? AND work_order_id = ? AND title LIKE 'Approved:%'", [users.leader.id, w4.id]))[0].n;
   expect('the floor is told the work is approved (not "inspection is next")', approvedNote === 1, `${approvedNote}`);
-  r = await create(manager, { items: [{ name: 'Wiper blades', quantity: 1, unit_price: 40 }] });
+  r = await create(manager, { odometer_in: 61500, items: [{ name: 'Wiper blades', quantity: 1, unit_price: 40 }] });
   const w5 = r.json.data;
   expect('a manager may price an external job at the counter', r.status === 201, `${r.status} ${r.json.code || ''}`);
   // An internal customer's job card opens with the job, so this races the job card numbers too.

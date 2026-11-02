@@ -1035,7 +1035,7 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
     const missingDetails = missingVehicleDetails(vehicle);
     if (missingDetails.length) return res.status(400).json({ success: false, ...vehicleDetailsRequired(missingDetails) });
     if (vehicle && odometer == null) return res.status(400).json({ success: false, ...ODOMETER_REQUIRED });
-    const odoCheck = await checkOdometer({ reading: odometer, vehicleId: vehicle?.id, workshopId: req.workshopId, user: req.user });
+    const odoCheck = await checkOdometer({ reading: odometer, vehicleId: vehicle?.id, workshopId: req.workshopId });
     if (odoCheck?.status) return res.status(odoCheck.status).json(odoCheck.body);
     // The parts the customer accepts (asked at the enquiry), and the job types.
     const partsPref = parsePartsPreference(body.parts_preference);
@@ -1124,7 +1124,7 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
     }
 
     // Told, not refused: the car already has a job card open (a second
-    // visit can be legitimate), or the reading is below the last one on file.
+    // visit can be legitimate).
     const warnings = [];
     if (vehicle) {
       const open = await query(
@@ -1136,8 +1136,6 @@ router.post('/', requireCapability('job.open'), async (req, res) => {
         warnings.push({ code: 'OPEN_JOB_CARD', work_order_id: o.id, work_order_number: o.work_order_number, status: o.status,
           message: `${vehicle.plate_number || 'This vehicle'} already has job card ${o.work_order_number} open (${woLabel(o.status)}).` });
       }
-      // A lower reading gets this far only when a manager confirmed it.
-      if (odoCheck?.warning) warnings.push(odoCheck.warning);
     }
 
     conn = await pool.getConnection();
@@ -1841,13 +1839,11 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     else if (vehicleChanged) odometer = null; // the old car's reading does not belong to the new one
     // Required with the car (client review, 2 Nov 2026): it can't be cleared,
     // a change of car needs that car's reading, and it never goes below the
-    // car's previous visits (a manager may confirm a lower one).
+    // car's previous visits.
     if (vehicleId && odometer == null && (vehicleChanged || has('odometer_in'))) throw new InputError(ODOMETER_REQUIRED.message, ODOMETER_REQUIRED.code);
-    const warnings = [];
     if (vehicleId && odometer != null && (vehicleChanged || Number(odometer) !== Number(current.odometer_in))) {
-      const chk = await checkOdometer({ reading: odometer, vehicleId, workshopId: req.workshopId, workOrderId: vehicleChanged ? null : current.id, user: req.user });
+      const chk = await checkOdometer({ reading: odometer, vehicleId, workshopId: req.workshopId, workOrderId: vehicleChanged ? null : current.id });
       if (chk?.status) throw new InputError(chk.body.message, chk.body.code);
-      if (chk?.warning) warnings.push(chk.warning);
     }
     // The parts the customer accepts, and the job types (Step 4).
     const partsPref = parsePartsPreference(raw.parts_preference);
@@ -2000,7 +1996,7 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
     }
     const billing = await syncJobCardBilling(current.id, req.workshopId);
     const [workOrder] = await query('SELECT * FROM work_orders WHERE id = ?', [current.id]);
-    return res.json({ success: true, data: workOrder, billing, ...(diff ? { lines_changed: diff.changed } : {}), ...(warnings.length ? { warnings } : {}) });
+    return res.json({ success: true, data: workOrder, billing, ...(diff ? { lines_changed: diff.changed } : {}) });
   } catch (err) {
     if (conn) await conn.rollback().catch(() => {});
     if (err instanceof InputError) return sendError(res, err);

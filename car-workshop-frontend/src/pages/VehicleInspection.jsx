@@ -11,8 +11,8 @@
  *
  * The odometer is required on the physical inspection and never below the
  * car's previous reading (client review, 2026-11-02): the server refuses a
- * missing or lower one (a manager may confirm a lower one, and is warned),
- * and its word shows under the field. Optional at handover.
+ * missing or lower one, whoever enters it, and its message shows under the
+ * field. Optional at handover.
  *
  * The inspection can also be done on the paper form and uploaded instead
  * (a PDF or photos of the pages) — "Upload the paper form" below.
@@ -172,7 +172,7 @@ export default function VehicleInspection() {
   const [resign, setResign] = useState(false);      // redo a saved signature (before completion)
   const [savingSig, setSavingSig] = useState(false);
   const fileRef = useRef(null);
-  const [odoMsg, setOdoMsg] = useState(null);       // the server's word on the odometer: { text, warn }
+  const [odoMsg, setOdoMsg] = useState(null);       // the server's refusal of the odometer reading
   const odoRef = useRef(null);
 
   // The cards at the bottom are a long scroll from the banner, so their errors show beside them.
@@ -183,13 +183,11 @@ export default function VehicleInspection() {
   const odometerRefused = (res) => {
     if (!ODOMETER_CODES.includes(res?.code)) return false;
     setError('');
-    setOdoMsg({ text: res.message, warn: false });
+    setOdoMsg(res.message);
     const el = odoRef.current;
     if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); }
     return true;
   };
-  // A lower reading a manager confirmed is saved, with the server's warning.
-  const odometerWarned = (res) => { if (res?.warning?.message) setOdoMsg({ text: res.warning.message, warn: true }); };
 
   const markSeq = useRef(1);
 
@@ -351,7 +349,6 @@ export default function VehicleInspection() {
         return false;
       }
       setInspection(res.data);
-      odometerWarned(res);
       setSavedAt(new Date());
       return true;
     } catch (e) {
@@ -380,7 +377,6 @@ export default function VehicleInspection() {
         setInspection(res.data);
         // A blank odometer was filled from the work order's reading.
         set('odometer', res.data?.odometer ?? '');
-        odometerWarned(res);
         setResign(false); noteJobCard(res.job_card); loadNext();
       } else if (!odometerRefused(res)) setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } catch (e) {
@@ -797,17 +793,17 @@ export default function VehicleInspection() {
             </label>
             <input id="vi-f-odometer" ref={odoRef} type="number" min={0} step={1} inputMode="numeric"
               required={odoRequired} aria-required={odoRequired || undefined}
-              aria-invalid={odoMsg && !odoMsg.warn ? true : undefined}
+              aria-invalid={odoMsg ? true : undefined}
               aria-describedby={odoMsg ? 'vi-f-odometer-msg' : undefined}
-              style={{ ...INPUT, ...(odoMsg && !odoMsg.warn ? { borderColor: '#dc2626', background: '#fef2f2' } : {}) }}
+              style={{ ...INPUT, ...(odoMsg ? { borderColor: '#dc2626', background: '#fef2f2' } : {}) }}
               disabled={locked} value={form.odometer ?? ''}
               onChange={e => { set('odometer', e.target.value); setOdoMsg(null); }} />
           </div>
           {/* Right under the field, across the row: the server's message is a sentence or two. */}
           {odoMsg && (
-            <p id="vi-f-odometer-msg" role={odoMsg.warn ? 'status' : 'alert'}
-              style={{ gridColumn: '1 / -1', margin: '-6px 0 0', fontSize: 12.5, fontWeight: 600, lineHeight: 1.45, color: odoMsg.warn ? '#b45309' : '#b91c1c' }}>
-              {odoMsg.text}
+            <p id="vi-f-odometer-msg" role="alert"
+              style={{ gridColumn: '1 / -1', margin: '-6px 0 0', fontSize: 12.5, fontWeight: 600, lineHeight: 1.45, color: '#b91c1c' }}>
+              {odoMsg}
             </p>
           )}
         </div>

@@ -155,8 +155,8 @@ The log must show `listening on port …` and no errors.
 ## 8. Quick test (with the user's real staff logins — don't create test accounts)
 
 1. Work Orders → New Work Order: it refuses to continue without an **odometer
-   reading**, and refuses a reading **lower** than the car's last one (only a
-   Workshop Manager can confirm a lower one).
+   reading**, and refuses a reading **lower** than the car's last one — for
+   everyone, managers included.
 2. Adding a new car needs **plate number, emirate, year and VIN**; there is a
    **Vehicle type** list. The work order form has **Customer complaint**, **Parts
    the customer accepts** (Genuine / After-Market / Used) and **Note for
@@ -203,7 +203,7 @@ job saved since the backup.
 ## What changed in this update (for the user)
 
 - The **odometer** reading is required and can't go below the car's previous
-  reading (a Workshop Manager can confirm a lower one).
+  reading (no override, managers included).
 - **VIN, plate number, emirate and model year** are required on a car; new
   **vehicle type** field (Sedan, Crossover, SUV, Medium Bus, Large Bus, Medium
   Truck, Large Truck, Hydraulic equipment).

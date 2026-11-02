@@ -1696,7 +1696,7 @@ export default function WorkOrders() {
           fetchWorkOrders();
           fetchStats();
           if (drawerFull && drawerFull.id === updated?.id) setDrawerFull(prev => ({ ...prev, ...updated }));
-          showToast(`Job card updated${updated?.work_order_number ? ` — ${updated.work_order_number}` : ''} ✓`, 'success');
+          showToast(`Work order updated${updated?.work_order_number ? ` — ${updated.work_order_number}` : ''} ✓`, 'success');
         }}
       />
 

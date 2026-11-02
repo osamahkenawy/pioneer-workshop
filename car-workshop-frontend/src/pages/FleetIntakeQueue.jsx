@@ -1,6 +1,6 @@
 /**
  * FleetIntakeQueue — what fleet coordinators have sent in, and turning it
- * into job cards.
+ * into work orders.
  *
  * The staff half of the tokenised intake link. An advisor works this queue
  * the way they used to work a pile of paper sheets, except the chassis
@@ -235,8 +235,8 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
       ...(createVehicle && needsMakeModel ? { make: veh.make.trim(), model: veh.model.trim(), ...(veh.year ? { year: Number(veh.year) } : {}) } : {}),
     }),
     (res) => (res.reused
-      ? t('fleetIntake.booked_in_on', 'Booked in on job card {{n}}', { n: res.data.work_order_number })
-      : t('fleetIntake.converted', 'Job card {{n}} created', { n: res.data.work_order_number }))
+      ? t('fleetIntake.booked_in_on', 'Booked in on work order {{n}}', { n: res.data.work_order_number })
+      : t('fleetIntake.converted', 'Work order {{n}} created', { n: res.data.work_order_number }))
   );
 
   const review = (decision) => act(
@@ -285,7 +285,7 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
         )}
         {!done && !rejected && detail.work_order_number && (
           <div className="fq-banner">
-            {t('fleetIntake.wo_opened', 'Work order {{n}} was opened when the request came in. Booking in confirms the vehicle on it — no second job card.', { n: detail.work_order_number })}
+            {t('fleetIntake.wo_opened', 'Work order {{n}} was opened when the request came in. Booking in confirms the vehicle on it — no second work order.', { n: detail.work_order_number })}
           </div>
         )}
 
@@ -313,7 +313,7 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
             <div className="fq-noMatch" style={{ marginBottom: 10 }}>
               <WarningCircle width={17} height={17} />
               <div>
-                {t('fleetIntake.already_open', 'This car is already with us on an open job card: {{list}}. Check it is not the same visit before booking it in again.',
+                {t('fleetIntake.already_open', 'This car is already with us on an open work order: {{list}}. Check it is not the same visit before booking it in again.',
                   { list: detail.open_work_orders.map(w => w.work_order_number).join(', ') })}
               </div>
             </div>
@@ -457,7 +457,7 @@ function DetailModal({ detail, loading, mayAct, onClose, onDone, onError }) {
                 )}
                 <button className="fq-btn" onClick={convert} disabled={busy || blocked}>
                   <Check width={16} height={16} /> {busy ? t('fleetIntake.working', 'Working…')
-                    : detail.work_order_number ? t('fleetIntake.book_in', 'Book in') : t('fleetIntake.create_jc', 'Create job card')}
+                    : detail.work_order_number ? t('fleetIntake.book_in', 'Book in') : t('fleetIntake.create_wo', 'Create work order')}
                 </button>
               </>
             )}

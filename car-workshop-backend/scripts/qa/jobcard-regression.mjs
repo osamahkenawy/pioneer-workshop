@@ -267,7 +267,7 @@ try {
   const H = 'H customer approval';
   const wizH = await api('POST', '/work-orders', {
     customer_id: CUST, vehicle_id: VEH, customer_name: 'LEAKTEST Customer', customer_phone: '+971500000999',
-    description: 'LEAKTEST service', odometer_in: 85001, service_fee: 100, items: [],
+    description: 'LEAKTEST service', odometer_in: 85200, service_fee: 100, items: [], // above the earlier visits (no lower reading, 2 Nov)
     customer_approval_channel: 'phone', customer_approval_note: 'Approved on call',
   });
   const woH = wizH.json?.data?.id; created.work_orders.push(woH);

@@ -5,14 +5,12 @@
  *    the car booked in (the VIN check itself is VIN_REQUIRED in
  *    routes/work-orders.js); the vehicle type is one of VEHICLE_TYPES;
  *  - the odometer: required at intake, and never below the car's previous
- *    reading. Managers may still record a lower one (a replaced instrument
- *    cluster, a typo on an old visit) — everyone else is refused;
+ *    reading — for every role, managers included (no override);
  *  - the parts the customer accepts (Genuine / After-Market / Used), asked at
  *    the enquiry / work order and carried to the estimate;
  *  - the job types the Service Advisor ticks at Step 4 (multi-select).
  */
 import { query } from './database.js';
-import { isManagerRole } from './roles.js';
 
 // As lib/workflow.js PART_CATEGORIES (kept here so the two modules don't import each other).
 const PART_CATEGORIES = ['genuine', 'after_market', 'used'];
@@ -79,19 +77,15 @@ export async function previousOdometer({ vehicleId, workshopId, workOrderId = nu
 
 /**
  * The odometer check: null when the reading may be saved, else
- * { status, body } to send. Managers get through a lower reading (the
- * caller adds a warning); a missing reading is the caller's to judge.
+ * { status, body } to send. A lower reading is refused whoever enters it;
+ * a missing reading is the caller's to judge.
  */
-export async function checkOdometer({ reading, vehicleId, workshopId, workOrderId = null, user, q = query }) {
+export async function checkOdometer({ reading, vehicleId, workshopId, workOrderId = null, q = query }) {
   if (reading == null || !vehicleId) return null;
   const prev = await previousOdometer({ vehicleId, workshopId, workOrderId, q });
   if (!prev || reading >= prev.last) return null;
   const fmt = n => Number(n).toLocaleString('en-US');
   const where = prev.work_order_number ? ` on ${prev.work_order_number}` : ' on the vehicle record';
-  if (isManagerRole(user)) {
-    return { warning: { code: 'ODOMETER_BELOW_LAST', last_mileage: prev.last,
-      message: `The reading (${fmt(reading)} km) is below the previous one (${fmt(prev.last)} km${where}); saved because a manager confirmed it.` } };
-  }
   return { status: 400, body: { success: false, code: 'ODOMETER_BELOW_LAST', last_mileage: prev.last,
     message: `The odometer reading (${fmt(reading)} km) is below the car's previous reading (${fmt(prev.last)} km${where}). Check the dashboard — the new reading must be the same or higher.` } };
 }
