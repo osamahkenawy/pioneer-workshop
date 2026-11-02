@@ -7,7 +7,7 @@ import {
   StatsUpSquare, Wallet, Filter, Eye, Clock,
 } from 'iconoir-react';
 import api from '../lib/api';
-import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
+import { MakeSelect, ModelSelect } from '../components/MakeModelSelect';
 import { TableSkeleton } from '../components/Loader';
 import Toast, { useToast } from '../components/Toast';
 import PhoneInputShared from '../components/PhoneInput';
@@ -1638,22 +1638,12 @@ export default function Customers() {
 
                     <div>
                       <label style={LABEL}>Make *</label>
-                      <select value={vehicleForm.make} onChange={e => setVehicleForm(v => ({ ...v, make: e.target.value, model: '' }))} style={INPUT}>
-                        <option value="">Select make…</option>
-                        {CAR_MAKES.map(m => <option key={m} value={m}>{m}</option>)}
-                      </select>
+                      <MakeSelect value={vehicleForm.make} style={INPUT}
+                        onChange={(make, picked) => setVehicleForm(v => ({ ...v, make, ...(picked ? { model: '' } : {}) }))} />
                     </div>
                     <div>
                       <label style={LABEL}>Model *</label>
-                      {vehicleForm.make && CAR_CATALOG[vehicleForm.make]?.length > 0 ? (
-                        <select value={vehicleForm.model} onChange={e => setVeh('model', e.target.value)} style={INPUT}>
-                          <option value="">Select model…</option>
-                          {CAR_CATALOG[vehicleForm.make].map(m => <option key={m} value={m}>{m}</option>)}
-                        </select>
-                      ) : (
-                        <input value={vehicleForm.model} onChange={e => setVeh('model', e.target.value)} style={INPUT}
-                          placeholder={vehicleForm.make ? 'Enter model' : 'Select make first'} disabled={!vehicleForm.make} />
-                      )}
+                      <ModelSelect make={vehicleForm.make} value={vehicleForm.model} style={INPUT} onChange={m => setVeh('model', m)} />
                     </div>
 
                     <div>

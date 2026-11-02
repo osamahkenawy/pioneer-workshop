@@ -10,7 +10,7 @@ import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import { VEHICLE_TYPES, vehicleTypeLabel, PART_CATEGORIES, prefList } from '../lib/intakeOptions';
-import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
+import { MakeSelect, ModelSelect } from './MakeModelSelect';
 import './NewWorkOrderModal.css';
 
 /**
@@ -1885,7 +1885,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     </div>
                     {pickedVehicle ? <VehicleCard v={pickedVehicle} on readOnly /> : <div style={st.emptyHint}>No vehicle on this job card.</div>}
                     {/* The car can't change, but what its record lacks can still be filled in. */}
-                    {fixingCar && <CarDetailsFix key={pickedVehicle.id} lacks={lacks} values={fixValues} onChange={setFixValue} badCls={badCls} bad={bad} />}
+                    {fixingCar && <CarDetailsFix key={pickedVehicle.id} lacks={lacks} values={fixValues} onChange={setFixValue} badCls={badCls} bad={bad} carMake={pickedVehicle.make} />}
                   </>
                 ) : enteringVehicle ? (
                   <>
@@ -1957,7 +1957,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                       <Plus width={16} height={16} /> Add a new vehicle
                     </button>
 
-                    {fixingCar && <CarDetailsFix key={pickedVehicle.id} lacks={lacks} values={fixValues} onChange={setFixValue} badCls={badCls} bad={bad} />}
+                    {fixingCar && <CarDetailsFix key={pickedVehicle.id} lacks={lacks} values={fixValues} onChange={setFixValue} badCls={badCls} bad={bad} carMake={pickedVehicle.make} />}
                   </>
                 )}
 
@@ -2381,35 +2381,24 @@ function TotalsBox({ totals, fmt, compact }) {
 }
 
 /**
- * The vehicle intake fields. Make and model are free text with the catalog
- * as suggestions: the workshop's own top fleet models (Hybrid Camry,
- * Attrage, JAC, Rosa, Canter…) were not in the dropdowns, and the only way
- * round it stored make = "Other". Make, model, plate and VIN are required —
- * VIN because a chassis number is captured while the car is in front of
- * someone.
+ * The vehicle intake fields. Make and model are dropdowns from the catalog
+ * (MakeModelSelect): another make empties the model, and a make or model the
+ * list doesn't have is typed — so a JAC or a Rosa never has to be stored as
+ * "Other". Make, model, plate and VIN are required — VIN because a chassis
+ * number is captured while the car is in front of someone.
  */
 function VehicleFormFields({ newVehicle, setNewVehicle, badCls, bad }) {
   const set = (k, v) => setNewVehicle(prev => ({ ...prev, [k]: v }));
-  const catalogMake = CAR_MAKES.find(m => m.toLowerCase() === newVehicle.make.trim().toLowerCase());
-  const models = catalogMake ? CAR_CATALOG[catalogMake] || [] : [];
   return (
     <div className="nwo-stack">
       <div className="nwo-grid2">
         <Field label="Make" required>
-          <input style={st.input} className={badCls('make')} data-field="make" list="nwo-makes" maxLength={100}
-            autoComplete="off" aria-invalid={bad('make') || undefined} placeholder="Toyota, JAC, Exeed…"
-            value={newVehicle.make} onChange={e => set('make', e.target.value)} />
-          <datalist id="nwo-makes">
-            {CAR_MAKES.filter(m => m !== 'Other').map(m => <option key={m} value={m} />)}
-          </datalist>
+          <MakeSelect value={newVehicle.make} style={st.input} className={badCls('make')} field="make" invalid={bad('make')}
+            onChange={(make, picked) => setNewVehicle(prev => ({ ...prev, make, ...(picked ? { model: '' } : {}) }))} />
         </Field>
         <Field label="Model" required>
-          <input style={st.input} className={badCls('model')} data-field="model" list="nwo-models" maxLength={100}
-            autoComplete="off" aria-invalid={bad('model') || undefined} placeholder="Hybrid Camry, Attrage…"
-            value={newVehicle.model} onChange={e => set('model', e.target.value)} />
-          <datalist id="nwo-models">
-            {models.map(m => <option key={m} value={m} />)}
-          </datalist>
+          <ModelSelect make={newVehicle.make} value={newVehicle.model} style={st.input} className={badCls('model')} field="model" invalid={bad('model')}
+            onChange={v => set('model', v)} />
         </Field>
       </div>
       <div className="nwo-grid2">
@@ -2493,7 +2482,7 @@ function VehicleFormFields({ newVehicle, setNewVehicle, badCls, bad }) {
  * only optional ones are missing it is a link the advisor may open. Saved
  * onto the vehicle on submit, so each detail is asked for only once.
  */
-function CarDetailsFix({ lacks, values, onChange, badCls, bad }) {
+function CarDetailsFix({ lacks, values, onChange, badCls, bad, carMake }) {
   const [open, setOpen] = useState(false);
   if (!lacks.length) return null;
   const required = lacks.some(f => f.required);
@@ -2510,14 +2499,26 @@ function CarDetailsFix({ lacks, values, onChange, badCls, bad }) {
     plate_number: { max: 50, ph: '87345', upper: true, ltr: true },
     plate_code: { max: 10, ph: 'A', upper: true, ltr: true },
     year: { max: 4, ph: '2022', ltr: true, numeric: true },
-    make: { max: 100, ph: 'Toyota, JAC, Exeed…' },
-    model: { max: 100, ph: 'Hybrid Camry, Attrage…' },
     vin: { max: 25, ph: 'JTNB11HK7N3024321', upper: true, ltr: true },
     color: { max: 50, ph: 'White' },
     engine_no: { max: 50, ph: 'A0C01177', ltr: true },
     fleet_code: { max: 50, ph: '5946', ltr: true },
   };
+  const lacksModel = lacks.some(f => f.k === 'model');
   const input = (k) => {
+    if (k === 'make') {
+      return (
+        <MakeSelect value={val('make')} style={st.input} className={badCls('fix-make')} field="fix-make" invalid={bad('fix-make')}
+          onChange={(make, picked) => { onChange('make', make); if (picked && lacksModel) onChange('model', ''); }} />
+      );
+    }
+    if (k === 'model') {
+      return (
+        <ModelSelect make={lacks.some(f => f.k === 'make') ? val('make') : carMake} value={val('model')}
+          style={st.input} className={badCls('fix-model')} field="fix-model" invalid={bad('fix-model')}
+          onChange={v => onChange('model', v)} />
+      );
+    }
     if (k === 'plate_emirate' || k === 'vehicle_type') {
       return (
         <select style={st.input} {...mark(k)} value={val(k)} onChange={e => onChange(k, e.target.value)}>

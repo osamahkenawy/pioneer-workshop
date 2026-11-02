@@ -12,7 +12,7 @@ import {
   Group, Wallet, Calendar, ViewGrid, List, Settings as SettingsIcon,
 } from 'iconoir-react';
 import api from '../lib/api';
-import { CAR_CATALOG, CAR_MAKES } from '../lib/carCatalog';
+import { MakeSelect, ModelSelect } from '../components/MakeModelSelect';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import Toast, { useToast } from '../components/Toast';
@@ -709,24 +709,15 @@ export default function Vehicles() {
               </label>
               <label style={LABEL}>
                 {t('vehicles.make', 'Make')} *
-                <select value={modal.form.make} required onChange={(e) => { setField('make', e.target.value); setField('model', ''); }} style={inp('make')}>
-                  <option value="">{t('vehicles.select_make', 'Select make…')}</option>
-                  {CAR_MAKES.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
+                {/* Shows the car's own make and model even when the list
+                    doesn't have them (a JAC, a Hybrid Camry). */}
+                <MakeSelect value={modal.form.make} required style={inp('make')}
+                  onChange={(make, picked) => { setField('make', make); if (picked) setField('model', ''); }} />
               </label>
               <label style={LABEL}>
                 {t('vehicles.model', 'Model')} *
-                {modal.form.make && CAR_CATALOG[modal.form.make] && CAR_CATALOG[modal.form.make].length > 0 ? (
-                  <select value={modal.form.model} required onChange={(e) => setField('model', e.target.value)} style={inp('model')}>
-                    <option value="">{t('vehicles.select_model', 'Select model…')}</option>
-                    {CAR_CATALOG[modal.form.make].map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                ) : (
-                  <input value={modal.form.model} required onChange={(e) => setField('model', e.target.value)}
-                    placeholder={modal.form.make ? 'Enter model' : 'Select make first'}
-                    disabled={!modal.form.make}
-                    style={inp('model')} />
-                )}
+                <ModelSelect make={modal.form.make} value={modal.form.model} required style={inp('model')}
+                  onChange={(model) => setField('model', model)} />
               </label>
               {/* A UAE plate is number + code + emirate, kept apart as in the
                   job card wizard ("87345 / A / Abu Dhabi"). */}

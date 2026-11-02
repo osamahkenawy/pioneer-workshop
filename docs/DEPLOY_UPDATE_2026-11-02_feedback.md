@@ -3,8 +3,9 @@
 These are instructions for the assistant that runs the deployment. The machine
 already runs the **2 Nov 2026 update** (commit `2e1d62c` on branch
 `fix/job-card-leaks`, message "Client review (2 Nov)…"). This follow-up fixes
-the user's feedback on it. **Code only: no database migrations, no new
-packages, no new settings.**
+the user's feedback on it — two rounds of fixes, both included in the latest
+commit. **Code only: no database migrations, no new packages, no new
+settings.**
 
 | | |
 |---|---|
@@ -43,7 +44,9 @@ packages, no new settings.**
 git branch --show-current && git log --oneline -1
 ```
 
-- It must be on `fix/job-card-leaks` at `2e1d62c` ("Client review (2 Nov)…").
+- It must be on `fix/job-card-leaks` at `2e1d62c` ("Client review (2 Nov)…") —
+  or at `aa528ca` ("Client feedback (2 Nov)…") if the first round of these
+  fixes was already deployed; either is fine.
 - **If it is still at `c17aac4`** ("Client changes (29 Oct)…"), the 2 Nov update
   was never deployed: stop and tell the user. That update needs its two
   database migrations (`docs/DEPLOY_UPDATE_2026-11-02.md`, steps 3–4); with the
@@ -122,6 +125,13 @@ browser picks up the new build. No sign-out is needed — no permissions changed
    refused ("The reading is lower than the car's previous reading…") — for a
    Workshop Manager too, with **no checkbox**.
 4. Edit a work order and save: the message says **"Work order updated"**.
+5. Enquiries → **New Enquiry**: the button at the bottom says **"Submit Work
+   Order"** (was "Log Enquiry"). Cancel — don't save.
+6. New Work Order → **Add a new vehicle**: **Make** is a drop-down; picking
+   another make empties **Model**, which lists that make's models. "Other —
+   type the make / model" is at the bottom of each list for anything not listed.
+7. Vehicles → **Edit** a JAC (or a Toyota Hybrid Camry): the make and model
+   show in the form (they used to be blank). Close without saving.
 
 Cancel any test work order you create (Work Orders → the job → Cancel), or use a
 real job the user names.
@@ -163,3 +173,12 @@ pm2 restart car-workshop-backend
   switching back brings them back, with the car and reading picked for them.
 - **Wording:** the Fleet Intake button says **"Create work order"** (was "Create
   job card"); after an edit the message says "Work order updated".
+- **Enquiry form:** the submit button says **"Submit Work Order"** (was "Log
+  Enquiry") — saving an enquiry opens its work order.
+- **Make and model** (work order form, Vehicles, Customers): Make is a
+  drop-down and picking another make empties the model, which is then a
+  drop-down of that make's models; anything not listed is typed ("Other — type
+  it"). Editing a car always shows its own make and model (a JAC or a Hybrid
+  Camry used to show blank). The list now has the workshop's common cars —
+  JAC, Exeed, Tata, Ashok Leyland, GWM; Hybrid Camry, Hiace, Attrage, Rosa,
+  Canter, X-Terra, MG3/MG5.

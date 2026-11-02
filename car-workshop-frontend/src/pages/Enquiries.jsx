@@ -613,7 +613,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
         <div style={st.footer}>
           <button onClick={onClose} style={st.ghostBtn}>Cancel</button>
           <button onClick={submit} disabled={saving} style={{ ...st.primaryBtn, opacity: saving ? 0.7 : 1 }}>
-            {saving ? 'Saving…' : isEdit ? 'Save Changes' : 'Log Enquiry'}
+            {saving ? 'Saving…' : isEdit ? 'Save Changes' : 'Submit Work Order'}
           </button>
         </div>
       </div>
