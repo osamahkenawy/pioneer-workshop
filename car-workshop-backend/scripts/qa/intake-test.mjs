@@ -51,6 +51,14 @@ try {
   };
   const advisor = await mk('advisor', 'service_advisor', 'service_advisor');
   const supervisor = await mk('supervisor', 'supervisor', 'supervisor');
+  // The estimate follows the work order's completed technical inspection
+  // (client decision, 3 Nov 2026): the Supervisor writes and completes it first.
+  const completeTechnical = async (workOrderId, tok = supervisor) => {
+    const ti = (await call('POST', '/technical-inspections', tok, { work_order_id: workOrderId })).json?.data;
+    await call('PUT', `/technical-inspections/${ti?.id}`, tok, { service_lines: [{ job: 'QA inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await call('PATCH', `/technical-inspections/${ti?.id}/complete`, tok, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  };
   const store = await mk('store', 'part_advisor', 'storekeeper');
   const leader = await mk('leader', 'dispatcher', 'team_leader');
   const manager = await mk('manager', 'workshop_manager', 'workshop_manager');
@@ -233,6 +241,7 @@ try {
   expect('paper form: not without the upload (DOCUMENT_REQUIRED); uploaded and completed → the main job card opens, logged as the paper form',
     empty.json.code === 'SIGNATURE_REQUIRED' && noDoc.status === 400 && noDoc.json.code === 'DOCUMENT_REQUIRED' && up.status === 201 && c2.status === 200 && c2.json.job_card?.opened_now === true
     && !!(await mainOf(w2.id)) && /paper form uploaded/.test(log2?.note || ''), `${empty.json.code} ${noDoc.status} ${noDoc.json.code} upload ${up.status} complete ${c2.status} ${log2?.note}`);
+  await completeTechnical(w2.id);
   const est = await call('POST', '/estimates', advisor, { intake_work_order_id: w2.id, lines: estLines });
   cur = await get(w2.id);
   r = await put(w2.id, { vehicle_id: vA2.id, odometer_in: 52000, expected_updated_at: cur.updated_at });

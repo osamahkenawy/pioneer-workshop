@@ -43,6 +43,14 @@ try {
   };
   const advisor = await mk('advisor', 'service_advisor', 'service_advisor');
   const supervisor = await mk('supervisor', 'supervisor', 'supervisor');
+  // The estimate follows the work order's completed technical inspection
+  // (client decision, 3 Nov 2026): the Supervisor writes and completes it first.
+  const completeTechnical = async (workOrderId, tok = supervisor) => {
+    const ti = (await call('POST', '/technical-inspections', tok, { work_order_id: workOrderId })).json?.data;
+    await call('PUT', `/technical-inspections/${ti?.id}`, tok, { service_lines: [{ job: 'QA inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await call('PATCH', `/technical-inspections/${ti?.id}/complete`, tok, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  };
   const leader = await mk('leader', 'dispatcher', 'team_leader');
   const tech = await mk('tech', 'mechanic');
   const tech2 = await mk('tech2', 'mechanic');
@@ -73,6 +81,7 @@ try {
     const insp = (await call('POST', '/vehicle-inspections', advisor, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
     await call('PATCH', `/vehicle-inspections/${insp?.id}/signature`, advisor, { signature: PNG, name: cust.full_name });
     const ack = await call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, advisor, {});
+    await completeTechnical(woId);
     const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines });
     await call('POST', `/estimates/${est.json.estimateId}/internal-approve`, supervisor);
     await call('POST', `/estimates/${est.json.estimateId}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });

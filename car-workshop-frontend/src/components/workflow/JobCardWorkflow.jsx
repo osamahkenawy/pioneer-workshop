@@ -21,6 +21,7 @@ import { buildStatusMessage } from '../../lib/whatsapp';
 import { customerStatusUrl } from '../../lib/customerLink';
 import { hasModule } from '../../lib/modules';
 import { JOB_TYPES, jobTypeLabel } from '../../lib/intakeOptions';
+import JobTasksPanel from './JobTasksPanel';
 import './JobCardWorkflow.css';
 
 const STEP_ICONS = { classification: User, intake: Car, job_card: Page, inspection_pricing: Search, estimate: Mail, work: Wrench, closure: ShieldCheck };
@@ -357,7 +358,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
         {(step.key === 'inspection_pricing' || step.key === 'estimate') && (
           <EstimateBody data={data} t={t} money={money} closed={closed} step={step.key} canRaise={roles.estimate}
             canOpen={hasModule(user, 'estimates')}
-            onNew={() => navigate(`/estimates?new=1&wo=${wo.id}`)}
+            onNew={kind => navigate(`/estimates?new=1&wo=${wo.id}${kind === 'supplementary' ? '&kind=supplementary' : ''}`)}
             onOpen={id => navigate(`/estimates?id=${id}`)} />
         )}
         {step.key === 'work' && (
@@ -833,18 +834,23 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, 
   const catTotal = (row, c) => row?.totals?.[c] ?? (c === 'genuine' ? row?.total_genuine : c === 'after_market' ? row?.total_after_market : null);
   const alternatives = pricing?.alternatives || [];
   const hasParts = (pricing?.partLines || 0) > 0;
-  // The estimate is raised from the technical report (the form is pre-filled
-  // from it); without one it can still be raised — the report guides, it does not hold it.
+  // The estimate is raised from the completed technical report (client
+  // meeting, 3 Nov 2026: estimation follows the technical inspection; POST
+  // /estimates refuses one without it).
   const fromReport = data.technical_inspection?.status === 'completed';
+  // Supplementary estimates (SEST-…): extra work on top of a decided main estimate.
+  const sests = data.supplementary_estimates || [];
+  const mainDecided = ['approved', 'partially_approved', 'converted'].includes(est?.status);
+  const sestOpen = sests.some(e => !['approved', 'partially_approved', 'converted', 'rejected', 'expired'].includes(e.status));
   return (
     <div className="wf-body">
-      {step === 'inspection_pricing' && !est && !closed && canRaise && (
+      {step === 'inspection_pricing' && !est && !closed && canRaise && (fromReport ? (
         <div className="wf-row">
-          <button className={`wf-btn ${fromReport ? 'primary' : 'ghost'}`} onClick={onNew}>
-            <Plus width={15} height={15} /> {fromReport ? t('workflow.raise_from_report', 'Raise the estimate from the technical report') : t('workflow.raise_estimate', 'Raise the estimate')}
+          <button className="wf-btn primary" onClick={onNew}>
+            <Plus width={15} height={15} /> {t('workflow.raise_from_report', 'Raise the estimate from the technical report')}
           </button>
         </div>
-      )}
+      ) : <p className="wf-note">{t('workflow.estimate_after_report', 'The estimate is raised once the technical inspection is completed.')}</p>)}
       {counter ? <p className="wf-note">{t('workflow.counter_priced', 'This job card was priced at the counter when it was opened; no separate estimate.')}</p> : null}
       {est && (
         <>
@@ -902,6 +908,30 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, 
           {est.customer_notes && <p className="wf-note">{t('workflow.customer_said', 'Customer')}: {est.customer_notes}</p>}
         </>
       )}
+      {(sests.length > 0 || (mainDecided && !closed && canRaise)) && (
+        <div className="wf-sest">
+          <div className="wf-est-head">
+            <strong>{t('workflow.sest_title', 'Supplementary estimates')}</strong>
+            {mainDecided && !closed && canRaise && !sestOpen && (
+              <button className="wf-btn ghost sm" onClick={() => onNew('supplementary')}>
+                <Plus width={13} height={13} /> {t('workflow.sest_raise', 'Raise a supplementary estimate')}
+              </button>
+            )}
+          </div>
+          {sests.length === 0
+            ? <p className="wf-muted sm">{t('workflow.sest_none', 'None — extra work found later is priced on a supplementary estimate, at a fixed cost the customer consents to.')}</p>
+            : (
+              <ul className="wf-part-list">
+                {sests.map(e => (
+                  <li key={e.id}>
+                    <span><b>{e.estimate_number}</b> · {String(e.status).replace(/_/g, ' ')} · {money(e.total_amount)}</span>
+                    {canOpen && <button className="wf-btn ghost sm" onClick={() => onOpen(e.id)}>{t('workflow.open_estimate', 'Open estimate')} <NavArrowRight width={14} height={14} /></button>}
+                  </li>
+                ))}
+              </ul>
+            )}
+        </div>
+      )}
     </div>
   );
 }
@@ -957,6 +987,7 @@ function WorkBody({ data, t, money, roles, busy, act, elapsed, closed, mechanics
         </div>
       )}
 
+      {approved && <JobTasksPanel workOrderId={wo.id} closed={closed} />}
       <div className="wf-cards">
         {data.job_cards.map(c => <JobCardCard key={c.id} card={c} t={t} roles={roles} busy={busy} act={act} elapsed={elapsed}
           closed={closed} approved={approved} mechanics={mechanics} openModal={openModal} />)}

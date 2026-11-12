@@ -5,6 +5,17 @@
  *          req 70 (operations master defaults),
  *          req 71 (mixed-payer job support),
  *          req 72 (pre-approved bundles → direct conversion)
+ *
+ *  Client decisions (3 Nov 2026):
+ *   - An estimate is raised for a work order once its technical
+ *     inspection is completed (409 TECHNICAL_INSPECTION_REQUIRED) — a
+ *     quote from an enquiry or for a customer alone has none, so it is
+ *     refused too.
+ *   - Main (EST-…) and supplementary (SEST-…) estimates: extra work found
+ *     later on the same job goes on a supplementary estimate, linked to the
+ *     decided main one, at a fixed cost and approved with the customer's
+ *     consent (estimate_consents); its approved lines join the same job card.
+ *   - The customer decides several lines at once (POST /:token/decide-bulk).
  * ═══════════════════════════════════════════════════════════════
  */
 import express from 'express';
@@ -27,6 +38,7 @@ import { jobCardGate, openJobCardIfReady } from '../lib/physical-inspection.js';
 import { can, requireCapability, isManagerRole } from '../lib/roles.js';
 import { applyStatusChange } from './work-orders.js';
 import { createTask, closeTasks, markEnquiryQuoted, markEnquiryConverted, snapshotIntakeClass, closeEnquiryWorkOrder } from '../lib/crm-cycle.js';
+import { stripMarkup } from '../lib/sanitize.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -34,11 +46,12 @@ router.use(authMiddleware);
 // Anonymous, unauthenticated — reachable by anyone with the emailed link.
 const publicRouter = express.Router();
 
-function genEstimateNumber() {
+/** EST-20261112-4821 for a main estimate, SEST-20261112-4821 for a supplementary one. */
+function genEstimateNumber(kind = 'main') {
   const d = new Date();
   const stamp = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
   const rand = Math.floor(Math.random() * 9000) + 1000;
-  return `EST-${stamp}-${rand}`;
+  return `${kind === 'supplementary' ? 'SEST' : 'EST'}-${stamp}-${rand}`;
 }
 
 // ─── Compute financial totals from lines ──────────────────────
@@ -276,6 +289,181 @@ function accountTypeForClass(customerClass, subcategory) {
   return 'retail_cash';
 }
 
+// ─── Main and supplementary estimates (client decisions, 3 Nov 2026) ──
+// The estimate stage follows the technical inspection: an estimate is
+// raised for a work order once its technical inspection (Step 4,
+// routes/technical-inspections.js) is completed. The work order's estimate
+// is its MAIN estimate (EST-…). Extra work found later on the same job goes
+// on a SUPPLEMENTARY estimate (SEST-…), raised once the customer has decided
+// the main one and linked to it (parent_estimate_id). It carries a FIXED
+// COST: its parts are priced by the Store in one part type only, so every
+// line has one firm price — no choice between types, no alternative, nothing
+// "not available" when it goes out — and the customer approves it with their
+// consent (estimate_consents: the statement, the cost, their name, when, the
+// IP). Its approved lines join the same job card, like the main estimate's.
+const TECHNICAL_INSPECTION_REQUIRED = 'TECHNICAL_INSPECTION_REQUIRED';
+const DECIDED_STATUSES = ['approved', 'partially_approved', 'converted'];
+const OPEN_STATUSES = ['draft', 'sent_to_customer'];
+const KIND_LABEL = { main: 'Main estimate', supplementary: 'Supplementary estimate' };
+const isSupplementary = est => est?.kind === 'supplementary';
+const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+
+/** The work order's technical inspection: { id, status, completed_at } or null. */
+async function technicalInspectionOf(workOrderId, workshopId) {
+  const [ti] = await query(
+    'SELECT id, status, completed_at FROM technical_inspections WHERE work_order_id = ? AND workshop_id = ?',
+    [workOrderId, workshopId]);
+  return ti || null;
+}
+
+/**
+ * A work order's estimates: its main estimate (the latest not rejected or
+ * expired — an estimate converted before 'kind' existed counts as main),
+ * its supplementary ones (newest first) and the one still open, if any.
+ */
+async function jobEstimates(workOrderId, workshopId) {
+  const rows = await query(
+    `SELECT id, estimate_number, kind, status, parent_estimate_id, parts_preference, estimate_format, customer_type,
+            total_amount, intake_work_order_id, work_order_id
+       FROM service_estimates
+      WHERE workshop_id = ? AND (intake_work_order_id = ? OR work_order_id = ?)
+      ORDER BY id DESC`, [workshopId, workOrderId, workOrderId]);
+  const main = rows.find(r => !isSupplementary(r) && !['rejected', 'expired'].includes(r.status)) || null;
+  const supplementaries = rows.filter(isSupplementary);
+  return { main, supplementaries, openSupplementary: supplementaries.find(r => OPEN_STATUSES.includes(r.status)) || null };
+}
+
+/** The refusal for an estimate with no work order: a quote from an enquiry, or for a customer alone. */
+function noWorkOrderRefusal(fromEnquiry) {
+  return {
+    status: 409, code: TECHNICAL_INSPECTION_REQUIRED,
+    message: fromEnquiry
+      ? 'A quote is no longer raised from an enquiry: the estimate follows the technical inspection. Open the work order for this car, do the physical and technical inspections, then raise the estimate from it.'
+      : 'An estimate is raised for a work order once its technical inspection is completed. Choose the work order, then raise the estimate from it.',
+  };
+}
+
+/**
+ * Whether an estimate can be raised for the work order `wo` now, and of
+ * which kind (`wanted`: 'main' or 'supplementary'; null: whichever comes
+ * next). { ok: true, kind, main, technical } or { ok: false, status, code,
+ * message, … } — the same answer for POST / and GET /raise-check, so the
+ * form can say it up front.
+ */
+async function raiseCheck(wo, workshopId, wanted = null) {
+  if (['completed', 'cancelled'].includes(wo.status)) {
+    return { ok: false, status: 409, code: 'JOB_CLOSED', message: `That job is ${wo.status}.` };
+  }
+  // D2: the physical inspection comes first for an external customer — the
+  // main job card opens when they acknowledge it. Internal customers' job
+  // cards open with the job.
+  const gate = await jobCardGate({ workOrderId: wo.id, workshopId });
+  if (!gate.internal && !gate.jobCardOpen) {
+    return { ok: false, status: 409, code: 'PHYSICAL_INSPECTION_REQUIRED',
+      message: 'Do the physical inspection with the customer first — the job card opens when they acknowledge it.' };
+  }
+  // The estimate follows the completed technical inspection.
+  const technical = await technicalInspectionOf(wo.id, workshopId);
+  if (technical?.status !== 'completed') {
+    return { ok: false, status: 409, code: TECHNICAL_INSPECTION_REQUIRED, technical_inspection: technical,
+      message: technical
+        ? `The technical inspection of ${wo.work_order_number || 'this work order'} is not completed yet — the estimate is raised once the Supervisor / Workshop Foreman completes it.`
+        : `The technical inspection of ${wo.work_order_number || 'this work order'} has not been done — the Supervisor / Workshop Foreman inspects the car and completes the technical report first; the estimate is raised from it.` };
+  }
+  const { main, openSupplementary } = await jobEstimates(wo.id, workshopId);
+  const mainDecided = !!main && DECIDED_STATUSES.includes(main.status);
+  const kind = wanted || (mainDecided ? 'supplementary' : 'main');
+  const base = { main, technical, kind };
+  if (kind === 'main') {
+    if (main && mainDecided) {
+      return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_DECIDED',
+        message: `${main.estimate_number} is this job's main estimate and the customer has decided it. Extra work goes on a supplementary estimate, at a fixed cost.` };
+    }
+    if (main) return { ...base, ok: false, status: 409, code: 'ESTIMATE_OPEN', message: `Estimate ${main.estimate_number} is already open for this job — edit that one.` };
+    return { ...base, ok: true };
+  }
+  if (!main) {
+    return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_REQUIRED',
+      message: 'A supplementary estimate follows the main estimate — raise the main estimate for this job first.' };
+  }
+  if (!mainDecided) {
+    return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_NOT_DECIDED',
+      message: `A supplementary estimate is raised once the customer has decided the main estimate ${main.estimate_number} (it is ${String(main.status).replace(/_/g, ' ')}).` };
+  }
+  if (openSupplementary) {
+    return { ...base, ok: false, status: 409, code: 'SUPPLEMENTARY_OPEN', supplementary: openSupplementary,
+      message: `Supplementary estimate ${openSupplementary.estimate_number} is still open for this job — edit that one, or wait for the customer's decision.` };
+  }
+  return { ...base, ok: true };
+}
+
+/** The part type a supplementary estimate is priced in unless the advisor picks another: the one the customer approved most on the main estimate, else the first of its preference. */
+async function defaultFixedType(main) {
+  const [top] = await query(
+    `SELECT part_option, COUNT(*) AS n FROM estimate_lines
+      WHERE estimate_id = ? AND line_type = 'parts' AND customer_status = 'approved' AND part_option IS NOT NULL
+      GROUP BY part_option ORDER BY n DESC LIMIT 1`, [main.id]);
+  return top?.part_option || partsPreference(main)[0] || 'genuine';
+}
+
+/** estimate_consents.line_ids (JSON) as a list of ids. */
+function parseIds(v) {
+  try { const a = typeof v === 'string' ? JSON.parse(v) : v; return Array.isArray(a) ? a.map(Number) : []; } catch { return []; }
+}
+
+/** 1234.5 → "1,234.50": the amount as the consent statement gives it (the customer's page formats it the same way). */
+const consentAmountText = n => r2(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+/** The consent statement for approving `amount` (incl. VAT) of a supplementary estimate. */
+const consentStatement = (amount, estimateNumber) =>
+  `I agree to the additional work at the fixed cost of AED ${consentAmountText(amount)} (incl. VAT) — supplementary estimate ${estimateNumber}.`;
+
+/**
+ * What approving these lines costs, incl. VAT: each line at the price it is
+ * approved at (a part in its category), to the fils as estimate_lines.
+ * line_total stores it, plus VAT. `items`: [{ line, check }].
+ */
+function fixedCostOf(items, vatRate) {
+  const sub = items.filter(({ line }) => line.line_type !== 'discount').reduce((s, { line, check }) => {
+    const price = check?.chosen ? check.chosen.price : Number(line.unit_price || 0);
+    return s + r2((Number(line.quantity) || 1) * price * (1 - Number(line.discount_pct || 0) / 100));
+  }, 0);
+  return r2(sub * (1 + Number(vatRate ?? 5) / 100));
+}
+
+/**
+ * The consent approving supplementary-estimate lines needs — the statement
+ * ticked (`agreed: true`), the customer's name typed, and the fixed cost the
+ * page showed (`amount`), which has to be what those lines cost now. The
+ * statement stored is the one the page showed (`text`) when it gives that
+ * cost, else the standard wording. { ok, name, text, amount } or a refusal.
+ */
+function checkConsent(consent, { amount, estimateNumber, inPerson = false }) {
+  const c = consent && typeof consent === 'object' ? consent : {};
+  const name = typeof c.name === 'string' ? (stripMarkup(c.name, 200) || '').replace(/\s+/g, ' ').trim() : '';
+  if (c.agreed !== true || name.length < 2) {
+    return { ok: false, status: 400, code: 'CONSENT_REQUIRED', amount,
+      message: inPerson
+        ? `Record the customer's consent to the additional work (fixed cost AED ${consentAmountText(amount)} incl. VAT): tick the statement and type their name.`
+        : `Approving additional work needs your consent: tick the statement (fixed cost AED ${consentAmountText(amount)} incl. VAT) and type your full name.` };
+  }
+  if (!Number.isFinite(Number(c.amount)) || c.amount === null || c.amount === '' || Math.abs(Number(c.amount) - amount) > 0.005) {
+    return { ok: false, status: 409, code: 'CONSENT_AMOUNT_CHANGED', amount,
+      message: `The fixed cost of what is being approved is AED ${consentAmountText(amount)} incl. VAT — check it and tick the statement again.` };
+  }
+  const shown = typeof c.text === 'string' ? (stripMarkup(c.text, 1000) || '').trim() : '';
+  return { ok: true, name, amount, text: shown && shown.includes(consentAmountText(amount)) ? shown : consentStatement(amount, estimateNumber) };
+}
+
+/** Store a consent checked by checkConsent(); its id goes on the lines approved under it. */
+async function recordConsent({ est, consent, lineIds, channel, recordedBy = null, ip = null, userAgent = null }) {
+  const r = await execute(
+    `INSERT INTO estimate_consents (workshop_id, estimate_id, line_ids, amount, consent_text, consent_name, channel, recorded_by, ip_address, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [est.workshop_id, est.id, JSON.stringify(lineIds), consent.amount, consent.text, consent.name, channel, recordedBy,
+     ip ? String(ip).slice(0, 64) : null, userAgent ? String(userAgent).slice(0, 300) : null]);
+  return r.insertId;
+}
+
 /**
  * Create the job card an approved (or, via the manual staff route,
  * partially-approved) estimate becomes, and mark the estimate converted.
@@ -348,6 +536,8 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
           ORDER BY wo.id LIMIT 1 FOR UPDATE`,
         [workshopId, estimate.enquiry_id, estimate.enquiry_id, workshopId]);
     }
+    // A supplementary estimate's work joins its own job — never a new one.
+    if (isSupplementary(estimate) && !intake) { await conn.rollback(); return null; }
 
     if (intake) {
       // Step 6: the approved work goes onto the visit's own job card. An
@@ -421,9 +611,12 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
   }
 
   const billing = await recalcWorkOrder(workOrderId, workshopId);
-  // The customer's line decisions are the agreement; record it so work can start.
+  // The customer's line decisions are the agreement; record it so work can
+  // start. A supplementary estimate's is the agreement to the extra work —
+  // the job's approved total grows with it.
   await recordCustomerApproval({
-    workOrderId, workshopId, channel: 'estimate', note: `Estimate ${estimate.estimate_number}`,
+    workOrderId, workshopId, channel: 'estimate',
+    note: `${isSupplementary(estimate) ? 'Supplementary estimate' : 'Estimate'} ${estimate.estimate_number}`,
   });
   // Step 3/6: the main job card — open already for a visit on the floor
   // (the estimate needed it), opened now for an internal customer, and for
@@ -431,7 +624,7 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
   // a job card the floor is told the approved work is ready to assign;
   // without one there is nothing to assign yet.
   const { jobCard: mainCard } = await openJobCardIfReady({ workOrderId, workshopId, notify: false });
-  if (mainCard) await onWorkApproved({ workOrderId, workshopId, how: `estimate ${estimate.estimate_number}` });
+  if (mainCard) await onWorkApproved({ workOrderId, workshopId, how: `${isSupplementary(estimate) ? 'supplementary estimate' : 'estimate'} ${estimate.estimate_number}` });
   // CRM: the quote is decided; the enquiry it came from is now a job.
   await closeTasks({ workshopId, relatedType: 'quote', relatedId: estimate.id, outcome: 'Approved' });
   if (estimate.enquiry_id) {
@@ -453,6 +646,99 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
 }
 
 /**
+ * The estimate a customer decision is for, or why none can be taken: once
+ * the job card exists the decisions are history. A change of mind after that
+ * used to flip the estimate back to partially_approved while the job card
+ * kept billing the line the customer had just rejected. A supplementary
+ * estimate's work joins its job, so a job closed meanwhile closes it too.
+ * { est } or { refusal: { status, code, message } }.
+ */
+async function decisionTarget(estimateId, workshopId) {
+  const [est] = await query('SELECT * FROM service_estimates WHERE id = ? AND workshop_id = ?', [estimateId, workshopId]);
+  if (!est) return { refusal: { status: 404, message: 'Estimate not found' } };
+  if (est.work_order_id || ['converted', 'expired'].includes(est.status)) {
+    return { refusal: {
+      status: 409,
+      message: 'This estimate has already been turned into a job card, so it can no longer be changed here. Please contact the workshop.',
+    } };
+  }
+  if (isSupplementary(est)) {
+    const [wo] = est.intake_work_order_id
+      ? await query('SELECT status FROM work_orders WHERE id = ? AND workshop_id = ?', [est.intake_work_order_id, workshopId]) : [];
+    if (!wo || ['completed', 'cancelled'].includes(wo.status)) {
+      return { refusal: { status: 409, code: 'JOB_CLOSED',
+        message: 'This job is closed, so the additional work can no longer be approved here. Please contact the workshop.' } };
+    }
+  }
+  return { est };
+}
+
+/**
+ * Whether one line can take this decision — the same rules whether the
+ * customer decides one line or several at once. A part is approved in one
+ * of the categories on offer: a requested one that is priced and available
+ * (the one it counts at unless the customer picks another), or the
+ * alternative — only when picked explicitly. { ok: true, chosen } (chosen:
+ * the option an approved part takes, else null) or { ok: false, status,
+ * code, message }.
+ */
+function lineDecisionCheck(line, decision, partOption, pref) {
+  if (line.line_type !== 'parts' || !hasCategoryPricing(line)) return { ok: true, chosen: null };
+  const { requested, alternative } = partOptions(line, pref);
+  const usable = requested.filter(o => o.usable);
+  if (decision !== 'approved') return { ok: true, chosen: null, usable, alternative };
+  let chosen = null;
+  if (partOption) {
+    chosen = usable.find(o => o.option === partOption) || (alternative?.option === partOption ? alternative : null);
+    if (!chosen) {
+      return { ok: false, status: 400, code: 'PART_OPTION_NOT_OFFERED',
+        message: `${PART_CATEGORY_LABEL[partOption] || 'That type'} is not on offer for “${line.description}”. Choose one of the priced options.` };
+    }
+  } else {
+    chosen = usable.find(o => o.option === line.part_option) || usable[0] || null;
+    if (!chosen) {
+      return { ok: false, status: 409, code: alternative ? 'ALTERNATIVE_NEEDS_CHOICE' : 'PART_NOT_AVAILABLE',
+        message: alternative
+          ? `“${line.description}” is not available as requested. Choose the alternative (${PART_CATEGORY_LABEL[alternative.option]}) to approve it, or reject it.`
+          : `“${line.description}” is not available in ${categoryWords(pref)}, so it can only be rejected.` };
+    }
+  }
+  return { ok: true, chosen, usable, alternative };
+}
+
+/** Record one line's decision checked by lineDecisionCheck() — an approved part in its category. */
+async function writeLineDecision({ line, decision, check, responder, consentId = null }) {
+  if (line.line_type === 'parts' && hasCategoryPricing(line)) {
+    if (decision === 'approved') {
+      await execute('UPDATE estimate_lines SET part_option = ?, unit_price = ?, alternative_approved = ? WHERE id = ?',
+        [check.chosen.option, check.chosen.price, check.alternative ? (check.chosen.alternative ? 1 : 0) : null, line.id]);
+    } else {
+      // Declined: an alternative on this line was not taken, and the line
+      // counts at what the customer would have had by default.
+      await execute('UPDATE estimate_lines SET part_option = NULL, unit_price = ?, alternative_approved = ? WHERE id = ?',
+        [check.usable?.[0]?.price ?? 0, check.alternative ? 0 : null, line.id]);
+    }
+  }
+  await execute(
+    `UPDATE estimate_lines
+        SET customer_status = ?, customer_responded_at = NOW(),
+            customer_responded_by = ?, response_channel = ?, consent_id = ?
+      WHERE id = ?`,
+    [decision, responder?.name || null, responder?.channel || 'in_person', decision === 'approved' ? consentId : null, line.id]
+  );
+}
+
+/** The customer's reason for saying no (process step 6) — kept on the estimate, prefixed with the line(s) so several reasons stay readable. */
+async function noteRejectionReason(estimateId, lines, reason) {
+  if (!reason || !String(reason).trim()) return;
+  const what = lines.map(l => l.description || `line ${l.id}`).join('; ');
+  await execute(
+    `UPDATE service_estimates SET customer_notes = CONCAT_WS('\\n', NULLIF(customer_notes, ''), ?) WHERE id = ?`,
+    [`[${what.slice(0, 300)}] ${String(reason).trim().slice(0, 500)}`, estimateId]
+  );
+}
+
+/**
  * Apply one customer decision to one line, roll the estimate's overall
  * status up from its lines, and — the point of the whole exercise — create
  * the job card the moment every line is decided and at least one is
@@ -464,72 +750,95 @@ async function convertEstimateToWorkOrder(estimate, workshopId) {
  * estimate_lines.response_channel: staff acting in person pass
  * { channel: 'in_person' }; the public route passes
  * { channel: 'email', name: <whatever the customer typed, if anything> }.
+ *
+ * Approving a supplementary estimate's line needs the customer's `consent`
+ * (checkConsent); staff in person record it for them (actingUserId).
  */
-async function applyLineDecision({ estimateId, lineId, workshopId, decision, responder, actingUserId = null, reason = null, partOption = null }) {
-  // Once the job card exists the decisions are history. A change of mind
-  // after that used to flip the estimate back to partially_approved while
-  // the job card kept billing the line the customer had just rejected.
-  const [est] = await query(
-    'SELECT status, work_order_id, parts_preference, estimate_format FROM service_estimates WHERE id = ? AND workshop_id = ?',
-    [estimateId, workshopId]
-  );
-  if (!est) return { ok: false, status: 404, message: 'Estimate not found' };
-  if (est.work_order_id || ['converted', 'expired'].includes(est.status)) {
+async function applyLineDecision({ estimateId, lineId, workshopId, decision, responder, actingUserId = null, reason = null, partOption = null, consent = null, ip = null, userAgent = null }) {
+  return applyDecisions({ estimateId, workshopId, decision, lineIds: [lineId], partOptions: partOption ? { [lineId]: partOption } : {},
+    responder, actingUserId, reason, consent, ip, userAgent, single: true });
+}
+
+/**
+ * Apply one decision to several lines at once (the customer's "Approve all",
+ * "Reject all" or the jobs they selected) — one request, the same rules as
+ * one line. Every line is checked first: one that cannot take the decision
+ * (a part with no type on offer, an alternative not chosen) stops them all,
+ * and the answer lists each (`problems`). A supplementary estimate's
+ * approval is one consent for all of them, at their fixed cost together.
+ * `lineIds` null: every line still pending. `partOptions`: { lineId: category }.
+ */
+async function applyDecisions({ estimateId, workshopId, decision, lineIds = null, partOptions = {}, responder, actingUserId = null, reason = null, consent = null, ip = null, userAgent = null, single = false }) {
+  const target = await decisionTarget(estimateId, workshopId);
+  if (target.refusal) return { ok: false, ...target.refusal };
+  const est = target.est;
+  const pref = partsPreference(est);
+
+  const all = await query('SELECT * FROM estimate_lines WHERE estimate_id = ? AND workshop_id = ? ORDER BY sort_order, id', [est.id, workshopId]);
+  let lines;
+  if (lineIds == null) {
+    lines = all.filter(l => l.customer_status === 'pending');
+  } else {
+    const ids = [...new Set(lineIds.map(Number))];
+    lines = all.filter(l => ids.includes(l.id));
+    if (lines.length !== ids.length) return { ok: false, status: 404, message: 'Line not found' };
+  }
+  if (!lines.length) return { ok: false, status: 400, code: 'NOTHING_TO_DECIDE', message: 'There is nothing left to decide on this estimate.' };
+
+  const items = lines.map(line => ({ line, check: lineDecisionCheck(line, decision, partOptions?.[line.id] || null, pref) }));
+  const problems = items.filter(i => !i.check.ok);
+  if (problems.length) {
+    if (single) return problems[0].check;
     return {
-      ok: false, status: 409,
-      message: 'This estimate has already been turned into a job card, so it can no longer be changed here. Please contact the workshop.',
+      ok: false, status: 409, code: 'BULK_DECISION_REFUSED',
+      message: problems.length === 1 ? problems[0].check.message
+        : `${problems.length} items cannot be ${decision} as they stand — nothing was recorded: ${problems.map(p => `“${p.line.description}”`).join(', ')}.`,
+      problems: problems.map(p => ({ line_id: p.line.id, description: p.line.description, code: p.check.code, message: p.check.message })),
     };
   }
 
-  const [line] = await query(
-    'SELECT * FROM estimate_lines WHERE id = ? AND estimate_id = ? AND workshop_id = ?',
-    [lineId, estimateId, workshopId]
-  );
-  if (!line) return { ok: false, status: 404, message: 'Line not found' };
-
-  // A part is approved in one of the categories on offer: a requested one
-  // that is priced and available (the one it counts at unless the customer
-  // picks another), or the alternative — only when picked explicitly.
-  if (line.line_type === 'parts' && hasCategoryPricing(line)) {
-    const pref = partsPreference(est);
-    const { requested, alternative } = partOptions(line, pref);
-    const usable = requested.filter(o => o.usable);
-    let chosen = null;
-    if (decision === 'approved') {
-      if (partOption) {
-        chosen = usable.find(o => o.option === partOption) || (alternative?.option === partOption ? alternative : null);
-        if (!chosen) {
-          return { ok: false, status: 400, code: 'PART_OPTION_NOT_OFFERED',
-            message: `${PART_CATEGORY_LABEL[partOption] || 'That type'} is not on offer for “${line.description}”. Choose one of the priced options.` };
-        }
-      } else {
-        chosen = usable.find(o => o.option === line.part_option) || usable[0] || null;
-        if (!chosen) {
-          return { ok: false, status: 409, code: alternative ? 'ALTERNATIVE_NEEDS_CHOICE' : 'PART_NOT_AVAILABLE',
-            message: alternative
-              ? `“${line.description}” is not available as requested. Choose the alternative (${PART_CATEGORY_LABEL[alternative.option]}) to approve it, or reject it.`
-              : `“${line.description}” is not available in ${categoryWords(pref)}, so it can only be rejected.` };
-        }
-      }
-      await execute('UPDATE estimate_lines SET part_option = ?, unit_price = ?, alternative_approved = ? WHERE id = ?',
-        [chosen.option, chosen.price, alternative ? (chosen.alternative ? 1 : 0) : null, lineId]);
-    } else {
-      // Declined: an alternative on this line was not taken, and the line
-      // counts at what the customer would have had by default.
-      await execute('UPDATE estimate_lines SET part_option = NULL, unit_price = ?, alternative_approved = ? WHERE id = ?',
-        [usable[0]?.price ?? 0, alternative ? 0 : null, lineId]);
-    }
-    await recalcEstimateTotals(estimateId);
+  // A supplementary estimate's approval is the customer's consent to its fixed cost.
+  let consentId = null;
+  if (decision === 'approved' && isSupplementary(est)) {
+    const inPerson = responder?.channel === 'in_person';
+    const checked = checkConsent(consent, { amount: fixedCostOf(items, est.vat_rate), estimateNumber: est.estimate_number, inPerson });
+    if (!checked.ok) return checked;
+    consentId = await recordConsent({ est, consent: checked, lineIds: lines.map(l => l.id), channel: inPerson ? 'in_person' : 'link',
+      recordedBy: inPerson ? actingUserId : null, ip: inPerson ? null : ip, userAgent: inPerson ? null : userAgent });
+    // The name the customer typed is who decided.
+    responder = { ...responder, name: checked.name };
   }
 
-  await execute(
-    `UPDATE estimate_lines
-        SET customer_status = ?, customer_responded_at = NOW(),
-            customer_responded_by = ?, response_channel = ?
-      WHERE id = ?`,
-    [decision, responder?.name || null, responder?.channel || 'in_person', lineId]
-  );
+  for (const { line, check } of items) {
+    await writeLineDecision({ line, decision, check, responder, consentId });
+  }
+  if (items.some(({ line }) => line.line_type === 'parts' && hasCategoryPricing(line))) await recalcEstimateTotals(est.id);
+  if (decision === 'rejected') await noteRejectionReason(est.id, lines, reason);
 
+  const result = await settleEstimate({ estimateId: est.id, workshopId, actingUserId });
+
+  await logAudit({
+    workshopId, userId: actingUserId, action: single ? 'LINE_DECISION' : 'BULK_LINE_DECISION',
+    entityType: single ? 'estimate_lines' : 'service_estimates', entityId: single ? lines[0].id : est.id,
+    oldValue: single ? lines[0].customer_status : lines.map(l => ({ id: l.id, status: l.customer_status })),
+    newValue: { decision, estimate_status: result.estimate_status, responder, ...(single ? {} : { lines: lines.map(l => l.id) }), ...(consentId ? { consent_id: consentId } : {}) },
+  });
+
+  return { ...result, decided: lines.length, consent_id: consentId };
+}
+
+/**
+ * Roll the estimate's status up from its lines and act on it. Fully
+ * approved, with no staff step in between — the estimate said "job card
+ * will create" and this is where that actually happens. A partial approval
+ * deliberately does NOT auto-convert: deciding which approved lines still
+ * make a coherent job on their own needs a person, so partially_approved
+ * sits and waits for the manual POST /:id/convert-to-work-order, which
+ * already supports it. Every line rejected: Step 6 "Reject all" closes the
+ * job — but a rejected supplementary estimate only drops the extra work;
+ * the job and its main estimate go on.
+ */
+async function settleEstimate({ estimateId, workshopId, actingUserId = null }) {
   const allLines = await query('SELECT customer_status FROM estimate_lines WHERE estimate_id = ?', [estimateId]);
   const anyApproved = allLines.some(l => l.customer_status === 'approved');
   const anyPending = allLines.some(l => l.customer_status === 'pending');
@@ -544,27 +853,12 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
   else newStatus = 'rejected'; // every remaining line is 'deferred', nothing approved
 
   await execute('UPDATE service_estimates SET status = ? WHERE id = ?', [newStatus, estimateId]);
+  const [estimate] = await query('SELECT * FROM service_estimates WHERE id = ?', [estimateId]);
+  const supplementary = isSupplementary(estimate);
 
   const result = { ok: true, status: 200, estimate_status: newStatus };
 
-  // Fully approved, with no staff step in between — the estimate said
-  // "job card will create" and this is where that actually happens. A
-  // partial approval deliberately does NOT auto-convert: deciding which
-  // approved lines still make a coherent job on their own needs a person,
-  // so partially_approved sits and waits for the manual
-  // POST /:id/convert-to-work-order, which already supports it.
-  // The customer's reason for saying no (process step 6) — kept on the
-  // estimate, prefixed with the line so several reasons stay readable.
-  if (decision === 'rejected' && reason && String(reason).trim()) {
-    const note = `[${line.description || 'line ' + lineId}] ${String(reason).trim().slice(0, 500)}`;
-    await execute(
-      `UPDATE service_estimates SET customer_notes = CONCAT_WS('\\n', NULLIF(customer_notes, ''), ?) WHERE id = ?`,
-      [note, estimateId]
-    );
-  }
-
   if (!anyPending && allApproved) {
-    const [estimate] = await query('SELECT * FROM service_estimates WHERE id = ?', [estimateId]);
     if (estimate && !estimate.work_order_id) {
       const converted = await convertEstimateToWorkOrder(estimate, workshopId);
       if (converted) {
@@ -578,39 +872,41 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
         });
       }
     }
+  } else if (!anyPending && allRejected && supplementary) {
+    // The extra work is not done; the job carries on with what was approved.
+    await notifyEstimateOutcome({ estimateId, workshopId, outcome: 'rejected' });
+    await closeTasks({ workshopId, relatedType: 'quote', relatedId: estimateId, outcome: 'Rejected' });
   } else if (!anyPending && allRejected) {
     await notifyEstimateOutcome({ estimateId, workshopId, outcome: 'rejected' });
     await closeTasks({ workshopId, relatedType: 'quote', relatedId: estimateId, outcome: 'Rejected' });
-    const [enqLink] = await query('SELECT enquiry_id, estimate_number FROM service_estimates WHERE id = ?', [estimateId]);
     let enquiryLost = false;
-    if (enqLink?.enquiry_id) {
+    if (estimate?.enquiry_id) {
       const lost = await execute(
         `UPDATE enquiries SET status = 'lost', lost_reason = COALESCE(lost_reason, 'price'),
                 lost_notes = COALESCE(lost_notes, ?) WHERE id = ? AND workshop_id = ? AND converted_work_order_id IS NULL`,
-        [`Customer rejected estimate ${enqLink.estimate_number}`, enqLink.enquiry_id, workshopId]);
+        [`Customer rejected estimate ${estimate.estimate_number}`, estimate.enquiry_id, workshopId]);
       enquiryLost = lost.affectedRows > 0;
     }
     // Step 6 "Reject all": close the job — no work carried out.
-    const [estRow] = await query('SELECT intake_work_order_id, estimate_number, customer_notes FROM service_estimates WHERE id = ?', [estimateId]);
-    if (estRow?.intake_work_order_id) {
+    if (estimate?.intake_work_order_id) {
       const r = await applyStatusChange({
-        workOrderId: estRow.intake_work_order_id, workshopId, userId: actingUserId, status: 'cancelled', skipGates: true,
-        note: `Customer rejected estimate ${estRow.estimate_number} — no work carried out${estRow.customer_notes ? `. Reason: ${String(estRow.customer_notes).slice(0, 300)}` : ''}`,
+        workOrderId: estimate.intake_work_order_id, workshopId, userId: actingUserId, status: 'cancelled', skipGates: true,
+        note: `Customer rejected estimate ${estimate.estimate_number} — no work carried out${estimate.customer_notes ? `. Reason: ${String(estimate.customer_notes).slice(0, 300)}` : ''}`,
       });
       if (r.ok) {
         await execute("UPDATE work_orders SET cancellation_reason = ? WHERE id = ? AND workshop_id = ?",
-          [`Customer rejected estimate ${estRow.estimate_number}`, estRow.intake_work_order_id, workshopId]);
+          [`Customer rejected estimate ${estimate.estimate_number}`, estimate.intake_work_order_id, workshopId]);
         await execute("UPDATE job_cards SET status = 'cancelled' WHERE work_order_id = ? AND workshop_id = ? AND status = 'open'",
-          [estRow.intake_work_order_id, workshopId]);
-        result.work_order_closed = estRow.intake_work_order_id;
+          [estimate.intake_work_order_id, workshopId]);
+        result.work_order_closed = estimate.intake_work_order_id;
       }
     }
     // The lead is lost: its work order (opened with the enquiry, D1) is
     // cancelled when nothing has happened on it yet — "Enquiry closed: …".
     if (enquiryLost) {
       await closeEnquiryWorkOrder({
-        workshopId, enquiryId: enqLink.enquiry_id, userId: actingUserId,
-        reason: `customer rejected estimate ${enqLink.estimate_number}`,
+        workshopId, enquiryId: estimate.enquiry_id, userId: actingUserId,
+        reason: `customer rejected estimate ${estimate.estimate_number}`,
       }).catch(err => console.error('[estimates] enquiry work order on rejection:', err.message));
     }
   } else if (!anyPending && newStatus === 'partially_approved') {
@@ -618,12 +914,6 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
     // someone has to be told, or it sits unseen.
     await notifyEstimateOutcome({ estimateId, workshopId, outcome: 'partial' });
   }
-
-  await logAudit({
-    workshopId, userId: actingUserId, action: 'LINE_DECISION', entityType: 'estimate_lines',
-    entityId: lineId, oldValue: line.customer_status,
-    newValue: { decision, estimate_status: newStatus, responder },
-  });
 
   return result;
 }
@@ -633,15 +923,48 @@ async function applyLineDecision({ estimateId, lineId, workshopId, decision, res
  *  land, so it has to reach someone through the in-app notification feed. */
 async function notifyEstimateOutcome({ estimateId, workshopId, outcome, workOrderId, wo_number, addedToJob = false, jobCardNumber = null }) {
   const [estimate] = await query(
-    `SELECT e.estimate_number, e.customer_name, e.advisor_id, e.created_by, e.vehicle_plate,
-            c.email AS customer_email
+    `SELECT e.estimate_number, e.kind, e.customer_name, e.advisor_id, e.created_by, e.vehicle_plate, e.intake_work_order_id,
+            c.email AS customer_email, iwo.work_order_number AS intake_number
        FROM service_estimates e LEFT JOIN customers c ON c.id = e.customer_id
+       LEFT JOIN work_orders iwo ON iwo.id = e.intake_work_order_id
       WHERE e.id = ?`,
     [estimateId]
   );
   if (!estimate) return;
 
   const who = estimate.customer_name || 'The customer';
+  // A supplementary estimate is extra work on a job already under way: it
+  // never opens a job card of its own, and a rejection only drops the extra
+  // work — no regret e-mail, the job goes on.
+  if (isSupplementary(estimate)) {
+    const n = estimate.estimate_number;
+    const job = estimate.intake_number || wo_number || 'the job';
+    const sm = {
+      approved: {
+        title: `Supplementary estimate ${n} approved — extra work added to ${jobCardNumber ? `job card ${jobCardNumber} (${wo_number})` : `work order ${wo_number}`}`,
+        body: `${who} approved the additional work at its fixed cost and gave their consent. It was added to ${jobCardNumber ? `job card ${jobCardNumber}` : `work order ${wo_number}`} and is ready for the Team Leader to assign.`,
+        type: 'success', icon: '✅',
+      },
+      partial: {
+        title: `Supplementary estimate ${n} partially approved — add the approved lines to the job card`,
+        body: `${who} approved some of the additional work (with their consent) and rejected the rest. Open it and add the approved lines to ${job}'s job card.`,
+        type: 'warning', icon: '🟡',
+      },
+      rejected: {
+        title: `Supplementary estimate ${n} rejected — the extra work will not be done`,
+        body: `${who} rejected the additional work. The approved work on ${job} carries on as before.`,
+        type: 'warning', icon: '⚠️',
+      },
+    }[outcome];
+    for (const userId of new Set([estimate.advisor_id, estimate.created_by].filter(Boolean))) {
+      await createInAppNotification({
+        workshopId, userId, title: sm.title, body: sm.body, type: sm.type, icon: sm.icon,
+        link: outcome === 'approved' && workOrderId ? `/work-orders/${workOrderId}` : `/estimates?id=${estimateId}`,
+        orderId: workOrderId || estimate.intake_work_order_id || null,
+      });
+    }
+    return;
+  }
   // Approved on a visit already on the floor: the work joins its job card
   // (no new one); otherwise a new work order and job card were opened.
   const jc = jobCardNumber || wo_number;
@@ -752,8 +1075,13 @@ function estimateMessage(est, lines, pref) {
   const totalText = several
     ? `parts priced in ${categoryWords(pref)}: ${pref.map(c => `${PART_CATEGORY_LABEL[c]} ${aed(pricing.totals[c] * vat)}`).join(' / ')} incl. VAT`
     : `${aed(est.total_amount)} incl. VAT${categoryParts ? `, ${categoryWords(pref)} parts` : ''}`;
-  const text = `Your service estimate ${est.estimate_number}${est.vehicle_plate ? ` for ${est.vehicle_plate}` : ''} is ready (${totalText}).` +
-    `${alts ? ` ${alts} part${alts > 1 ? 's are' : ' is'} offered as an alternative for your approval.` : ''}`;
+  // A supplementary estimate: extra work at a fixed cost, approved with the customer's consent.
+  const text = isSupplementary(est)
+    ? `Additional work${est.vehicle_plate ? ` on ${est.vehicle_plate}` : ''}: supplementary estimate ${est.estimate_number}` +
+      `${est.parent_estimate_number ? ` (to estimate ${est.parent_estimate_number})` : ''} at a fixed cost of ${aed(est.total_amount)} incl. VAT. ` +
+      'Approve each item with your consent, or reject it.'
+    : `Your service estimate ${est.estimate_number}${est.vehicle_plate ? ` for ${est.vehicle_plate}` : ''} is ready (${totalText}).` +
+      `${alts ? ` ${alts} part${alts > 1 ? 's are' : ' is'} offered as an alternative for your approval.` : ''}`;
   return { html, text };
 }
 
@@ -762,7 +1090,7 @@ function estimateMessage(est, lines, pref) {
 // ══════════════════════════════════════════════════════════════
 router.get('/', async (req, res) => {
   try {
-    const { status, view, customer_id, search, page = 1, limit = 30 } = req.query;
+    const { status, view, customer_id, search, kind, page = 1, limit = 30 } = req.query;
     const lim = Math.min(Math.max(parseInt(limit) || 30, 1), 200);
     const offset = (Math.max(parseInt(page) || 1, 1) - 1) * lim;
 
@@ -788,17 +1116,22 @@ router.get('/', async (req, res) => {
     if (view && VIEWS[view]) where += ` AND ${VIEWS[view]}`;
     if (status) { where += ' AND e.status = ?'; params.push(status); }
     if (customer_id) { where += ' AND e.customer_id = ?'; params.push(customer_id); }
+    if (kind === 'main' || kind === 'supplementary') { where += ' AND e.kind = ?'; params.push(kind); }
     if (search) {
-      where += ' AND (e.estimate_number LIKE ? OR e.customer_name LIKE ? OR e.vehicle_plate LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      // A main estimate's number also finds its supplementary ones.
+      where += ' AND (e.estimate_number LIKE ? OR e.customer_name LIKE ? OR e.vehicle_plate LIKE ? OR pe.estimate_number LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
     const FROM = `
       FROM service_estimates e
       LEFT JOIN customers c ON e.customer_id = c.id
-      LEFT JOIN vehicles v  ON e.vehicle_id  = v.id`;
+      LEFT JOIN vehicles v  ON e.vehicle_id  = v.id
+      LEFT JOIN service_estimates pe ON pe.id = e.parent_estimate_id`;
 
     const rows = await query(
       `SELECT e.*, c.full_name AS customer_full_name, c.customer_class, v.plate_number, v.make, v.model,
+              pe.estimate_number AS parent_estimate_number, pe.status AS parent_status,
+              (SELECT COUNT(*) FROM service_estimates s WHERE s.parent_estimate_id = e.id) AS supplementary_count,
               ${NEEDS_APPROVAL} AS needs_internal_approval,
               (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id) AS line_count,
               (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id AND l.customer_status = 'approved') AS approved_count,
@@ -818,7 +1151,8 @@ router.get('/', async (req, res) => {
     );
     for (const k of Object.keys(VIEWS)) counts[k] = Number(countRow?.[k]) || 0;
 
-    res.json({ success: true, estimates: rows.map(r => ({ ...r, customer_type_label: CUSTOMER_TYPE_LABEL[r.customer_type] || r.customer_type, preference: partsPreference(r) })),
+    res.json({ success: true, estimates: rows.map(r => ({ ...r, kind: r.kind || 'main', kind_label: KIND_LABEL[r.kind] || KIND_LABEL.main,
+      customer_type_label: CUSTOMER_TYPE_LABEL[r.customer_type] || r.customer_type, preference: partsPreference(r) })),
       total, counts, approval_required: ESTIMATE_APPROVAL_REQUIRED, page: parseInt(page) || 1, limit: lim });
   } catch (err) {
     console.error('GET /estimates error:', err);
@@ -827,7 +1161,83 @@ router.get('/', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-// GET /api/estimates/:id — estimate detail with lines
+// GET /api/estimates/raise-check?work_order_id=&kind= — can an estimate be
+// raised for this work order now, and which kind: { ok, kind, code, message,
+// main, technical_inspection, fixed_type }. The New Estimate form asks first,
+// so it says up front what POST / would refuse (raiseCheck).
+// ══════════════════════════════════════════════════════════════
+router.get('/raise-check', async (req, res) => {
+  try {
+    const woId = Number(req.query.work_order_id);
+    if (!Number.isInteger(woId) || woId <= 0) return res.status(400).json({ success: false, message: 'work_order_id is required' });
+    const wanted = ['main', 'supplementary'].includes(req.query.kind) ? req.query.kind : null;
+    const [wo] = await query('SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ?', [woId, req.workshopId]);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    const r = await raiseCheck(wo, req.workshopId, wanted);
+    const kind = r.kind || wanted || 'main';
+    res.json({
+      success: true,
+      data: {
+        ok: !!r.ok, kind, code: r.code || null, message: r.message || null,
+        work_order: { id: wo.id, work_order_number: wo.work_order_number, status: wo.status },
+        technical_inspection: r.technical || r.technical_inspection || null,
+        main: r.main ? { id: r.main.id, estimate_number: r.main.estimate_number, status: r.main.status, preference: partsPreference(r.main) } : null,
+        open_supplementary: r.supplementary ? { id: r.supplementary.id, estimate_number: r.supplementary.estimate_number, status: r.supplementary.status } : null,
+        // The type a supplementary estimate is priced in unless the advisor picks another.
+        fixed_type: kind === 'supplementary' && r.main ? await defaultFixedType(r.main) : null,
+      },
+    });
+  } catch (err) {
+    console.error('GET /estimates/raise-check error:', err);
+    res.status(500).json({ success: false, message: 'Failed to check the work order' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// GET /api/estimates/ready-jobs — the open work orders an estimate can be
+// raised for now (their technical inspection completed): a main estimate
+// when they have none, a supplementary one when the customer has decided
+// the main estimate and no supplementary one is open. For the New Estimate
+// form opened without a work order.
+// ══════════════════════════════════════════════════════════════
+router.get('/ready-jobs', requireCapability('estimate.raise'), async (req, res) => {
+  try {
+    const MAIN = `FROM service_estimates e WHERE e.workshop_id = wo.workshop_id AND (e.intake_work_order_id = wo.id OR e.work_order_id = wo.id)
+                    AND e.kind = 'main' AND e.status NOT IN ('rejected','expired') ORDER BY e.id DESC LIMIT 1`;
+    const rows = await query(
+      `SELECT wo.id, wo.work_order_number, wo.status, wo.customer_id, COALESCE(c.full_name, wo.customer_name) AS customer_name,
+              wo.vehicle_id, v.plate_number, v.make, v.model, ti.completed_at AS technical_completed_at,
+              (SELECT e.id ${MAIN}) AS main_id, (SELECT e.estimate_number ${MAIN}) AS main_number, (SELECT e.status ${MAIN}) AS main_status,
+              (SELECT COUNT(*) FROM service_estimates s WHERE s.workshop_id = wo.workshop_id AND s.intake_work_order_id = wo.id
+                  AND s.kind = 'supplementary' AND s.status IN ('draft','sent_to_customer')) AS open_supplementary
+         FROM work_orders wo
+         JOIN technical_inspections ti ON ti.work_order_id = wo.id AND ti.workshop_id = wo.workshop_id AND ti.status = 'completed'
+         LEFT JOIN customers c ON c.id = wo.customer_id
+         LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+        WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled')
+        ORDER BY ti.completed_at DESC LIMIT 200`, [req.workshopId]);
+    const jobs = [];
+    for (const r of rows) {
+      const kind = !r.main_id ? 'main' : DECIDED_STATUSES.includes(r.main_status) && !Number(r.open_supplementary) ? 'supplementary' : null;
+      if (!kind) continue;
+      jobs.push({
+        id: r.id, work_order_number: r.work_order_number, status: r.status, customer_id: r.customer_id, customer_name: r.customer_name,
+        vehicle_id: r.vehicle_id, plate_number: r.plate_number, make: r.make, model: r.model,
+        technical_completed_at: r.technical_completed_at, kind,
+        main: r.main_id ? { id: r.main_id, estimate_number: r.main_number, status: r.main_status } : null,
+      });
+    }
+    res.json({ success: true, data: jobs });
+  } catch (err) {
+    console.error('GET /estimates/ready-jobs error:', err);
+    res.status(500).json({ success: false, message: 'Failed to load the work orders' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// GET /api/estimates/:id — estimate detail with lines; for a supplementary
+// estimate its main one and the customer's consents, for a main one its
+// supplementary ones and whether another can be raised now.
 // ══════════════════════════════════════════════════════════════
 router.get('/:id', async (req, res) => {
   try {
@@ -858,19 +1268,48 @@ router.get('/:id', async (req, res) => {
 
     const external = await isExternalEstimate(rows[0]);
     const pref = partsPreference(rows[0]);
+    const e = rows[0];
+    const supplementary = isSupplementary(e);
+    const [parent] = supplementary && e.parent_estimate_id
+      ? await query('SELECT id, estimate_number, status FROM service_estimates WHERE id = ? AND workshop_id = ?', [e.parent_estimate_id, req.workshopId]) : [];
+    const supplementaries = supplementary ? [] : await query(
+      `SELECT id, estimate_number, status, total_amount, created_at FROM service_estimates
+        WHERE parent_estimate_id = ? AND workshop_id = ? ORDER BY id`, [e.id, req.workshopId]);
+    const consents = supplementary ? await query(
+      `SELECT ec.id, ec.line_ids, ec.amount, ec.consent_text, ec.consent_name, ec.channel, ec.ip_address, ec.created_at,
+              u.full_name AS recorded_by_name
+         FROM estimate_consents ec LEFT JOIN users u ON u.id = ec.recorded_by
+        WHERE ec.estimate_id = ? ORDER BY ec.id`, [e.id]) : [];
+    // A main estimate the customer has decided: can its supplementary one be raised now?
+    let raiseSupplementary = null;
+    const jobId = e.intake_work_order_id || e.work_order_id;
+    if (!supplementary && jobId && DECIDED_STATUSES.includes(e.status)) {
+      const [job] = await query('SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ?', [jobId, req.workshopId]);
+      if (job) {
+        const r = await raiseCheck(job, req.workshopId, 'supplementary');
+        raiseSupplementary = { ok: !!r.ok && r.main?.id === e.id, code: r.code || null, message: r.message || null, work_order_id: job.id };
+      }
+    }
     res.json({
       success: true,
       estimate: {
-        ...rows[0],
-        customer_type_label: CUSTOMER_TYPE_LABEL[rows[0].customer_type] || rows[0].customer_type,
+        ...e,
+        kind: e.kind || 'main',
+        kind_label: KIND_LABEL[e.kind] || KIND_LABEL.main,
+        fixed_cost: supplementary,
+        parent_estimate: parent || null,
+        customer_type_label: CUSTOMER_TYPE_LABEL[e.customer_type] || e.customer_type,
         is_external: external,
-        needs_internal_approval: ESTIMATE_APPROVAL_REQUIRED && external && !rows[0].internal_approved_at && rows[0].status === 'draft',
+        needs_internal_approval: ESTIMATE_APPROVAL_REQUIRED && external && !e.internal_approved_at && e.status === 'draft',
         preference: pref,
       },
       lines: withPartOptions(lines, pref),
       // Per job and per category of the preference, alternatives apart (lib/workflow.js).
       pricing: summariseEstimatePricing(lines.filter(l => l.line_type !== 'discount'), pref),
       can_approve: canApproveEstimates(req.user),
+      supplementaries,
+      consents: consents.map(c => ({ ...c, line_ids: parseIds(c.line_ids) })),
+      raise_supplementary: raiseSupplementary,
     });
   } catch (err) {
     console.error('GET /estimates/:id error:', err);
@@ -880,14 +1319,20 @@ router.get('/:id', async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 // POST /api/estimates — create new estimate
-// Body: { customer_id, vehicle_id, customer_type, receiving_form_id,
-//         advisor_id, valid_until, vat_rate, lines: [{...}],
+// Body: { intake_work_order_id, kind: 'main' (default) | 'supplementary',
+//         customer_type, receiving_form_id, advisor_id, valid_until,
+//         vat_rate, lines: [{...}], enquiry_id,
 //         parts_preference: ['genuine','after_market','used'] (any, ≥ 1;
-//         default Genuine + After-Market) }
-// An external job's estimate waits for its main job card, i.e. for the
-// customer's acknowledgement of the physical inspection (409
-// PHYSICAL_INSPECTION_REQUIRED). A quote from an enquiry (no
-// intake_work_order_id) is not held.
+//         default Genuine + After-Market; a supplementary estimate: one) }
+// An estimate is for a work order (intake_work_order_id) — raised once its
+// main job card is open (an external customer's acknowledgement of the
+// physical inspection, 409 PHYSICAL_INSPECTION_REQUIRED) and its technical
+// inspection is completed (409 TECHNICAL_INSPECTION_REQUIRED, client
+// decision 3 Nov 2026). A quote from an enquiry or for a customer alone has
+// no technical inspection, so it is refused the same way. One main estimate
+// per job; once the customer has decided it, extra work is a supplementary
+// estimate (raiseCheck: MAIN_ESTIMATE_DECIDED, MAIN_ESTIMATE_NOT_DECIDED,
+// SUPPLEMENTARY_OPEN …), linked to it, its parts in one type: a fixed cost.
 // ══════════════════════════════════════════════════════════════
 router.post('/', requireCapability('estimate.raise'), async (req, res) => {
   try {
@@ -898,6 +1343,10 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     } = req.body;
     if (customer_type && !CUSTOMER_TYPES.includes(customer_type)) {
       return res.status(400).json({ success: false, message: `Account type must be one of: ${CUSTOMER_TYPES.join(', ')}` });
+    }
+    const kind = [undefined, null, ''].includes(req.body.kind) ? 'main' : req.body.kind;
+    if (!['main', 'supplementary'].includes(kind)) {
+      return res.status(400).json({ success: false, message: 'kind must be main or supplementary' });
     }
     // The customer's parts preference: as sent, else as they asked at the
     // enquiry / work order (client review, 2 Nov 2026), else the default.
@@ -914,38 +1363,45 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
       vehicle_id = vehicle_id || enquiry.vehicle_id;
     }
 
-    // Step 4: the estimate for a visit already on the floor. Its customer and
-    // vehicle come from the work order, and approval adds the approved lines
-    // to that work order's job card instead of opening a second one.
-    let intakeWo = null;
-    if (intake_work_order_id) {
-      // wo.* so the job's Step 1 snapshot (intake_customer_class /
-      // _subcategory) is read when the work order has one.
-      [intakeWo] = await query(
-        `SELECT wo.*, c.customer_class AS c_class, c.customer_subcategory AS c_subcategory
-           FROM work_orders wo LEFT JOIN customers c ON c.id = wo.customer_id
-          WHERE wo.id = ? AND wo.workshop_id = ?`, [intake_work_order_id, req.workshopId]);
-      if (!intakeWo) return res.status(404).json({ success: false, message: 'Work order not found' });
-      if (['completed', 'cancelled'].includes(intakeWo.status)) {
-        return res.status(409).json({ success: false, message: `That job is ${intakeWo.status}.` });
+    // Step 4: the estimate is for a visit already on the floor. Its customer
+    // and vehicle come from the work order, and approval adds the approved
+    // lines to that work order's job card instead of opening a second one.
+    // It follows the completed technical inspection — with no work order
+    // there is none (a quote from an enquiry, a customer alone): refused.
+    if (!intake_work_order_id) {
+      const r = noWorkOrderRefusal(!!enquiry);
+      return res.status(r.status).json({ success: false, code: r.code, message: r.message });
+    }
+    // wo.* so the job's Step 1 snapshot (intake_customer_class /
+    // _subcategory) is read when the work order has one.
+    const [intakeWo] = await query(
+      `SELECT wo.*, c.customer_class AS c_class, c.customer_subcategory AS c_subcategory
+         FROM work_orders wo LEFT JOIN customers c ON c.id = wo.customer_id
+        WHERE wo.id = ? AND wo.workshop_id = ?`, [intake_work_order_id, req.workshopId]);
+    if (!intakeWo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    const check = await raiseCheck(intakeWo, req.workshopId, kind);
+    if (!check.ok) {
+      return res.status(check.status).json({
+        success: false, code: check.code, message: check.message,
+        ...(check.technical_inspection !== undefined ? { technical_inspection: check.technical_inspection } : {}),
+        ...(check.main ? { main_estimate: { id: check.main.id, estimate_number: check.main.estimate_number, status: check.main.status } } : {}),
+      });
+    }
+    const main = kind === 'supplementary' ? check.main : null;
+    customer_id = customer_id || intakeWo.customer_id;
+    vehicle_id = vehicle_id || intakeWo.vehicle_id;
+    if (!customer_id && intakeWo.customer_name) req.body.customer_name = intakeWo.customer_name;
+
+    // A supplementary estimate's fixed cost: its parts are priced in one type
+    // — as sent, else the type the customer took on the main estimate — and
+    // it is on the main estimate's account.
+    if (main) {
+      if (pref && pref.length !== 1) {
+        return res.status(400).json({ success: false, code: 'FIXED_COST_ONE_TYPE',
+          message: 'A supplementary estimate has a fixed cost: choose one part type (Genuine, After-Market or Used) for its parts.' });
       }
-      const [open] = await query(
-        "SELECT estimate_number FROM service_estimates WHERE intake_work_order_id = ? AND workshop_id = ? AND status NOT IN ('rejected','expired','converted') LIMIT 1",
-        [intakeWo.id, req.workshopId]);
-      if (open) return res.status(409).json({ success: false, message: `Estimate ${open.estimate_number} is already open for this job — edit that one.` });
-      // D2: the physical inspection comes first for an external customer —
-      // the main job card opens when they acknowledge it, and the estimate
-      // follows. Internal customers' job cards open with the job.
-      const gate = await jobCardGate({ workOrderId: intakeWo.id, workshopId: req.workshopId });
-      if (!gate.internal && !gate.jobCardOpen) {
-        return res.status(409).json({
-          success: false, code: 'PHYSICAL_INSPECTION_REQUIRED',
-          message: 'Do the physical inspection with the customer first — the job card opens when they acknowledge it.',
-        });
-      }
-      customer_id = customer_id || intakeWo.customer_id;
-      vehicle_id = vehicle_id || intakeWo.vehicle_id;
-      if (!customer_id && intakeWo.customer_name) req.body.customer_name = intakeWo.customer_name;
+      if (!pref) pref = [await defaultFixedType(main)];
+      customer_type = main.customer_type || customer_type;
     }
 
     if (!customer_id && !req.body.customer_name) {
@@ -967,7 +1423,7 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
       cls = c?.customer_class || null; sub = c?.customer_subcategory || null;
     }
     if (!customer_type) customer_type = accountTypeForClass(cls, sub);
-    if (customer_type === 'internal_fleet' && cls !== 'internal' && !isManagerRole(req.user)) {
+    if (!main && customer_type === 'internal_fleet' && cls !== 'internal' && !isManagerRole(req.user)) {
       return res.status(403).json({
         success: false, code: 'ROLE_NOT_ALLOWED',
         message: 'This is an external customer: its estimate needs Supervisor / Workshop Manager approval, so it cannot be raised as Internal. Only a manager can do that.',
@@ -996,18 +1452,18 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     // Estimate numbers are a random draw per day; a collision draws again.
     let estimate_number = null; let result = null;
     for (let attempt = 0; attempt < 6 && !result; attempt++) {
-      estimate_number = genEstimateNumber();
+      estimate_number = genEstimateNumber(kind);
       try {
         result = await execute(
           `INSERT INTO service_estimates
-             (workshop_id, estimate_number, receiving_form_id, customer_id, vehicle_id,
+             (workshop_id, estimate_number, kind, parent_estimate_id, receiving_form_id, customer_id, vehicle_id,
               customer_name, customer_type, vehicle_plate, vehicle_vin, advisor_id,
               valid_until, vat_rate, intake_work_order_id, enquiry_id, parts_preference, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [req.workshopId, estimate_number, receiving_form_id || null, customer_id || null,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [req.workshopId, estimate_number, kind, main?.id || null, receiving_form_id || null, customer_id || null,
            vehicle_id || null, customerName, customer_type, vehiclePlate, vehicleVin,
            advisor_id || req.user?.id, valid_until || null, parseFloat(vat_rate),
-           intakeWo?.id || null, enquiry?.id || null, pref.join(','), req.user?.id]
+           intakeWo.id, main ? null : (enquiry?.id || null), pref.join(','), req.user?.id]
         );
       } catch (e) {
         if (e.code !== 'ER_DUP_ENTRY' || !/estimate_number/.test(e.message)) throw e;
@@ -1020,22 +1476,23 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     const estimateId = result.insertId;
     await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user, pref });
     const totals = await recalcEstimateTotals(estimateId);
-    if (enquiry) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
+    if (enquiry && !main) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
 
     // Step 5: the Storekeeper prices the parts.
     const savedLines = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [estimateId]);
     const unpriced = savedLines.filter(l => partLineUnpriced(l, pref)).length;
     if (unpriced) {
       await notifyStoreToPrice({ workshopId: req.workshopId, estimateId, estimateNumber: estimate_number, count: unpriced, pref,
-        customerName, plate: vehiclePlate, orderId: intakeWo?.id || null, exceptUserId: req.user?.id });
+        customerName, plate: vehiclePlate, orderId: intakeWo.id, exceptUserId: req.user?.id, kind });
     }
 
     await logAudit({
       workshopId: req.workshopId, userId: req.user?.id, action: 'CREATE', entityType: 'service_estimates',
-      entityId: estimateId, newValue: { estimate_number, total_amount: totals.total_amount, parts_preference: pref },
+      entityId: estimateId, newValue: { estimate_number, kind, parent_estimate_id: main?.id || null, total_amount: totals.total_amount, parts_preference: pref },
     });
 
-    res.status(201).json({ success: true, estimateId, estimate_number, parts_to_price: unpriced, parts_preference: pref,
+    res.status(201).json({ success: true, estimateId, estimate_number, kind, parts_to_price: unpriced, parts_preference: pref,
+      parent_estimate: main ? { id: main.id, estimate_number: main.estimate_number } : null,
       customer_type, customer_type_label: CUSTOMER_TYPE_LABEL[customer_type] });
   } catch (err) {
     console.error('POST /estimates error:', err);
@@ -1065,6 +1522,20 @@ router.put('/:id', requireCapability('estimate.raise'), async (req, res) => {
     if (sentPref && !sentPref.length) return res.status(400).json({ success: false, code: 'PARTS_PREFERENCE_REQUIRED', message: PREFERENCE_REQUIRED });
     const oldPref = partsPreference(est);
     const pref = sentPref || oldPref;
+    if (isSupplementary(est)) {
+      // Its fixed cost is what the customer consents to: once they have
+      // started deciding it, it stays as it is — further work is another
+      // supplementary estimate.
+      const [decided] = await query("SELECT COUNT(*) AS n FROM estimate_lines WHERE estimate_id = ? AND customer_status <> 'pending'", [est.id]);
+      if (Number(decided?.n) > 0) {
+        return res.status(409).json({ success: false, code: 'SUPPLEMENTARY_DECIDED',
+          message: 'The customer has started deciding this supplementary estimate at its fixed cost, so it can no longer be changed. Raise another supplementary estimate for further work.' });
+      }
+      if (pref.length !== 1) {
+        return res.status(400).json({ success: false, code: 'FIXED_COST_ONE_TYPE',
+          message: 'A supplementary estimate has a fixed cost: choose one part type (Genuine, After-Market or Used) for its parts.' });
+      }
+    }
 
     await execute(
       `UPDATE service_estimates SET
@@ -1090,7 +1561,8 @@ router.put('/:id', requireCapability('estimate.raise'), async (req, res) => {
     const unpriced = saved.filter(l => partLineUnpriced(l, pref)).length;
     if (unpriced > unpricedBefore) {
       await notifyStoreToPrice({ workshopId: req.workshopId, estimateId: est.id, estimateNumber: est.estimate_number, count: unpriced, pref,
-        customerName: est.customer_name, plate: est.vehicle_plate, orderId: est.intake_work_order_id || null, exceptUserId: req.user?.id, version: Number(est.version) + 1 });
+        customerName: est.customer_name, plate: est.vehicle_plate, orderId: est.intake_work_order_id || null, exceptUserId: req.user?.id, version: Number(est.version) + 1,
+        kind: est.kind || 'main' });
     }
 
     await logAudit({
@@ -1157,20 +1629,22 @@ router.patch('/:id/status', requireCapability('estimate.raise'), async (req, res
 
 // ══════════════════════════════════════════════════════════════
 // PATCH /api/estimates/:id/lines/:lineId/approve
-// Customer approves/rejects individual lines (req 69)
+// Customer approves/rejects individual lines (req 69), in person. A
+// supplementary estimate's approval records their consent: body.consent =
+// { agreed: true, name: <the customer's name>, amount: <the fixed cost shown> }.
 // ══════════════════════════════════════════════════════════════
 router.patch('/:id/lines/:lineId/approve', requireCapability('customer.approval'), async (req, res) => {
   try {
-    const { customer_status, reason, part_option } = req.body; // 'approved' | 'rejected'
+    const { customer_status, reason, part_option, consent } = req.body; // 'approved' | 'rejected'
     if (!['approved', 'rejected'].includes(customer_status)) {
       return res.status(400).json({ success: false, message: 'customer_status must be approved or rejected' });
     }
 
     const result = await applyLineDecision({
       estimateId: req.params.id, lineId: req.params.lineId, workshopId: req.workshopId,
-      decision: customer_status, responder: { channel: 'in_person' }, actingUserId: req.user?.id, reason, partOption: part_option,
+      decision: customer_status, responder: { channel: 'in_person' }, actingUserId: req.user?.id, reason, partOption: part_option, consent,
     });
-    if (!result.ok) return res.status(result.status).json({ success: false, code: result.code, message: result.message });
+    if (!result.ok) return res.status(result.status).json({ success: false, code: result.code, message: result.message, ...(result.amount !== undefined ? { amount: result.amount } : {}) });
 
     res.json({
       success: true, message: `Line ${customer_status}`, estimate_status: result.estimate_status,
@@ -1207,6 +1681,16 @@ router.patch('/:id/lines/:lineId/pricing', async (req, res) => {
     if (!est) return res.status(404).json({ success: false, message: 'Estimate not found' });
     if (est.work_order_id || ['converted', 'expired', 'rejected'].includes(est.status)) {
       return res.status(409).json({ success: false, message: `This estimate is ${est.status} — it can no longer be priced.` });
+    }
+    // A supplementary estimate goes out at a fixed cost: priced before it is
+    // sent, in its one part type, with no alternative for the customer to weigh.
+    if (isSupplementary(est) && est.status !== 'draft') {
+      return res.status(409).json({ success: false, code: 'FIXED_COST_SENT',
+        message: 'This supplementary estimate has gone to the customer at a fixed cost — its prices can no longer change.' });
+    }
+    if (isSupplementary(est) && req.body?.alternative) {
+      return res.status(400).json({ success: false, code: 'FIXED_COST_NO_ALTERNATIVE',
+        message: 'A supplementary estimate has a fixed cost in one part type — no alternative is offered. Mark the part not available and the Service Advisor will change the line.' });
     }
     const [line] = await query('SELECT * FROM estimate_lines WHERE id = ? AND estimate_id = ?', [req.params.lineId, est.id]);
     if (!line) return res.status(404).json({ success: false, message: 'Line not found' });
@@ -1348,6 +1832,22 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
     if (priceCheck.some(l => l.line_type === 'labour' && !(Number(l.unit_price) > 0))) {
       return res.status(409).json({ success: false, code: 'LABOUR_NOT_PRICED', message: 'Price the labour before sending.' });
     }
+    if (isSupplementary(est)) {
+      // A fixed cost: every line goes out with its firm price — a part not
+      // available in the estimate's type has to be changed or removed first.
+      const notOffered = priceCheck.filter(l => l.line_type === 'parts' && hasCategoryPricing(l) && !partOptions(l, pref).requested.some(o => o.usable));
+      if (notOffered.length) {
+        return res.status(409).json({ success: false, code: 'FIXED_COST_INCOMPLETE',
+          message: `${notOffered.map(l => `“${l.description}”`).join(', ')} ${notOffered.length > 1 ? 'are' : 'is'} not available as ${categoryWords(pref)}. ` +
+            'A supplementary estimate goes out at a fixed cost — change or remove it (Edit) before sending.' });
+      }
+      const [job] = est.intake_work_order_id ? await query('SELECT status FROM work_orders WHERE id = ? AND workshop_id = ?', [est.intake_work_order_id, req.workshopId]) : [];
+      if (!job || ['completed', 'cancelled'].includes(job.status)) {
+        return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: 'The job is closed — a supplementary estimate can no longer go out for it.' });
+      }
+      const [parent] = est.parent_estimate_id ? await query('SELECT estimate_number FROM service_estimates WHERE id = ?', [est.parent_estimate_id]) : [];
+      est.parent_estimate_number = parent?.estimate_number || null;
+    }
     // Kept for the screens that still read the format: genuine / after_market
     // / both, or null for a preference with Used.
     const format = formatOfPreference(pref);
@@ -1428,10 +1928,18 @@ router.post('/:id/send', requireCapability('estimate.raise'), async (req, res) =
     const sent = await sendNotificationEmail({
       to: customerEmail,
       tenantId: req.workshopId,
-      subject: `Estimate ${est.estimate_number} — approval needed`,
-      title: 'Your service estimate is ready',
-      body: `We've prepared an estimate for ${est.vehicle_plate ? `your vehicle (${esc(est.vehicle_plate)})` : 'your vehicle'}. ` +
-        `Please review each item and approve or reject it before we begin any work.${message.html}`,
+      ...(isSupplementary(est) ? {
+        subject: `Supplementary estimate ${est.estimate_number} — additional work, your consent needed`,
+        title: 'Additional work on your vehicle',
+        body: `While working on ${est.vehicle_plate ? `your vehicle (${esc(est.vehicle_plate)})` : 'your vehicle'} we found additional work` +
+          `${est.parent_estimate_number ? `, beyond estimate ${esc(est.parent_estimate_number)}` : ''}. It is offered at a fixed cost: ` +
+          `please review each item and approve it with your consent, or reject it. No additional work is carried out without your approval.${message.html}`,
+      } : {
+        subject: `Estimate ${est.estimate_number} — approval needed`,
+        title: 'Your service estimate is ready',
+        body: `We've prepared an estimate for ${est.vehicle_plate ? `your vehicle (${esc(est.vehicle_plate)})` : 'your vehicle'}. ` +
+          `Please review each item and approve or reject it before we begin any work.${message.html}`,
+      }),
       ctaText: 'Review and approve',
       ctaUrl: approvalUrl,
       expiryNote: 'This link expires in 7 days.',
@@ -1495,11 +2003,13 @@ router.post('/:id/internal-approve', async (req, res) => {
 });
 
 /** Step 5: the Store is told which part lines to price, in the categories the customer asked for. */
-async function notifyStoreToPrice({ workshopId, estimateId, estimateNumber, count, pref, customerName, plate, orderId = null, exceptUserId = null, version = 1 }) {
+async function notifyStoreToPrice({ workshopId, estimateId, estimateNumber, count, pref, customerName, plate, orderId = null, exceptUserId = null, version = 1, kind = 'main' }) {
   await notifyGroups(workshopId, ['storekeeper'], {
-    title: `Price parts: estimate ${estimateNumber}`,
+    title: `Price parts: ${kind === 'supplementary' ? 'supplementary estimate' : 'estimate'} ${estimateNumber}`,
     body: `${count} part line${count > 1 ? 's' : ''} for ${customerName || 'a customer'}${plate ? ` (${plate})` : ''} — ` +
-      `the customer asked for ${categoryWords(pref)}: availability, price and delivery for each, or mark it not available.`,
+      (kind === 'supplementary'
+        ? `a fixed-cost supplementary estimate, priced in ${categoryWords(pref)} only: the price and delivery for each.`
+        : `the customer asked for ${categoryWords(pref)}: availability, price and delivery for each, or mark it not available.`),
     // An edit (a new version) is its own notice — the type is the hour's dedup key.
     link: `/estimates?id=${estimateId}`, orderId, icon: '🏷️', type: `workflow_price_parts_${estimateId}${version > 1 ? `_v${version}` : ''}`, exceptUserId,
   });
@@ -1540,6 +2050,11 @@ router.post('/:id/convert-to-work-order', requireCapability('customer.approval')
 
     const converted = await convertEstimateToWorkOrder(est, req.workshopId);
     if (!converted) {
+      // A supplementary estimate's work joins its own job, which may have closed meanwhile.
+      const [locked] = await query('SELECT work_order_id FROM service_estimates WHERE id = ?', [est.id]);
+      if (isSupplementary(est) && !locked?.work_order_id) {
+        return res.status(409).json({ success: false, code: 'JOB_CLOSED', message: 'The job this supplementary estimate belongs to is closed — its work cannot be added any more.' });
+      }
       return res.status(409).json({ success: false, message: 'This estimate was converted a moment ago by someone else.' });
     }
     const { workOrderId, wo_number } = converted;
@@ -1686,10 +2201,23 @@ publicRouter.get('/:token', estimateApprovalLimiter, async (req, res) => {
     );
     const pricing = summariseEstimatePricing(lines.filter(l => l.line_type !== 'discount'), pref);
 
+    // A supplementary estimate: the main estimate it adds to, and the
+    // consents the customer has given (when, what cost, the name typed).
+    const supplementary = isSupplementary(est);
+    const [parent] = supplementary && est.parent_estimate_id
+      ? await query('SELECT estimate_number FROM service_estimates WHERE id = ?', [est.parent_estimate_id]) : [];
+    const consents = supplementary
+      ? await query('SELECT amount, consent_name, created_at FROM estimate_consents WHERE estimate_id = ? ORDER BY id', [est.id]) : [];
+
     res.json({
       success: true,
       estimate: {
         estimate_number: est.estimate_number,
+        kind: est.kind || 'main',
+        parent_estimate_number: parent?.estimate_number || null,
+        // One firm price per line; approving needs the customer's consent.
+        fixed_cost: supplementary,
+        consent_required: supplementary,
         customer_name: est.customer_name,
         vehicle_plate: est.vehicle_plate,
         subtotal_labour: est.subtotal_labour,
@@ -1709,6 +2237,7 @@ publicRouter.get('/:token', estimateApprovalLimiter, async (req, res) => {
       // Before VAT, per category of the preference; alternatives apart.
       totals_by_type: pricing.totals,
       alternatives: pricing.alternatives,
+      consents: consents.map(c => ({ amount: c.amount, name: c.consent_name, at: c.created_at })),
     });
   } catch (err) {
     console.error('GET /public/estimates/:token error:', err);
@@ -1725,28 +2254,74 @@ publicRouter.post('/:token/lines/:lineId/decide', estimateApprovalLimiter, async
     const est = await loadByToken(req.params.token, res);
     if (!est) return;
 
-    const { decision, name, reason, part_option } = req.body;
+    const { decision, name, reason, part_option, consent } = req.body;
     if (!['approved', 'rejected'].includes(decision)) {
       return res.status(400).json({ success: false, message: 'decision must be approved or rejected' });
     }
 
     const result = await applyLineDecision({
       estimateId: est.id, lineId: req.params.lineId, workshopId: est.workshop_id,
-      decision, responder: { channel: 'email', name: name || null }, reason, partOption: part_option,
+      decision, responder: { channel: 'email', name: publicName(name) }, reason, partOption: part_option,
+      consent, ip: req.ip, userAgent: req.get('user-agent'),
     });
-    if (!result.ok) return res.status(result.status).json({ success: false, code: result.code, message: result.message });
-
-    res.json({
-      success: true, estimate_status: result.estimate_status,
-      // added_to_job: the work joined the job card of the visit already in
-      // the workshop; work_order_created: a new job card was opened.
-      work_order_created: !!result.work_order_id && !result.added_to_job, work_order_number: result.work_order_number,
-      added_to_job: !!result.added_to_job,
-    });
+    if (!result.ok) return res.status(result.status).json(publicRefusal(result));
+    res.json(publicDecided(result));
   } catch (err) {
     console.error('POST /public/estimates/:token/lines/:lineId/decide error:', err);
     res.status(500).json({ success: false, message: 'Failed to record the decision' });
   }
+});
+
+// POST /api/public/estimates/:token/decide-bulk — the customer decides
+// several lines at once: "Approve all", "Reject all", or the jobs they ticked.
+// Body: { decision: 'approved' | 'rejected', line_ids: [ids] (left out: every
+// line still pending), part_options: { lineId: 'genuine' | … }, name, reason,
+// consent (a supplementary estimate's approval: { agreed, name, amount, text },
+// amount = the fixed cost of those lines together, incl. VAT) }. One request,
+// the same rules as one line; nothing is recorded if any line cannot take it.
+publicRouter.post('/:token/decide-bulk', estimateApprovalLimiter, async (req, res) => {
+  try {
+    const est = await loadByToken(req.params.token, res);
+    if (!est) return;
+
+    const { decision, line_ids, part_options, name, reason, consent } = req.body || {};
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ success: false, message: 'decision must be approved or rejected' });
+    }
+    if (line_ids !== undefined && line_ids !== null && line_ids !== 'all'
+        && (!Array.isArray(line_ids) || !line_ids.length || line_ids.length > 500 || line_ids.some(id => !Number.isInteger(Number(id)) || Number(id) <= 0))) {
+      return res.status(400).json({ success: false, message: 'line_ids must be a list of line ids, or left out for every line still to decide' });
+    }
+    const options = {};
+    if (part_options && typeof part_options === 'object' && !Array.isArray(part_options)) {
+      for (const [k, v] of Object.entries(part_options)) if (PART_CATEGORIES.includes(v)) options[Number(k)] = v;
+    }
+
+    const result = await applyDecisions({
+      estimateId: est.id, workshopId: est.workshop_id, decision,
+      lineIds: Array.isArray(line_ids) ? line_ids : null, partOptions: options,
+      responder: { channel: 'email', name: publicName(name) }, reason, consent, ip: req.ip, userAgent: req.get('user-agent'),
+    });
+    if (!result.ok) return res.status(result.status).json(publicRefusal(result));
+    res.json({ ...publicDecided(result), decided: result.decided });
+  } catch (err) {
+    console.error('POST /public/estimates/:token/decide-bulk error:', err);
+    res.status(500).json({ success: false, message: 'Failed to record the decisions' });
+  }
+});
+
+/** The name a customer typed on the public page, tidied (null when blank). */
+const publicName = v => (typeof v === 'string' ? (stripMarkup(v, 200) || '').replace(/\s+/g, ' ').trim() || null : null);
+/** A refused decision as the public page reads it: why, and for a refused bulk decision each line's reason. */
+const publicRefusal = r => ({ success: false, code: r.code, message: r.message,
+  ...(r.problems ? { problems: r.problems } : {}), ...(r.amount !== undefined ? { amount: r.amount } : {}) });
+/** A recorded decision as the public page reads it. */
+const publicDecided = r => ({
+  success: true, estimate_status: r.estimate_status,
+  // added_to_job: the work joined the job card of the visit already in
+  // the workshop; work_order_created: a new job card was opened.
+  work_order_created: !!r.work_order_id && !r.added_to_job, work_order_number: r.work_order_number,
+  added_to_job: !!r.added_to_job,
 });
 
 export { router as default, publicRouter as publicEstimateRouter };

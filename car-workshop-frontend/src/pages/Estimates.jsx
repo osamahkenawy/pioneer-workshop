@@ -21,14 +21,24 @@
  * of the preference, with any alternative apart (it never replaces a
  * requested category) — and is sent by email or WhatsApp.
  *
+ * Main and supplementary estimates (client decisions, 3 Nov 2026): every
+ * row and the detail say which it is — a supplementary one (SEST-…) links to
+ * its main estimate (EST-…), a main one lists its supplementary ones and,
+ * once the customer has decided it, offers "Supplementary estimate" for
+ * extra work on the same job. A supplementary estimate has a fixed cost (one
+ * part type, no alternatives) and its approval carries the customer's
+ * consent, shown here: who, when, the statement, the cost, the IP.
+ *
  * URLs: /estimates?id=<id> (notifications) · /estimates?new=1 (dashboard) ·
- * /estimates?new=1&wo=<workOrderId> (from a job card: the estimate for that visit).
+ * /estimates?new=1&wo=<workOrderId> (from a job card: the estimate for that
+ * visit — the main one, or a supplementary one once the main is decided) ·
+ * &kind=supplementary (asks for a supplementary one).
  */
 import { useEffect, useState, useCallback, useContext, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Search, Refresh, Check, Xmark, SendMail, WarningCircle, ChatBubble, OpenNewWindow, EditPencil, Label, Whatsapp,
+  Search, Refresh, Check, Xmark, SendMail, WarningCircle, ChatBubble, OpenNewWindow, EditPencil, Label, Whatsapp, Plus, ShieldCheck,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
@@ -76,6 +86,21 @@ function PreferenceChips({ pref, t }) {
 }
 
 const fmtDay = d => (d ? new Date(`${String(d).slice(0, 10)}T00:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '');
+const fmtWhen = d => (d ? new Date(String(d).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+
+/** Main / Supplementary, and a supplementary estimate's main one ("to EST-…"). */
+function KindBadge({ e, t, withParent = true }) {
+  const supp = e.kind === 'supplementary';
+  return (
+    <>
+      <span className={`es-kind ${supp ? 'es-kindSupp' : 'es-kindMain'}`}>
+        {supp ? t('estimates.kind_supp', 'Supplementary') : t('estimates.kind_main', 'Main')}
+      </span>
+      {supp && withParent && e.parent_estimate_number ? <span className="es-kindTo">→ {e.parent_estimate_number}</span> : null}
+    </>
+  );
+}
 
 const aed = n => `AED ${Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const lineTotal = l => Number(l.line_total ?? (Number(l.quantity) * Number(l.unit_price) * (1 - Number(l.discount_pct || 0) / 100)));
@@ -97,6 +122,8 @@ export default function Estimates() {
   const [showNew, setShowNew] = useState(false);
   const [intakeWO, setIntakeWO] = useState(null);
   const [fromEnquiry, setFromEnquiry] = useState(null);
+  // 'supplementary' when one was asked for (?kind=supplementary, or the estimate's own button).
+  const [newKind, setNewKind] = useState(null);
   const reqRef = useRef(0);
   const toastTimer = useRef(null);
   const openId = params.get('id');
@@ -115,7 +142,8 @@ export default function Estimates() {
     if (params.get('new') !== '1') return;
     const woId = params.get('wo');
     const enquiryId = params.get('enquiry');
-    const next = new URLSearchParams(params); next.delete('new'); next.delete('wo'); next.delete('enquiry');
+    setNewKind(params.get('kind') === 'supplementary' ? 'supplementary' : null);
+    const next = new URLSearchParams(params); next.delete('new'); next.delete('wo'); next.delete('enquiry'); next.delete('kind');
     setParams(next, { replace: true });
     if (enquiryId) {
       // Quote stage: the enquiry's customer and vehicle (found or created on the server).
@@ -185,7 +213,7 @@ export default function Estimates() {
           </div>
           <div className="es-headActions">
             <button className="es-btn es-btnGhost" onClick={load}><Refresh width={16} height={16} /> {t('estimates.refresh', 'Refresh')}</button>
-            {canDo(user, 'estimate.raise') && <button className="es-btn" onClick={() => { setIntakeWO(null); setFromEnquiry(null); setShowNew(true); }}>{t('estimates.new', 'New estimate')}</button>}
+            {canDo(user, 'estimate.raise') && <button className="es-btn" onClick={() => { setIntakeWO(null); setFromEnquiry(null); setNewKind(null); setShowNew(true); }}>{t('estimates.new', 'New estimate')}</button>}
           </div>
         </header>
 
@@ -211,7 +239,7 @@ export default function Estimates() {
           <div className="es-list">
             {rows.map(r => (
               <button key={r.id} className="es-row" onClick={() => open(r.id)}>
-                <div className="es-rowRef">{r.estimate_number}</div>
+                <div className="es-rowRef">{r.estimate_number}<KindBadge e={r} t={t} /></div>
                 <div className="es-rowMain">
                   <div className="es-rowName">{r.customer_full_name || r.customer_name || '—'}</div>
                   <div className="es-rowMeta">{r.plate_number || r.vehicle_plate || t('estimates.no_vehicle', 'No vehicle')}</div>
@@ -232,7 +260,12 @@ export default function Estimates() {
           <div className="es-list">
             {rows.map(r => (
               <button key={r.id} className="es-row" onClick={() => open(r.id)}>
-                <div className="es-rowRef">{r.estimate_number}</div>
+                <div className="es-rowRef">
+                  {r.estimate_number}<KindBadge e={r} t={t} />
+                  {r.kind !== 'supplementary' && Number(r.supplementary_count) > 0 && (
+                    <span className="es-kindCount">{t('estimates.n_supp', '+{{n}} supplementary', { n: r.supplementary_count })}</span>
+                  )}
+                </div>
                 <div className="es-rowMain">
                   <div className="es-rowName">{r.customer_full_name || r.customer_name || '—'}</div>
                   <div className="es-rowMeta">{[r.plate_number || r.vehicle_plate, [r.make, r.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || t('estimates.no_vehicle', 'No vehicle')}</div>
@@ -240,7 +273,7 @@ export default function Estimates() {
                 <div className="es-rowLines">{t('estimates.n_of_m_approved', '{{a}}/{{n}} approved', { a: r.approved_count, n: r.line_count })}</div>
                 <div className="es-rowTotal">{aed(r.total_amount)}</div>
                 <div className="es-rowRight">
-                  <StatusChip status={r.status} needsApproval={!!Number(r.needs_internal_approval)} />
+                  <StatusChip status={r.status} needsApproval={!!Number(r.needs_internal_approval)} kind={r.kind} />
                   <div className="es-rowAgo">{ago(r.created_at, t)}</div>
                 </div>
               </button>
@@ -250,15 +283,17 @@ export default function Estimates() {
       </div>
 
       {openId && (
-        <EstimateDetail id={openId} user={user} onClose={() => open(null)}
-          onChanged={msg => { if (msg) flash(msg); load(); }} onError={flash} />
+        <EstimateDetail id={openId} user={user} onClose={() => open(null)} onOpen={open}
+          onChanged={msg => { if (msg) flash(msg); load(); }} onError={flash}
+          onSupplementary={wo => { setFromEnquiry(null); setIntakeWO(wo); setNewKind('supplementary'); setShowNew(true); }} />
       )}
       {showNew && (
         <NewEstimateModal
           open
           intakeWorkOrder={intakeWO}
           enquiry={fromEnquiry}
-          onClose={() => { setShowNew(false); setIntakeWO(null); setFromEnquiry(null); load(); }}
+          kind={newKind}
+          onClose={() => { setShowNew(false); setIntakeWO(null); setFromEnquiry(null); setNewKind(null); load(); }}
           onSaved={() => load()}
           onSent={() => load()}
         />
@@ -268,9 +303,11 @@ export default function Estimates() {
   );
 }
 
-function StatusChip({ status, needsApproval }) {
+function StatusChip({ status, needsApproval, kind }) {
   const { t } = useTranslation();
   if (needsApproval) return <span className="es-chip es-chip-hold">{t('estimates.status_needs_approval', 'Needs approval')}</span>;
+  // A supplementary estimate's work joins the job card the main estimate opened.
+  if (kind === 'supplementary' && status === 'converted') return <span className="es-chip es-chip-converted">{t('estimates.status_converted_supp', 'Added to job card')}</span>;
   return <span className={`es-chip es-chip-${status}`}>{t(`estimates.status_${status}`, STATUS_LABEL[status] || status)}</span>;
 }
 
@@ -286,10 +323,13 @@ function groupByJob(lines) {
 }
 
 /* ── Detail ─────────────────────────────────────────────────────────── */
-function EstimateDetail({ id, user, onClose, onChanged, onError }) {
+function EstimateDetail({ id, user, onClose, onOpen, onChanged, onError, onSupplementary }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState('');
+  // A supplementary estimate approved in person: the customer's consent, recorded by staff.
+  const [consentOk, setConsentOk] = useState(false);
+  const [consentName, setConsentName] = useState('');
   const [sent, setSent] = useState(null); // last send result: { approval_url, whatsapp_url, channel }
   const [sendOpen, setSendOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -303,7 +343,7 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
     } catch { onError(t('estimates.err_open', 'Could not open that estimate')); onClose(); }
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { setSent(null); setData(null); load(); }, [load]);
+  useEffect(() => { setSent(null); setData(null); setConsentOk(false); setConsentName(''); load(); }, [load]);
 
   if (!data) return <Shell onClose={onClose}><div className="es-mLoading">{t('estimates.loading', 'Loading…')}</div></Shell>;
   const { estimate: e, lines, can_approve } = data;
@@ -321,10 +361,25 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
   };
 
   const approve = () => act('approve', () => api.post(`/estimates/${e.id}/internal-approve`), t('estimates.approved_ready', 'Estimate approved — it can be sent now.'));
-  const convert = () => act('convert', () => api.post(`/estimates/${e.id}/convert-to-work-order`), r => t('estimates.jc_opened', 'Job card {{n}} opened.', { n: r.work_order_number }));
+  const supp = e.kind === 'supplementary';
+  const convert = () => act('convert', () => api.post(`/estimates/${e.id}/convert-to-work-order`), r => (supp
+    ? t('estimates.supp_added', 'The approved additional work was added to work order {{n}}.', { n: r.work_order_number })
+    : t('estimates.jc_opened', 'Job card {{n}} opened.', { n: r.work_order_number })));
+  // A supplementary estimate's line is approved with the customer's consent to its fixed cost (incl. VAT) —
+  // worked out as the server does: the line at its price, to the fils, plus VAT.
+  const consentFor = l => ({
+    agreed: consentOk, name: consentName.trim(),
+    amount: r2(r2((Number(l.quantity) || 1) * Number(l.unit_price || 0) * (1 - Number(l.discount_pct || 0) / 100)) * (1 + Number(e.vat_rate ?? 5) / 100)),
+  });
   const decide = (lineId, status, partOption) => act(`line-${lineId}`,
-    () => api.patch(`/estimates/${e.id}/lines/${lineId}/approve`, { customer_status: status, ...(partOption ? { part_option: partOption } : {}) }),
-    r => (r.work_order_number ? t('estimates.all_approved_jc', 'All lines approved — job card {{n}} opened.', { n: r.work_order_number }) : null));
+    () => api.patch(`/estimates/${e.id}/lines/${lineId}/approve`, {
+      customer_status: status, ...(partOption ? { part_option: partOption } : {}),
+      ...(supp && status === 'approved' ? { consent: consentFor(lines.find(l => l.id === lineId) || {}) } : {}),
+    }),
+    r => (r.work_order_number
+      ? (supp ? t('estimates.supp_all_approved', 'All approved — the additional work was added to work order {{n}}.', { n: r.work_order_number })
+        : t('estimates.all_approved_jc', 'All lines approved — job card {{n}} opened.', { n: r.work_order_number }))
+      : null));
 
   const pref = preferenceOf(e);
   // The server's per-job, per-category numbers (lib/workflow.js); the same arithmetic here as a fallback.
@@ -333,7 +388,8 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
   const showGroupRows = groups.length > 1 || lines.some(l => l.job_name);
   const vatRate = Number(e.vat_rate || 0);
   const closed = !!e.work_order_id || ['converted', 'expired', 'rejected'].includes(e.status);
-  const pricingOpen = canParts && !closed;
+  // A supplementary estimate's cost is fixed once it has gone to the customer.
+  const pricingOpen = canParts && !closed && (!supp || e.status === 'draft');
   const decided = lines.filter(l => l.customer_status !== 'pending').length;
   const approvedSub = lines.filter(l => l.customer_status === 'approved' && l.line_type !== 'discount').reduce((s, l) => s + lineTotal(l), 0);
   const approvedTotal = approvedSub * (1 + vatRate / 100);
@@ -342,9 +398,20 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
   const mayRaise = canDo(user, 'estimate.raise');
   const mayRecord = canDo(user, 'customer.approval');
   const canSend = mayRaise && ['draft', 'sent_to_customer'].includes(e.status) && !e.work_order_id;
-  const canEdit = mayRaise && ['draft', 'sent_to_customer'].includes(e.status) && !e.work_order_id;
+  // A supplementary estimate stays as it is once the customer has started deciding it (its fixed cost is what they consent to).
+  const canEdit = mayRaise && ['draft', 'sent_to_customer'].includes(e.status) && !e.work_order_id
+    && (!supp || lines.every(l => l.customer_status === 'pending'));
   const canConvert = mayRecord && ['approved', 'partially_approved'].includes(e.status) && !e.work_order_id;
   const canDecideInPerson = mayRecord && e.status === 'sent_to_customer';
+  const consentReady = consentOk && consentName.trim().length >= 2;
+  // "Supplementary estimate": extra work on the same job, once the customer has decided this (main) one.
+  const raiseSupp = !supp && mayRaise && data.raise_supplementary?.ok;
+  const woOfJob = {
+    id: data.raise_supplementary?.work_order_id || e.intake_work_order_id || e.work_order_id,
+    work_order_number: e.intake_work_order_number || e.work_order_number,
+    customer_id: e.customer_id, customer_name: e.customer_full_name || e.customer_name,
+    vehicle_id: e.vehicle_id, plate_number: [e.plate_number || e.vehicle_plate, [e.make, e.model].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
+  };
   const phone = String(e.customer_phone || '').replace(/[^\d]/g, '');
   // The customer's approval link — also after reopening an estimate that is
   // already out (to resend it, or to open it at the counter).
@@ -365,7 +432,15 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
       <Shell onClose={onClose}>
         <div className="es-mHead">
           <div>
-            <p className="es-mRef">{e.estimate_number}{e.version > 1 ? ` · v${e.version}` : ''}</p>
+            <p className="es-mRef">
+              {e.estimate_number}{e.version > 1 ? ` · v${e.version}` : ''}
+              <KindBadge e={e} t={t} withParent={false} />
+              {supp && e.parent_estimate && (
+                <button type="button" className="es-parentLink" onClick={() => onOpen(e.parent_estimate.id)}>
+                  {t('estimates.supp_to_n', 'to main estimate {{n}}', { n: e.parent_estimate.estimate_number })}
+                </button>
+              )}
+            </p>
             <h2 className="es-mTitle">{e.customer_full_name || e.customer_name || t('estimates.customer', 'Customer')}</h2>
             <p className="es-mSub">
               {[e.plate_number || e.vehicle_plate, [e.make, e.model, e.year].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || t('estimates.no_vehicle', 'No vehicle')}
@@ -376,10 +451,22 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
               )}
             </p>
           </div>
-          <StatusChip status={e.status} needsApproval={e.needs_internal_approval} />
+          <StatusChip status={e.status} needsApproval={e.needs_internal_approval} kind={e.kind} />
         </div>
 
         <div className="es-mBody">
+          {supp && (
+            <div className="es-banner es-bannerFixed">
+              <Label width={18} height={18} />
+              <div>
+                <b>{t('estimates.supp_banner_title', 'Supplementary estimate — fixed cost.')}</b>{' '}
+                {t('estimates.supp_banner', 'Extra work on the same job{{main}}: its parts are priced in {{cat}} only, so each line has one firm price, fixed once it is sent. The customer approves it with their consent; approved work goes onto the same job card.', {
+                  main: e.parent_estimate ? ` (${t('estimates.supp_to_n', 'to main estimate {{n}}', { n: e.parent_estimate.estimate_number })})` : '',
+                  cat: categoryWords(t, pref),
+                })}
+              </div>
+            </div>
+          )}
           {summary.unpricedParts > 0 && !closed && (
             <div className="es-banner es-bannerHold">
               <Label width={18} height={18} />
@@ -410,17 +497,36 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
           {canConvert && (
             <div className="es-banner es-bannerAct">
               <WarningCircle width={18} height={18} />
-              <div><b>{t('estimates.customer_approved_n', 'The customer approved {{a}} of {{n}} lines.', { a: lines.filter(l => l.customer_status === 'approved').length, n: lines.length })}</b> {t('estimates.open_jc_hint', 'Open the job card for the approved work.')}</div>
+              <div><b>{t('estimates.customer_approved_n', 'The customer approved {{a}} of {{n}} lines.', { a: lines.filter(l => l.customer_status === 'approved').length, n: lines.length })}</b> {supp
+                ? t('estimates.supp_add_hint', 'Add the approved additional work to the job card.')
+                : t('estimates.open_jc_hint', 'Open the job card for the approved work.')}</div>
             </div>
           )}
           {e.work_order_id && (
             <div className="es-banner es-bannerOk">
               <Check width={18} height={18} />
-              <div>{t('estimates.jc_label', 'Job card')} <Link to={`/work-orders/${e.work_order_id}`} className="es-link">{e.work_order_number || `#${e.work_order_id}`} <OpenNewWindow width={13} height={13} /></Link> {t('estimates.jc_from_lines', 'opened from the approved lines.')}</div>
+              {supp ? (
+                <div>{t('estimates.supp_added_to', 'The approved additional work was added to work order')} <Link to={`/work-orders/${e.work_order_id}`} className="es-link">{e.work_order_number || `#${e.work_order_id}`} <OpenNewWindow width={13} height={13} /></Link>.</div>
+              ) : (
+                <div>{t('estimates.jc_label', 'Job card')} <Link to={`/work-orders/${e.work_order_id}`} className="es-link">{e.work_order_number || `#${e.work_order_id}`} <OpenNewWindow width={13} height={13} /></Link> {t('estimates.jc_from_lines', 'opened from the approved lines.')}</div>
+              )}
             </div>
           )}
           {e.status === 'rejected' && (
-            <div className="es-banner es-bannerBad"><Xmark width={18} height={18} /><div>{t('estimates.rejected_msg', 'The customer rejected this estimate. No work will be carried out.')}</div></div>
+            <div className="es-banner es-bannerBad"><Xmark width={18} height={18} /><div>{supp
+              ? t('estimates.supp_rejected_msg', 'The customer rejected this additional work. It will not be carried out; the job carries on with the approved work.')
+              : t('estimates.rejected_msg', 'The customer rejected this estimate. No work will be carried out.')}</div></div>
+          )}
+          {supp && canDecideInPerson && lines.some(l => l.customer_status === 'pending') && (
+            <div className="es-consentBox">
+              <div className="es-h3">{t('estimates.consent_in_person', 'Customer’s consent (approving in person)')}</div>
+              <label className="es-consentChk">
+                <input type="checkbox" checked={consentOk} onChange={ev => setConsentOk(ev.target.checked)} />
+                <span>{t('estimates.consent_in_person_stmt', 'The customer agrees to the additional work at the fixed cost of each item approved below (incl. VAT).')}</span>
+              </label>
+              <input className="es-input" value={consentName} maxLength={200} onChange={ev => setConsentName(ev.target.value)}
+                placeholder={t('estimates.consent_name_ph', 'The customer’s full name')} aria-label={t('estimates.consent_name_ph', 'The customer’s full name')} />
+            </div>
           )}
 
           {summary.jobs.length > 0 && (
@@ -504,8 +610,8 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
                 <tbody key={job}>
                   {showGroupRows && <tr className="es-groupRow"><td colSpan={5}>{job}</td></tr>}
                   {ls.map(l => (
-                    <LineRow key={l.id} t={t} estimateId={e.id} line={l} pref={pref}
-                      canDecide={canDecideInPerson} busy={busy} onDecide={decide}
+                    <LineRow key={l.id} t={t} estimateId={e.id} line={l} pref={pref} fixed={supp}
+                      canDecide={canDecideInPerson} busy={busy} onDecide={decide} needsConsent={supp && !consentReady}
                       pricingOpen={pricingOpen && l.line_type === 'parts' && l.customer_status === 'pending'}
                       onPriced={res => {
                         const left = Number(res.parts_left_to_price) || 0;
@@ -535,6 +641,38 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
               <div className="es-h3">{t('estimates.customer_reasons', "Customer's reasons")}</div>
               {String(e.customer_notes).split('\n').map((n, i) => <p key={i}>{n}</p>)}
             </div>
+          )}
+
+          {supp && (data.consents || []).length > 0 && (
+            <section className="es-consents">
+              <div className="es-h3">{t('estimates.consents', 'Customer’s consent')}</div>
+              {data.consents.map(c => (
+                <div key={c.id} className="es-consent">
+                  <ShieldCheck width={18} height={18} />
+                  <div>
+                    <div className="es-consentText">“{c.consent_text}”</div>
+                    <div className="es-consentMeta">
+                      <b>{c.consent_name}</b> · {fmtWhen(c.created_at)} · {aed(c.amount)} · {t('estimates.consent_items', '{{n}} item(s)', { n: (c.line_ids || []).length })} · {c.channel === 'in_person'
+                        ? t('estimates.consent_in_person_by', 'in person, recorded by {{n}}', { n: c.recorded_by_name || '—' })
+                        : t('estimates.consent_link_ip', 'approval link, IP {{ip}}', { ip: c.ip_address || '—' })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
+
+          {!supp && (data.supplementaries || []).length > 0 && (
+            <section className="es-suppList">
+              <div className="es-h3">{t('estimates.supplementaries', 'Supplementary estimates')}</div>
+              {data.supplementaries.map(x => (
+                <button key={x.id} type="button" className="es-suppRow" onClick={() => onOpen(x.id)}>
+                  <span className="es-suppNo">{x.estimate_number}</span>
+                  <StatusChip status={x.status} kind="supplementary" />
+                  <span className="es-suppAmt">{aed(x.total_amount)}</span>
+                </button>
+              ))}
+            </section>
           )}
 
           {link && (
@@ -572,7 +710,13 @@ function EstimateDetail({ id, user, onClose, onChanged, onError }) {
             </button>
           )}
           {canConvert && (
-            <button className="es-btn" disabled={!!busy} onClick={convert}>{busy === 'convert' ? t('estimates.opening', 'Opening…') : t('estimates.open_jc', 'Open job card')}</button>
+            <button className="es-btn" disabled={!!busy} onClick={convert}>{busy === 'convert' ? t('estimates.opening', 'Opening…')
+              : supp ? t('estimates.supp_add_jc', 'Add to the job card') : t('estimates.open_jc', 'Open job card')}</button>
+          )}
+          {raiseSupp && (
+            <button className="es-btn es-btnGhost" disabled={!!busy} onClick={() => onSupplementary(woOfJob)}>
+              <Plus width={15} height={15} /> {t('estimates.raise_supp', 'Supplementary estimate')}
+            </button>
           )}
           {/* Book (CRM stage 05): an approved quote for a car not yet in the workshop */}
           {e.work_order_id && !e.intake_work_order_id && canDo(user, 'job.open') && (
@@ -628,7 +772,7 @@ function NABadge({ t, title }) {
 }
 
 /** One estimate line, plus the Store's pricing editor under a part line. */
-function LineRow({ t, estimateId, line: l, pref, canDecide, busy, onDecide, pricingOpen, onPriced }) {
+function LineRow({ t, estimateId, line: l, pref, fixed = false, canDecide, busy, onDecide, needsConsent = false, pricingOpen, onPriced }) {
   const isPart = l.line_type === 'parts';
   const waiting = isPart && partUnpriced(l, pref);
   const [editOpen, setEditOpen] = useState(waiting);
@@ -648,12 +792,12 @@ function LineRow({ t, estimateId, line: l, pref, canDecide, busy, onDecide, pric
         <td className="es-num">{Number(l.quantity)}</td>
         <td className="es-num">{waiting ? <span className="es-dash">—</span> : aed(l.unit_price)}</td>
         <td className="es-num">{waiting ? <span className="es-dash">—</span> : aed(lineTotal(l))}</td>
-        <td><DecisionCell t={t} line={l} pref={pref} canDecide={canDecide} busy={busy} onDecide={onDecide} /></td>
+        <td><DecisionCell t={t} line={l} pref={pref} canDecide={canDecide} busy={busy} onDecide={onDecide} needsConsent={needsConsent} /></td>
       </tr>
       {pricingOpen && editOpen && (
         <tr className="es-priceRow">
           <td colSpan={5}>
-            <PartPricingEditor t={t} estimateId={estimateId} line={l} pref={pref}
+            <PartPricingEditor t={t} estimateId={estimateId} line={l} pref={pref} fixed={fixed}
               onSaved={res => { setEditOpen(false); onPriced(res); }}
               onCancel={waiting ? null : () => setEditOpen(false)} />
           </td>
@@ -705,7 +849,7 @@ function OptionPills({ t, line, pref }) {
  * approved in one of the categories on offer; the alternative only when
  * picked — it is never preselected.
  */
-function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
+function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide, needsConsent = false }) {
   const isPart = l.line_type === 'parts' && hasCategoryPricing(l);
   const { requested, alternative } = isPart ? partOptions(l, pref) : { requested: [], alternative: null };
   const choices = [...requested.filter(o => o.usable), ...(alternative ? [alternative] : [])];
@@ -729,8 +873,9 @@ function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
         )}
         {isPart && !choices.length && <span className="es-dec es-dec-rejected">{t('estimates.reject_only', 'Not available — reject it')}</span>}
         <div className="es-decide">
-          <button className="es-mini es-miniOk" disabled={!!busy || (isPart && !opt)} onClick={() => onDecide(l.id, 'approved', isPart ? opt : undefined)}
-            title={isPart && !opt ? t('estimates.choose_option_first', 'Choose the type the customer approved') : t('estimates.approved_in_person_tip', 'Customer approved in person')}>
+          <button className="es-mini es-miniOk" disabled={!!busy || (isPart && !opt) || needsConsent} onClick={() => onDecide(l.id, 'approved', isPart ? opt : undefined)}
+            title={needsConsent ? t('estimates.consent_first', 'Record the customer’s consent above first')
+              : isPart && !opt ? t('estimates.choose_option_first', 'Choose the type the customer approved') : t('estimates.approved_in_person_tip', 'Customer approved in person')}>
             {t('estimates.approve', 'Approve')}
           </button>
           <button className="es-mini es-miniBad" disabled={!!busy} onClick={() => onDecide(l.id, 'rejected')}
@@ -749,6 +894,7 @@ function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
       {l.line_type === 'parts' && l.customer_status === 'approved' && l.part_option
         ? ` · ${categoryLabel(t, l.part_option)}${Number(l.alternative_approved) === 1 ? ` (${t('estimates.alt_lower', 'alternative')})` : ''}` : ''}
       {l.response_channel === 'in_person' && l.customer_status !== 'pending' ? ` ${t('estimates.in_person', '(in person)')}` : ''}
+      {l.consent_id && l.customer_status === 'approved' ? ` · ${t('estimates.with_consent', 'with consent')}` : ''}
     </span>
   );
 }
@@ -763,7 +909,7 @@ function DecisionCell({ t, line: l, pref, canDecide, busy, onDecide }) {
 /** The estimate_lines column of a type's own part number (client review, 2 Nov 2026). */
 const partNoCol = c => ({ genuine: 'genuine_part_number', after_market: 'aftermarket_part_number', used: 'used_part_number' }[c]);
 
-function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
+function PartPricingEditor({ t, estimateId, line, pref, fixed = false, onSaved, onCancel }) {
   const str = v => (v === null || v === undefined || v === '' ? '' : String(Number(v)));
   const [cats, setCats] = useState(() => Object.fromEntries(pref.map(c => {
     const col = catCols(c);
@@ -788,7 +934,8 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
   const [err, setErr] = useState('');
 
   const unavailable = pref.filter(c => cats[c].avail === 'no');
-  const canOffer = unavailable.length > 0 && others.length > 0;
+  // A supplementary estimate has a fixed cost in its one type: no alternative to offer.
+  const canOffer = !fixed && unavailable.length > 0 && others.length > 0;
   const setCat = (c, patch) => setCats(prev => ({ ...prev, [c]: { ...prev[c], ...patch } }));
 
   async function save() {
@@ -831,7 +978,9 @@ function PartPricingEditor({ t, estimateId, line, pref, onSaved, onCancel }) {
 
   return (
     <div className="es-priceEd">
-      <div className="es-priceEdHead"><Label width={14} height={14} /> {t('estimates.store_price_cat', 'Store price — the customer asked for {{cats}}', { cats: categoryWords(t, pref) })}</div>
+      <div className="es-priceEdHead"><Label width={14} height={14} /> {fixed
+        ? t('estimates.store_price_fixed', 'Store price — fixed cost, {{cats}} only', { cats: categoryWords(t, pref) })
+        : t('estimates.store_price_cat', 'Store price — the customer asked for {{cats}}', { cats: categoryWords(t, pref) })}</div>
       {pref.map(c => {
         const s = cats[c];
         const label = categoryLabel(t, c);

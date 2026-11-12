@@ -281,3 +281,6 @@ textarea.wf-input { height: auto; padding: 8px 10px; resize: vertical; }
 .wf-ti-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: #1e3a6b; }
 .wf-ti .wf-note { margin: 6px 0 0; }
 .wf-ti .wf-row { margin-top: 10px; }
+
+/* Supplementary estimates under the main one (SEST-…). */
+.wf-sest { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e2e8f0; }

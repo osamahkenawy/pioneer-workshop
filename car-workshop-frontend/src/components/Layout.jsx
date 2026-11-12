@@ -9,7 +9,7 @@ import {
   Network, Menu, LogOut, Language,
   RefreshDouble, CreditCard, Medal, QrCode, Wrench, Archive, Megaphone,
   EmojiSatisfied, ClipboardCheck, StarSolid, WarningTriangle, GraphUp, Group, Truck, PageEdit, Shop, Calendar,
-  Car, Garage, Tools, TaskList, UserBadgeCheck, CheckCircle,
+  Car, Garage, Tools, TaskList, UserBadgeCheck, CheckCircle, ScanBarcode,
 } from 'iconoir-react';
 import NotificationBell from './NotificationBell';
 import PlanBadge from './dashboard/PlanBadge';
@@ -27,6 +27,7 @@ const iconMap = {
   'mechanics':          Wrench,
   'job-assignment':         UserBadgeCheck,
   'team-leader':            Group,
+  'scan-station':           ScanBarcode,
   'fleet-intake':           Truck,
   // Technician app
   'tech-jobs':        Wrench,
@@ -112,6 +113,9 @@ const navSections = [
       // their own keys these were invisible to every dynamic role (managers,
       // advisors, supervisors). They ride on the module each one belongs to.
       { path: '/team-leader',        labelKey: 'team_board',      iconKey: 'team-leader',      moduleKey: 'team-leader',    roles: ['admin', 'dispatcher'] },
+      // Points 14/17: the floor PC with the USB scanner — technicians scan a
+      // job's barcode to start and end it. Rides on the Team Board's module.
+      { path: '/scan-station',       labelKey: 'scan_station',    labelDefault: 'Scan station', iconKey: 'scan-station', moduleKey: 'team-leader', roles: ['admin', 'dispatcher'] },
       { path: '/fleet-intake',       labelKey: 'fleet_intake',    iconKey: 'fleet-intake',     moduleKey: 'fleet-intake',       roles: ['admin', 'dispatcher'] },
       // Step 6, materials: the Store's queue (requisitions to check/issue, estimate
       // parts to price). Rides on 'inventory', which the Storekeeper and Part

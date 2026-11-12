@@ -52,6 +52,14 @@ try {
   };
   const advisor = await mk('advisor', 'service_advisor', 'service_advisor');
   const manager = await mk('manager', 'workshop_manager', 'workshop_manager');
+  // The estimate follows the work order's completed technical inspection
+  // (client decision, 3 Nov 2026): the Supervisor writes and completes it first.
+  const completeTechnical = async (workOrderId, tok = manager) => {
+    const ti = (await call('POST', '/technical-inspections', tok, { work_order_id: workOrderId })).json?.data;
+    await call('PUT', `/technical-inspections/${ti?.id}`, tok, { service_lines: [{ job: 'QA inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await call('PATCH', `/technical-inspections/${ti?.id}/complete`, tok, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  };
   const store = await mk('store', 'part_advisor', 'storekeeper');
 
   // ── A customer, their car, a job ────────────────────────────────────
@@ -201,6 +209,7 @@ try {
 
   // ── Estimate: approve from the portal ───────────────────────────────
   section = 'estimate';
+  await completeTechnical(woId);
   const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [{ line_type: 'labour', job_name: 'Suspension', description: 'Front suspension check', quantity: 1, unit_price: 200 }] });
   const estId = est.json?.estimateId || est.json?.data?.id;
   r = await call('GET', '/customer-portal/home', cTok);

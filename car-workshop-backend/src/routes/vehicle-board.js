@@ -136,7 +136,8 @@ function boardSql(withPauseReason) {
     SELECT x.wo_id, e.id, e.status, e.customer_type, e.internal_approved_at, e.customer_approved_at,
            ${ago('e.created_at')} AS created_ago, ${ago('e.updated_at')} AS updated_ago,
            ${ago('e.sent_to_customer_at')} AS sent_ago, ${ago('e.customer_approved_at')} AS approved_ago,
-           ROW_NUMBER() OVER (PARTITION BY x.wo_id ORDER BY x.id DESC) AS rn
+           -- The main estimate, not a supplementary one (SEST-…), is the job's estimate.
+           ROW_NUMBER() OVER (PARTITION BY x.wo_id ORDER BY e.kind = 'supplementary', x.id DESC) AS rn
       FROM est_ids x JOIN service_estimates e ON e.id = x.id
   ),
   est_lines AS (

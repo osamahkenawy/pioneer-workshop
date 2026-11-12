@@ -23,6 +23,10 @@
  * The old full-width Code-128 of the 32-character status token is gone: it
  * was too dense to scan and the browser QR reader could not read it.
  *
+ * A staff print may attach order._tasks (lib/job-tasks.js): the jobs on the
+ * job card then follow on their own A6 page(s), each with its technician and
+ * the barcode the technician scans at the scan station (renderTaskPages).
+ *
  * Clean, minimal A6 job-sheet layout inspired by simple invoice layouts.
  * Flat sections, no heavy fills or oversized text. Thin lines, small type.
  */
@@ -40,6 +44,7 @@ import { query } from './database.js';
 import { customerStatusUrl } from './customer-link.js';
 import { markPointInFrame, DAMAGE_CODES, damageCodeOf } from './inspection-marks.js';
 import { JOB_TYPES, jobTypesOf } from './intake-rules.js';
+import { scanBarcodePNG } from './technician-badge.js';
 const { convertArabic } = arabicReshaper;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -536,6 +541,16 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
     }
 
     // ─────────────────────────────────────────────────────────
+    // 10b. JOBS — one A6 page (or more) listing each job with its
+    //      technician and its own barcode for the scan station. Only when
+    //      the caller attaches order._tasks (lib/job-tasks.js tasksForSheet);
+    //      the customer's copy never does.
+    // ─────────────────────────────────────────────────────────
+    if (Array.isArray(order._tasks) && order._tasks.length > 0) {
+      await renderTaskPages(doc, order, { W, H, M });
+    }
+
+    // ─────────────────────────────────────────────────────────
     // 11. INSPECTION SHEET — extra A4 page with the 5 car-diagram views
     //     and any damage markers recorded during intake / joint inspection.
     //     Only added when the work order actually has an inspection with marks.
@@ -546,6 +561,91 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
   }
 
   doc.end();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// JOBS PAGES — client meeting, 3 Nov 2026 (points 14, 17): each job /
+// service on the job card with its service type, its technician and a
+// Code-128 of its scan code (digits only, so any USB scanner types it the
+// same on any keyboard layout). The technician scans it at the station to
+// start the job and again to end it. Start / End lines are there to write
+// the times by hand if the station is down.
+// ═══════════════════════════════════════════════════════════════
+async function renderTaskPages(doc, order, { W, H, M }) {
+  const CW = W - 2 * M, RIGHT = W - M;
+  const INK = '#111827', GRAY = '#6b7280', LINE = '#d1d5db';
+  const tasks = order._tasks;
+  const txt = tasks.map(t => `${t.job_name}${t.mechanic_name || ''}`).join('');
+  const FR = hasArabic(txt) ? 'Amiri' : 'Helvetica';
+  const FB = hasArabic(txt) ? 'Amiri-Bold' : 'Helvetica-Bold';
+  const hline = y => { doc.moveTo(M, y).lineTo(RIGHT, y).strokeColor(LINE).lineWidth(0.5).stroke(); };
+  const cards = new Set(tasks.map(t => t.job_card_id));
+  const BLOCK = 66;
+  const bottom = H - M - 12;
+  const perPage = Math.max(1, Math.floor((bottom - (M + 40)) / BLOCK));
+  const pages = Math.ceil(tasks.length / perPage);
+  const vehicle = [order.vehicle_plate, [order.vehicle_make, order.vehicle_model].filter(Boolean).join(' ')].filter(Boolean).join('  ·  ');
+
+  for (let p = 0; p < pages; p++) {
+    doc.addPage({ margin: 0, size: [W, H] });
+    doc.rect(0, 0, W, H).fill('#ffffff');
+    let y = M;
+    doc.fillColor(INK).fontSize(8).font('Helvetica-Bold').text('JOBS — SCAN TO START AND END', M, y, { width: CW - 90 });
+    doc.fillColor(INK).fontSize(5.5).font('Helvetica-Bold').text(order.work_order_number || '', RIGHT - 90, y, { width: 90, align: 'right' });
+    if (order.job_card_number) {
+      doc.fillColor(GRAY).fontSize(5).font('Helvetica').text(order.job_card_number, RIGHT - 90, y + 8, { width: 90, align: 'right' });
+    }
+    y += 11;
+    if (vehicle) doc.fillColor(GRAY).fontSize(6).font(FR).text(ar(vehicle), M, y, { width: CW - 90, lineBreak: false, ellipsis: true });
+    y += 10;
+    doc.fillColor(GRAY).fontSize(5).font('Helvetica')
+       .text('Scan the job\'s barcode at the scan station when you start it, and again when you finish it.', M, y, { width: CW });
+    y += 9;
+    hline(y);
+    y += 6;
+
+    for (const [i, t] of tasks.slice(p * perPage, (p + 1) * perPage).entries()) {
+      const n = p * perPage + i + 1;
+      doc.fillColor(INK).fontSize(8).font(FB)
+         .text(`${n}. ${ar(t.job_name)}`, M, y, { width: CW - 78, lineBreak: false, ellipsis: true });
+      const type = t.service_type ? (JOB_TYPES[t.service_type] || humanize(t.service_type)) : '';
+      if (type) {
+        doc.fillColor(GRAY).fontSize(5.5).font('Helvetica-Bold')
+           .text(type.toUpperCase(), RIGHT - 76, y + 1.5, { width: 76, align: 'right', lineBreak: false });
+      }
+      y += 11;
+      const where = cards.size > 1 ? `   ·   Job card ${t.job_card_number}${t.job_card_title && !t.is_main ? ` (${t.job_card_title})` : ''}` : '';
+      doc.fillColor(t.mechanic_name ? INK : GRAY).fontSize(6.5).font(t.mechanic_name ? FB : FR)
+         .text(`Technician: ${t.mechanic_name ? ar(t.mechanic_name) : '______________ (not assigned yet)'}${where}`, M, y, { width: CW, lineBreak: false, ellipsis: true });
+      y += 10;
+      // Bars ~0.5 mm wide (4 dots on a 203 dpi label printer): the image is
+      // stretched to a fixed size, so the digits are drawn here, not by bwip.
+      try {
+        const png = await scanBarcodePNG(t.scan_code, { height: 8, text: false });
+        doc.image(png, M - 6, y, { width: 160, height: 26 });
+      } catch (err) {
+        console.error('[JobSheet] Task barcode error:', err.message);
+      }
+      doc.fillColor(INK).fontSize(7.5).font('Courier-Bold')
+         .text(t.scan_code.replace(/(\d{2})(\d{4})(\d{4})/, '$1 $2 $3'), M - 6, y + 28, { width: 160, align: 'center', characterSpacing: 1 });
+      // Hand-written fallback, right of the barcode's quiet zone.
+      const fx = M + 168;
+      doc.fillColor(GRAY).fontSize(5.5).font('Helvetica');
+      doc.text('Start', fx, y + 6);
+      doc.moveTo(fx + 18, y + 12).lineTo(RIGHT, y + 12).strokeColor(LINE).lineWidth(0.5).stroke();
+      doc.text('End', fx, y + 22);
+      doc.moveTo(fx + 18, y + 28).lineTo(RIGHT, y + 28).strokeColor(LINE).lineWidth(0.5).stroke();
+      y += BLOCK - 21;
+      hline(y);
+      y += 4;
+    }
+
+    const ftY = H - M - 5;
+    hline(ftY - 3);
+    doc.fillColor(GRAY).fontSize(4.5).font('Helvetica').text(order.work_order_number || '', M, ftY);
+    doc.fillColor(GRAY).fontSize(4.5).font('Helvetica')
+       .text(`Jobs ${pages > 1 ? `${p + 1} / ${pages}` : ''}`.trim(), RIGHT - 60, ftY, { width: 60, align: 'right' });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

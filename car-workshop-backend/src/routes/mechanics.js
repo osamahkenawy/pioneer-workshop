@@ -9,6 +9,10 @@ import { getUsageStats } from '../middleware/plan-gate.js';
 import { config } from '../config.js';
 import { validatePhone, validateStatus, VALID_MECHANIC_STATUSES } from '../lib/mechanic-validation.js';
 import { clampText, stripMarkup } from '../lib/sanitize.js';
+import { logAudit } from '../lib/audit.js';
+import { requireCapability } from '../lib/roles.js';
+import { newBadgeCode, parseSkills, skillsOf } from '../lib/job-tasks.js';
+import { generateTechnicianBadgePDF } from '../lib/technician-badge.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -20,6 +24,13 @@ router.use(authMiddleware);
 // assignment (reinterpreted from "home delivery zone" to "usual bay they work in").
 // Work order status values referenced here are reinterpreted for a workshop context:
 // 'in_transit' -> 'in_progress' (job actively being worked), 'delivered' -> 'completed'.
+
+/**
+ * A technician row as the screens get it: skills as a list (null = not
+ * recorded), and the badge code left out — it is what proves who is at the
+ * scan station, so it is only on the printed badge (GET /:id/badge).
+ */
+const withoutBadge = ({ badge_code, ...m }) => ({ ...m, skills: skillsOf(m), has_badge: !!badge_code });
 
 // Allowed sort columns for the mechanic list (F3). Whitelisted to avoid SQL injection.
 // The courier sorts 'deliveries' and 'last_ping' (GPS) are gone; an unknown
@@ -94,7 +105,7 @@ router.get('/', async (req, res) => {
       [req.workshopId]
     );
     const status_counts = Object.fromEntries(statusRows.map(r => [r.status, Number(r.n)]));
-    return res.json({ success: true, data: mechanics, pagination: { total: parseInt(total), page: pg, limit: lim }, status_counts });
+    return res.json({ success: true, data: mechanics.map(withoutBadge), pagination: { total: parseInt(total), page: pg, limit: lim }, status_counts });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: 'Failed to fetch mechanics' });
@@ -131,7 +142,7 @@ router.get('/me', async (req, res) => {
        FROM work_orders WHERE mechanic_id = ? AND workshop_id = ? ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 50`,
       [mechanic.id, req.workshopId]
     );
-    return res.json({ success: true, data: { ...mechanic, recent_work_orders: recentWorkOrders } });
+    return res.json({ success: true, data: { ...withoutBadge(mechanic), recent_work_orders: recentWorkOrders } });
   } catch (err) {
     console.error('Mechanic /me error:', err);
     return res.status(500).json({ success: false, message: 'Failed to fetch mechanic profile' });
@@ -171,7 +182,7 @@ router.get('/:id', async (req, res) => {
        WHERE o.mechanic_id = ? AND o.workshop_id = ? ORDER BY COALESCE(o.completed_at, o.created_at) DESC LIMIT 50`,
       [req.params.id, req.workshopId]
     );
-    return res.json({ success: true, data: { ...mechanic, recent_work_orders: recentWorkOrders } });
+    return res.json({ success: true, data: { ...withoutBadge(mechanic), recent_work_orders: recentWorkOrders } });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch mechanic' });
   }
@@ -321,7 +332,7 @@ router.post('/', async (req, res) => {
     }
 
     return res.status(201).json({
-      success: true, data: mechanic,
+      success: true, data: withoutBadge(mechanic),
       account: account ? { username: account.username, password: account.password, email: account.email, isDefault: account.isDefault } : null,
       message: account
         ? `Mechanic created! Credentials are in the account field (also emailed if address provided).`
@@ -366,9 +377,74 @@ router.put('/:id', async (req, res) => {
        is_active !== undefined ? is_active : true, req.params.id, req.workshopId]
     );
     const [mechanic] = await query('SELECT * FROM mechanics WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
-    return res.json({ success: true, data: mechanic });
+    return res.json({ success: true, data: mechanic && withoutBadge(mechanic) });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to update mechanic' });
+  }
+});
+
+// ── Skills and the scan-station badge (client meeting, 3 Nov 2026) ─────────
+// Set by whoever assigns the work (job.assign: Team Leader, Supervisor,
+// Foreman, managers). lib/job-tasks.js offers a job only to technicians
+// qualified for its service type.
+
+// PATCH /api/mechanics/:id/skills — { skills: ['service','repair', …] } (lib/intake-rules.js JOB_TYPES keys; [] = none)
+router.patch('/:id/skills', requireCapability('job.assign'), async (req, res) => {
+  try {
+    const parsed = parseSkills(req.body?.skills);
+    if (parsed.error) return res.status(400).json({ success: false, code: 'SKILLS_INVALID', message: parsed.error });
+    const [m] = await query('SELECT id, skills FROM mechanics WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!m) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+    await execute('UPDATE mechanics SET skills = ? WHERE id = ? AND workshop_id = ?', [parsed.value, m.id, req.workshopId]);
+    const skills = JSON.parse(parsed.value);
+    await logAudit({ workshopId: req.workshopId, userId: req.user.id, action: 'SKILLS', entityType: 'mechanics', entityId: m.id,
+      oldValue: { skills: skillsOf(m) }, newValue: { skills } });
+    return res.json({ success: true, data: { id: m.id, skills } });
+  } catch (err) {
+    console.error('PATCH /mechanics/:id/skills error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save the skills' });
+  }
+});
+
+/** Give the technician a badge code (a new one with `replace`: the old badge stops working). */
+async function ensureBadgeCode(mechanicId, workshopId, { replace = false } = {}) {
+  const [m] = await query('SELECT id, full_name, badge_code FROM mechanics WHERE id = ? AND workshop_id = ?', [mechanicId, workshopId]);
+  if (!m || (m.badge_code && !replace)) return m || null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = newBadgeCode();
+    try {
+      await execute('UPDATE mechanics SET badge_code = ? WHERE id = ? AND workshop_id = ?', [code, m.id, workshopId]);
+      return { ...m, badge_code: code };
+    } catch (err) {
+      if (err.code !== 'ER_DUP_ENTRY') throw err;
+    }
+  }
+  throw new Error('Could not allocate a badge code');
+}
+
+// GET /api/mechanics/:id/badge — the printable badge (PDF); the code is made on first print
+router.get('/:id/badge', requireCapability('job.assign'), async (req, res) => {
+  try {
+    const m = await ensureBadgeCode(req.params.id, req.workshopId);
+    if (!m) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+    const [workshop] = await query('SELECT name FROM workshops WHERE id = ?', [req.workshopId]);
+    await generateTechnicianBadgePDF(res, { mechanic: m, workshop });
+  } catch (err) {
+    console.error('GET /mechanics/:id/badge error:', err);
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Failed to print the badge' });
+  }
+});
+
+// POST /api/mechanics/:id/badge/reset — a lost badge: a new code, the old badge stops working
+router.post('/:id/badge/reset', requireCapability('job.assign'), async (req, res) => {
+  try {
+    const m = await ensureBadgeCode(req.params.id, req.workshopId, { replace: true });
+    if (!m) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+    await logAudit({ workshopId: req.workshopId, userId: req.user.id, action: 'BADGE_RESET', entityType: 'mechanics', entityId: m.id });
+    return res.json({ success: true, message: `New badge for ${m.full_name} — print it; the old one no longer works.` });
+  } catch (err) {
+    console.error('POST /mechanics/:id/badge/reset error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to replace the badge' });
   }
 });
 

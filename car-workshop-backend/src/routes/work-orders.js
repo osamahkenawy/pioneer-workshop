@@ -49,6 +49,7 @@ import { getFinancialConfig, computeWorkOrderFinancials, recordMechanicEarning }
 import { syncJobCardBilling, getInvoiceForWorkOrder, isInvoiceLocked, computeJobCardTotals, resolveVatRate } from '../lib/job-card-billing.js';
 import { announceMainJobCard, fulfilReminders, departmentFor, JC_QC_PASSED, onTechnicianAssigned, onWorkApproved } from '../lib/workflow.js';
 import { openJobCardIfReady, jobCardGate, awaitingPhysicalInspection, AWAITING_PHYSICAL_SQL, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
+import { tasksForSheet } from '../lib/job-tasks.js';
 import { partsRequestMissing } from '../lib/parts-request.js';
 import { requireCapability, can, isManagerRole } from '../lib/roles.js';
 import { woLabel, woDisplayKey, WO_DISPLAY_KEYS } from '../lib/status-labels.js';
@@ -868,6 +869,8 @@ router.get('/:id/label', async (req, res) => {
     // Latest completed inspection (intake preferred) — attached so the PDF
     // generator can append the walk-around damage sheet.
     order._inspection = await fetchLatestInspection(order.id, req.workshopId);
+    // The A6 "scan to start and end" pages, one per approved job (points 14/17).
+    order._tasks = await tasksForSheet(order.id, req.workshopId);
 
     const [workshop] = await query('SELECT * FROM workshops WHERE id = ?', [req.workshopId]);
 
@@ -931,6 +934,7 @@ router.post('/labels', async (req, res) => {
       const [itemCount] = await query('SELECT COUNT(*) as cnt FROM work_order_items WHERE work_order_id = ?', [order.id]);
       order.item_count = itemCount?.cnt || 0;
       order._inspection = await fetchLatestInspection(order.id, req.workshopId);
+      order._tasks = await tasksForSheet(order.id, req.workshopId);
     }
 
     const [workshop] = await query('SELECT * FROM workshops WHERE id = ?', [req.workshopId]);

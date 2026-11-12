@@ -83,24 +83,70 @@ try {
     { line_type: 'labour', description: 'Brake pad - labour', quantity: 1.5, unit_price: 80 },   // 1.5 h → 120
     { line_type: 'parts', description: 'Brake pads - Genuine', quantity: 1, unit_price: 150 },
   ];
-  const sendEst = async lines => {
-    const id = (await api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines })).json.estimateId;
+  // The estimate follows the work order's completed technical inspection
+  // (client meeting, 3 Nov 2026, point 9): every estimate here is raised for
+  // a job of its own — physical inspection acknowledged, technical report done.
+  let odo = 85000; // a car's readings only go up (strict odometer, client review 2 Nov 2026)
+  const completeTechnical = woId => as(adminToken, async () => {
+    const ti = (await api('POST', '/technical-inspections', { work_order_id: woId })).json?.data;
+    await api('PUT', `/technical-inspections/${ti?.id}`, { service_lines: [{ job: 'LEAKTEST inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await api('PATCH', `/technical-inspections/${ti?.id}/complete`, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  });
+  const newJob = async ({ ack = true, technical = true } = {}) => {
+    const r = await as(adminToken, () => api('POST', '/work-orders', {
+      customer_id: CUST, vehicle_id: VEH, customer_name: 'LEAKTEST Customer', customer_phone: '+971500000999',
+      description: 'LEAKTEST visit', odometer_in: (odo += 100), service_fee: 0, items: [] }));
+    const id = r.json?.data?.id;
+    if (!id) throw new Error(`work order not created: HTTP ${r.status} ${r.json?.message || ''}`);
+    created.work_orders.push(id);
+    if (ack) await as(adminToken, () => acknowledge(id));
+    if (technical) await completeTechnical(id);
+    return id;
+  };
+  const sendEst = async (lines, woId = null) => {
+    const job = woId || await newJob();
+    const r = await api('POST', '/estimates', { intake_work_order_id: job, lines });
+    const id = r.json?.estimateId;
+    if (!id) throw new Error(`estimate not raised: HTTP ${r.status} ${r.json?.code || ''} ${r.json?.message || ''}`);
     created.service_estimates.push(id);
     const tok = (await api('POST', `/estimates/${id}/send`, { email: 'leaktest-customer@example.invalid' })).json.approval_url.split('/').pop();
     const L = (await api('GET', `/public/estimates/${tok}`, null, { auth: false })).json.lines;
-    return { id, tok, L };
+    return { id, tok, L, wo: job };
   };
   const decide = (tok, lineId, decision, extra = {}) =>
     api('POST', `/public/estimates/${tok}/lines/${lineId}/decide`, { decision, ...extra }, { auth: false });
 
-  // ── A: estimate → partial approval → job card → team leader → extra item → invoice
+  // ── A: work order → physical inspection → technical inspection → estimate →
+  //    partial approval → job card → MRN → team leader → extra item → invoice
   const A = 'A estimate path';
-  const ea = await sendEst(LINES);
+  const noJob = await api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: LINES });
+  expect(A, 'an estimate needs a work order (409 TECHNICAL_INSPECTION_REQUIRED)', noJob.status === 409 && noJob.json?.code === 'TECHNICAL_INSPECTION_REQUIRED',
+    `HTTP ${noJob.status} ${noJob.json?.code || ''}`);
+  const woA = await newJob({ ack: false, technical: false });
+
+  // LEAKTEST Customer is external: the main job card opens when they
+  // acknowledge the physical inspection (client, 2026-10-29) — and until then
+  // there is nothing for the floor.
+  const tl0 = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
+  const jc0 = await api('POST', '/job-cards', { work_order_id: woA, lines: [{ description: 'AC compressor - labour', line_type: 'labour' }] });
+  const [woA0] = await q('SELECT mechanic_id FROM work_orders WHERE id = ?', [woA]);
+  expect(A, 'no job card before the physical inspection is acknowledged: the Team Leader cannot assign, no job card can be added (409 PHYSICAL_INSPECTION_REQUIRED)',
+    !(await mainOf(woA)) && tl0.status === 409 && tl0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && jc0.status === 409 && jc0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && woA0.mechanic_id == null,
+    `assign ${tl0.status} ${tl0.json?.code || ''}, job card ${jc0.status} ${jc0.json?.code || ''}`);
+  const ackA = await acknowledge(woA);
+  expect(A, 'acknowledged at the car → the main job card opens', ackA.json?.job_card?.opened_now === true && !!(await mainOf(woA)), JSON.stringify(ackA.json?.job_card));
+  const early = await api('POST', '/estimates', { intake_work_order_id: woA, lines: LINES });
+  expect(A, 'no estimate before the technical inspection is completed (409 TECHNICAL_INSPECTION_REQUIRED)',
+    early.status === 409 && early.json?.code === 'TECHNICAL_INSPECTION_REQUIRED', `HTTP ${early.status} ${early.json?.code || ''}`);
+  await completeTechnical(woA);
+
+  const ea = await sendEst(LINES, woA);
   for (const [i, d] of [[0, 'approved'], [1, 'approved'], [2, 'rejected'], [3, 'approved'], [4, 'approved']]) await decide(ea.tok, ea.L[i].id, d);
   const notes = await q(`SELECT title FROM user_notifications WHERE user_id = ? AND title LIKE '%partially approved%'`, [u.insertId]);
   expect(A, 'partial approval notifies the advisor', notes.length === 1, `${notes.length} notification(s)`);
   const conv = await api('POST', `/estimates/${ea.id}/convert-to-work-order`);
-  const woA = conv.json.workOrderId; created.work_orders.push(woA);
+  expect(A, 'the approved work goes onto the same work order', conv.status === 200 && conv.json?.workOrderId === woA, `HTTP ${conv.status}, work order ${conv.json?.workOrderId}`);
   const items = await q('SELECT name, item_type, quantity, unit_price, estimate_line_id FROM work_order_items WHERE work_order_id = ?', [woA]);
   // approved: 100 + 500 + 1.5×80 + 150 = 870 → VAT 43.50 → 913.50
   expect(A, 'approved lines copied onto the job card', items.length === 4 && items.every(i => i.estimate_line_id),
@@ -112,17 +158,13 @@ try {
   const again = await api('POST', `/estimates/${ea.id}/convert-to-work-order`);
   expect(A, 'converting twice is refused', again.status === 400 || again.status === 409, `HTTP ${again.status}`);
 
-  // LEAKTEST Customer is external: the main job card opens when they
-  // acknowledge the physical inspection (client, 2026-10-29), not with the
-  // approved estimate — and until then there is nothing for the floor.
-  const tl0 = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
-  const jc0 = await api('POST', '/job-cards', { work_order_id: woA, estimate_id: ea.id, lines: [{ description: 'AC compressor - labour', line_type: 'labour' }] });
-  const [woA0] = await q('SELECT mechanic_id FROM work_orders WHERE id = ?', [woA]);
-  expect(A, 'no job card before the physical inspection is acknowledged: the Team Leader cannot assign, no job card can be added (409 PHYSICAL_INSPECTION_REQUIRED)',
-    !(await mainOf(woA)) && tl0.status === 409 && tl0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && jc0.status === 409 && jc0.json?.code === 'PHYSICAL_INSPECTION_REQUIRED' && woA0.mechanic_id == null,
-    `assign ${tl0.status} ${tl0.json?.code || ''}, job card ${jc0.status} ${jc0.json?.code || ''}`);
-  const ackA = await acknowledge(woA);
-  expect(A, 'acknowledged at the car → the main job card opens', ackA.json?.job_card?.opened_now === true && !!(await mainOf(woA)), JSON.stringify(ackA.json?.job_card));
+  // Point 18 (client meeting, 3 Nov 2026): the parts are requested from the
+  // Store (MRN) before a technician is assigned.
+  const tlNoMrn = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
+  expect(A, 'approved parts: no technician before the MRN (409 MRN_REQUIRED)', tlNoMrn.status === 409 && tlNoMrn.json?.code === 'MRN_REQUIRED',
+    `HTTP ${tlNoMrn.status} ${tlNoMrn.json?.code || ''}`);
+  const mrnA = await api('POST', `/job-cards/${(await mainOf(woA)).id}/requisitions`, { items: [{ description: 'AC compressor', part_number: 'ACC-G', quantity: 1 }] });
+  expect(A, 'MRN raised on the job card', mrnA.status === 201, `HTTP ${mrnA.status} ${mrnA.json?.message || ''}`);
   const tl = await api('POST', '/team-leader/assign', { work_order_id: woA, mechanic_id: MECH });
   const ia = await inv(woA);
   expect(A, 'team leader assign raises the invoice', tl.status === 200 && !!ia, `HTTP ${tl.status}, invoice ${ia?.invoice_number}, total ${ia?.total_amount}`);
@@ -165,7 +207,7 @@ try {
   const B = 'B wizard path';
   const wiz = await api('POST', '/work-orders', {
     customer_id: CUST, vehicle_id: VEH, customer_name: 'LEAKTEST Customer', customer_phone: '+971500000999',
-    description: 'LEAKTEST brake noise', odometer_in: 85000, payment_method: 'cash',
+    description: 'LEAKTEST brake noise', odometer_in: (odo += 100), payment_method: 'cash',
     service_fee: 80, cash_amount: 195, discount: 0,
     items: [{ name: 'Brake pads - Genuine', quantity: 1, unit_price: 150 }, { name: 'Brake fluid', quantity: 1, unit_price: 45 }],
   });
@@ -202,7 +244,7 @@ try {
   const B2 = 'B2 edit lines';
   const wizE = await api('POST', '/work-orders', {
     customer_id: CUST, vehicle_id: VEH, customer_name: 'LEAKTEST Customer', customer_phone: '+971500000999',
-    description: 'LEAKTEST edit lines', odometer_in: 85100, payment_method: 'cash', service_fee: 80, discount: 0,
+    description: 'LEAKTEST edit lines', odometer_in: (odo += 100), payment_method: 'cash', service_fee: 80, discount: 0,
     items: [{ name: 'Oil filter', quantity: 1, unit_price: 40 }],
   });
   const woE = wizE.json?.data?.id; created.work_orders.push(woE);
@@ -220,16 +262,16 @@ try {
   const ec = await sendEst([LINES[0], LINES[1]]);
   await decide(ec.tok, ec.L[0].id, 'approved');
   await decide(ec.tok, ec.L[1].id, 'approved');
-  const woC = (await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [ec.id]))[0].work_order_id; created.work_orders.push(woC);
+  const woC = (await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [ec.id]))[0].work_order_id;
   const flip = await decide(ec.tok, ec.L[1].id, 'rejected');
   const ecAfter = (await q('SELECT status FROM service_estimates WHERE id = ?', [ec.id]))[0];
-  expect(C, 'full approval auto-creates an itemised job card', !!woC && (await wo(woC)).billing_basis === 'itemised', `job card id ${woC}`);
+  expect(C, 'full approval puts the work on its job, itemised', woC === ec.wo && (await wo(woC)).billing_basis === 'itemised', `work order ${woC} (job ${ec.wo})`);
   expect(C, 'customer cannot change a decision after the job card exists', flip.status === 409 && ecAfter.status === 'converted',
     `HTTP ${flip.status}, estimate ${ecAfter.status}`);
 
   // ── D: staff cannot approve on the customer's behalf
   const D = 'D approval bypass';
-  const ed = (await api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: [LINES[1]] })).json.estimateId;
+  const ed = (await api('POST', '/estimates', { intake_work_order_id: await newJob(), lines: [LINES[1]] })).json.estimateId;
   created.service_estimates.push(ed);
   const pd = await api('PATCH', `/estimates/${ed}/status`, { status: 'approved' });
   const cd = await api('POST', `/estimates/${ed}/convert-to-work-order`);
@@ -243,6 +285,8 @@ try {
   const eeAfter = (await q('SELECT status, work_order_id, customer_notes FROM service_estimates WHERE id = ?', [ee.id]))[0];
   expect(E, 'rejection closes the estimate and stores the reason', eeAfter.status === 'rejected' && !eeAfter.work_order_id && /Too expensive/.test(eeAfter.customer_notes || ''),
     `status ${eeAfter.status}, reason "${eeAfter.customer_notes}"`);
+  const jobE = await wo(ee.wo);
+  expect(E, '"Reject all" closes the job: no work carried out', jobE.status === 'cancelled', `work order ${jobE.status}`);
 
   // ── F: legacy job cards are untouched
   const F = 'F legacy unchanged';
@@ -261,13 +305,13 @@ try {
   const eg = await sendEst(many);
   let last;
   for (const l of eg.L) last = await decide(eg.tok, l.id, 'approved');
-  const woG = (await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [eg.id]))[0].work_order_id; if (woG) created.work_orders.push(woG);
+  const woG = (await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [eg.id]))[0].work_order_id;
   expect(G, 'customer can decide all 12 lines (was blocked after ~9)', last.status === 200 && !!woG, `last HTTP ${last.status}`);
   // ── H: approval captured at the counter; growth needs re-approval
   const H = 'H customer approval';
   const wizH = await api('POST', '/work-orders', {
     customer_id: CUST, vehicle_id: VEH, customer_name: 'LEAKTEST Customer', customer_phone: '+971500000999',
-    description: 'LEAKTEST service', odometer_in: 85200, service_fee: 100, items: [], // above the earlier visits (no lower reading, 2 Nov)
+    description: 'LEAKTEST service', odometer_in: (odo += 100), service_fee: 100, items: [], // above the earlier visits (no lower reading, 2 Nov)
     customer_approval_channel: 'phone', customer_approval_note: 'Approved on call',
   });
   const woH = wizH.json?.data?.id; created.work_orders.push(woH);
@@ -287,7 +331,8 @@ try {
   // ── I: no Supervisor / Manager sign-off any more (client review, 2 Nov 2026:
   //    "once the parts estimation is submitted there is no need for any approval")
   const I = 'I no sign-off';
-  const estI = (await as(dispatcherToken, () => api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: [LINES[0]] }))).json.estimateId;
+  const jobI = await newJob();
+  const estI = (await as(dispatcherToken, () => api('POST', '/estimates', { intake_work_order_id: jobI, lines: [LINES[0]] }))).json.estimateId;
   created.service_estimates.push(estI);
   const sendI = await as(dispatcherToken, () => api('POST', `/estimates/${estI}/send`, { email: 'leaktest-customer@example.invalid' }));
   // No SMTP locally → 502 EMAIL_FAILED (the link is live); either way it was let through.
@@ -297,7 +342,9 @@ try {
   expect(I, 'no "needs approval" queue', listI.json?.approval_required === false && (listI.json?.counts?.needs_approval || 0) === 0,
     `required ${listI.json?.approval_required} count ${listI.json?.counts?.needs_approval}`);
   await q(`UPDATE customers SET customer_class = 'internal' WHERE id = ?`, [CUST]);
-  const estJ = (await as(dispatcherToken, () => api('POST', '/estimates', { customer_id: CUST, vehicle_id: VEH, lines: [LINES[0]] }))).json.estimateId;
+  // An internal customer's job card opens with the job — no physical inspection first.
+  const jobJ = await newJob({ ack: false });
+  const estJ = (await as(dispatcherToken, () => api('POST', '/estimates', { intake_work_order_id: jobJ, lines: [LINES[0]] }))).json.estimateId;
   created.service_estimates.push(estJ);
   const sendJ = await as(dispatcherToken, () => api('POST', `/estimates/${estJ}/send`, { email: 'leaktest-customer@example.invalid' }));
   expect(I, 'internal (fleet) customer estimate goes straight out', wentOut(sendJ), `HTTP ${sendJ.status}`);

@@ -106,43 +106,16 @@ try {
   expect('asking again reuses them (no duplicate customer or car)', prep2.json?.data?.customer?.id === custId && prep2.json?.data?.vehicle_id === vehId, '');
   const tl = await call('POST', `/enquiries/${enq.id}/prepare-quote`, leader);
   expect('a Team Leader cannot raise quotes', tl.status === 403, `HTTP ${tl.status}`);
+  // Estimation follows the technical inspection (client meeting, 3 Nov 2026):
+  // no quote is raised from an enquiry any more — it waits for the visit.
   const est = await call('POST', '/estimates', advisor, { enquiry_id: enq.id, customer_id: custId, vehicle_id: vehId, customer_type: 'retail_cash',
     lines: [{ job_name: 'Brakes', line_type: 'labour', description: 'Brake inspection', quantity: 1, unit_price: 200 }] });
-  const estId = est.json?.estimateId;
-  const [eq] = await q('SELECT status, quoted_amount FROM enquiries WHERE id = ?', [enq.id]);
-  expect('the estimate is linked; the enquiry is now quoted with its amount', est.status === 201 && eq.status === 'quoted' && Number(eq.quoted_amount) === 210, `${eq.status} ${eq.quoted_amount}`);
-  expect('the call-back task closes once quoted', (await task('call_back', 'enquiry', enq.id))?.status === 'done', '');
-  await call('POST', `/estimates/${estId}/internal-approve`, supervisor);
-  const sent = await call('POST', `/estimates/${estId}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
-  expect('sent (after the Supervisor\'s approval) → 48-hour chase task', sent.status === 200 && (await task('quote_chase', 'quote', estId))?.status === 'open', `HTTP ${sent.status}`);
-  const [{ approval_token: token }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [estId]);
-  const [line] = await q('SELECT id FROM estimate_lines WHERE estimate_id = ?', [estId]);
-  await call('POST', `/public/estimates/${token}/lines/${line.id}/decide`, null, { decision: 'approved' });
-  const [er] = await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [estId]);
-  const [wo] = await q('SELECT id, enquiry_id, customer_phone, status, customer_approved_at FROM work_orders WHERE id = ?', [er.work_order_id || 0]);
-  expect('the customer approves → the work goes onto the enquiry\'s own work order (no second one), with the customer\'s phone',
-    !!wo && wo.id === eWo?.id && wo.enquiry_id === enq.id && !!wo.customer_phone && !!wo.customer_approved_at, wo ? `WO ${wo.id} ${wo.status}` : 'no WO');
-  const woFlag = (await call('GET', `/work-orders/${wo?.id}`, advisor)).json?.data;
-  expect('approved before the car is in: no job card until the physical inspection — marked "physical inspection first", not "to assign"',
-    !(await mainOf(wo?.id)) && Number(woFlag?.awaiting_physical_inspection) === 1, `flag ${woFlag?.awaiting_physical_inspection}`);
-  const [{ service_status_token: statusTok }] = await q('SELECT service_status_token FROM work_orders WHERE id = ?', [wo?.id || 0]);
-  const custStage = (await call('GET', `/public/service-status/${statusTok}`)).json?.data?.stage?.key;
-  expect('…and the customer\'s status page still reads "Vehicle received" until the inspection is acknowledged (not "repair")', custStage === 'received', custStage);
-  const [ec] = await q('SELECT status, converted_work_order_id FROM enquiries WHERE id = ?', [enq.id]);
-  expect('the enquiry is converted to that job; the chase task closes', ec.status === 'converted' && ec.converted_work_order_id === wo?.id && (await task('quote_chase', 'quote', estId))?.status === 'done', ec.status);
+  expect('a quote from the enquiry is refused — the estimate follows the technical inspection', est.status === 409 && est.json?.code === 'TECHNICAL_INSPECTION_REQUIRED', `HTTP ${est.status} ${est.json?.code}`);
 
   // ── 05 Book ────────────────────────────────────────────────────────
   section = 'book';
-  const denied = await call('POST', '/appointments', leader, { estimate_id: estId, appointment_date: tomorrow(), appointment_time: '09:00' });
+  const denied = await call('POST', '/appointments', leader, { enquiry_id: enq.id, appointment_date: tomorrow(), appointment_time: '09:00' });
   expect('a Team Leader cannot make bookings', denied.status === 403, `HTTP ${denied.status}`);
-  const b1 = await call('POST', '/appointments', advisor, { estimate_id: estId, appointment_date: tomorrow(), appointment_time: '09:00', source: 'call_centre' });
-  const appt1 = b1.json?.appointment;
-  expect('booking from the approved quote carries its job card', b1.status === 201 && appt1?.work_order_id === wo?.id && appt1?.estimate_id === estId, `HTTP ${b1.status} ${b1.json?.message || ''}`);
-  const again = await call('POST', '/appointments', advisor, { estimate_id: estId, appointment_date: tomorrow(), appointment_time: '10:00' });
-  expect('the same quote cannot be booked twice', again.status === 409 && again.json?.code === 'ALREADY_BOOKED', `HTTP ${again.status}`);
-  const ci1 = await call('POST', `/appointments/${appt1.id}/check-in`, advisor, { odometer_in: 30500 });
-  expect('check-in uses that work order; the physical inspection is next (no job card yet)', ci1.json?.work_order_id === wo?.id && ci1.json?.created === false
-    && ci1.json?.physical_inspection_required === true && !(await mainOf(wo?.id)), `HTTP ${ci1.status} ${ci1.json?.message || ''}`);
   const e2r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Booker', contact_phone: '+971500000992', emirate: 'Dubai', vehicle_make: 'Honda', vehicle_model: 'Civic', vehicle_year: 2019, vehicle_plate: 'QACRM2', source_channel: 'passing_local', contact_method: 'walk_in', description: 'Routine service' });
   const e2 = e2r.json?.data; const e2Wo = e2r.json?.work_order;
   const b2 = await call('POST', '/appointments', advisor, { enquiry_id: e2.id, appointment_date: tomorrow(), appointment_time: '11:00', service_category: 'oil_change' });
@@ -166,21 +139,6 @@ try {
   const [lostLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND status = 'cancelled' ORDER BY id DESC LIMIT 1", [emailOnly.json?.work_order?.id || 0]);
   expect('…and its work order, with nothing done on it, is cancelled: "Enquiry closed: timing"', lost.json?.work_order?.cancelled === true && lostWo?.status === 'cancelled' && /^Enquiry closed: timing/.test(lostLog?.note || ''),
     `${lostWo?.status} · ${lostLog?.note}`);
-  const e3r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Reject', contact_phone: '+971500000993', emirate: 'Ajman', source_channel: 'owned_repeat', contact_method: 'phone' });
-  const e3 = e3r.json?.data;
-  const p3 = (await call('POST', `/enquiries/${e3.id}/prepare-quote`, advisor)).json?.data;
-  const est3 = (await call('POST', '/estimates', advisor, { enquiry_id: e3.id, customer_id: p3.customer.id, customer_type: 'retail_cash', lines: [{ line_type: 'labour', description: 'Detailing', quantity: 1, unit_price: 300 }] })).json?.estimateId;
-  await call('POST', `/estimates/${est3}/internal-approve`, supervisor);
-  await call('POST', `/estimates/${est3}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
-  const [{ approval_token: t3 }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [est3]);
-  const [l3] = await q('SELECT id FROM estimate_lines WHERE estimate_id = ?', [est3]);
-  await call('POST', `/public/estimates/${t3}/lines/${l3.id}/decide`, null, { decision: 'rejected', reason: 'Too expensive' });
-  const [e3row] = await q('SELECT status, lost_reason FROM enquiries WHERE id = ?', [e3.id]);
-  expect('customer rejects the quote → enquiry lost (price), chase closed', e3row.status === 'lost' && e3row.lost_reason === 'price' && (await task('quote_chase', 'quote', est3))?.status === 'done', `${e3row.status} ${e3row.lost_reason}`);
-  const [e3Wo] = await q('SELECT status, cancellation_reason FROM work_orders WHERE id = ?', [e3r.json?.work_order?.id || 0]);
-  expect('…and the enquiry\'s work order is cancelled with it ("Enquiry closed: customer rejected estimate …")', e3Wo?.status === 'cancelled' && /^Enquiry closed: customer rejected estimate /.test(e3Wo.cancellation_reason || ''),
-    `${e3Wo?.status} · ${e3Wo?.cancellation_reason}`);
-
   // ── Convert: the lead is won on the work order it already has ──────
   section = 'convert';
   const e5r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Convert', contact_phone: '+971500000994', emirate: 'Abu Dhabi', vehicle_make: 'Mazda', vehicle_model: 'CX-5', vehicle_year: 2022, vehicle_plate: 'QACRM5',

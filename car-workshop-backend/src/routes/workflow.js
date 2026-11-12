@@ -144,19 +144,18 @@ router.get('/my-tasks', async (req, res) => {
          ${PHYSICAL} ORDER BY wo.created_at`,
       [W], r => ({ id: r.id, title: r.work_order_number, subtitle: [r.plate_number, r.customer_name, physicalState(r)].filter(Boolean).join(' · '),
                    link: `/work-orders/${r.id}/inspection?type=intake`, at: r.at }));
-    // With where the technical report stands (Step 4): the estimate is raised
-    // from it, so the jobs whose report is ready come first. Raising one
-    // without it is not refused.
-    const TI_STATUS = '(SELECT ti.status FROM technical_inspections ti WHERE ti.work_order_id = wo.id)';
+    // The estimate follows the completed technical report (client meeting,
+    // 3 Nov 2026; POST /estimates refuses it before): only those jobs are listed.
+    const TI_DONE = "EXISTS (SELECT 1 FROM technical_inspections ti WHERE ti.work_order_id = wo.id AND ti.status = 'completed')";
     await add('estimate.raise', 'raise_estimate', 'Raise the estimate',
-      `SELECT COUNT(*) n ${WO_BASE} AND wo.customer_approved_at IS NULL
+      `SELECT COUNT(*) n ${WO_BASE} AND wo.customer_approved_at IS NULL AND ${TI_DONE}
          AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
          AND NOT EXISTS (SELECT 1 FROM service_estimates e WHERE e.intake_work_order_id = wo.id AND e.status NOT IN ('rejected','expired'))`,
-      `${WO_COLS}, ${TI_STATUS} AS ti_status ${WO_BASE} AND wo.customer_approved_at IS NULL
+      `${WO_COLS} ${WO_BASE} AND wo.customer_approved_at IS NULL AND ${TI_DONE}
          AND NOT EXISTS (SELECT 1 FROM work_order_items i WHERE i.work_order_id = wo.id)
          AND NOT EXISTS (SELECT 1 FROM service_estimates e WHERE e.intake_work_order_id = wo.id AND e.status NOT IN ('rejected','expired'))
-       ORDER BY ti_status = 'completed' DESC, wo.created_at`, [W],
-      r => ({ ...woItem(r), subtitle: [r.plate_number, r.customer_name, r.ti_status === 'completed' ? 'technical report ready' : 'waiting for the technical report'].filter(Boolean).join(' · ') }));
+       ORDER BY wo.created_at`, [W],
+      r => ({ ...woItem(r), subtitle: [r.plate_number, r.customer_name, 'technical report ready'].filter(Boolean).join(' · ') }));
     // Priced estimates ready to go out: an external customer's needs the
     // sign-off first only while that is switched on (above).
     const SIGNED_OFF = ESTIMATE_APPROVAL_REQUIRED

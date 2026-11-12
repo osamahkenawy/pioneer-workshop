@@ -325,6 +325,49 @@
 .es-altBox .es-priceEdFields { margin-block-start: 8px; }
 .es-priceEd > .es-priceActions { display: flex; justify-content: flex-end; margin-block-start: 10px; }
 
+/* main / supplementary estimates (client decisions, 3 Nov 2026) */
+.es-rowRef { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.es-kind {
+  display: inline-flex; align-items: center; font-family: 'Inter', system-ui, sans-serif;
+  font-size: 10.5px; font-weight: 700; padding-block: 2px; padding-inline: 8px; border-radius: 6px; white-space: nowrap;
+}
+.es-kindMain { background: #f1f5f9; color: #475569; }
+.es-kindSupp { background: #eef2f8; color: #1e3a6b; border: 1px solid #c9d4e8; }
+.es-kindTo { font-size: 11px; font-weight: 600; color: #4257a8; white-space: nowrap; }
+.es-kindCount { font-family: 'Inter', system-ui, sans-serif; font-size: 10.5px; font-weight: 600; color: #4257a8; }
+.es-mRef { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.es-parentLink {
+  border: none; background: none; padding: 0; font-family: inherit; font-size: 11.5px; font-weight: 700;
+  color: #4257a8; cursor: pointer; text-decoration: underline;
+}
+.es-bannerFixed { background: #eef2f8; border-color: #c9d4e8; color: #1e3a6b; }
+
+.es-consentBox {
+  margin-block-end: 14px; padding: 12px 14px; border-radius: 10px; background: #fff7ed; border: 1px solid #fdba74;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.es-consentBox .es-h3 { margin: 0; color: #9a3412; }
+.es-consentChk { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; font-weight: 600; color: #7c2d12; cursor: pointer; line-height: 1.45; }
+.es-consentChk input { margin-block-start: 2px; accent-color: #f97316; flex-shrink: 0; }
+.es-consentBox .es-input { max-inline-size: 340px; }
+
+.es-consents, .es-suppList { margin-block-start: 18px; }
+.es-consent {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; margin-block-end: 8px;
+  border-radius: 10px; background: #e7f5ee; border: 1px solid #b4e0c9; color: #16794a;
+}
+.es-consent svg { flex-shrink: 0; margin-block-start: 1px; }
+.es-consentText { font-size: 13px; font-weight: 600; color: #14532d; line-height: 1.45; }
+.es-consentMeta { margin-block-start: 3px; font-size: 12px; color: #3f6b55; }
+.es-suppRow {
+  display: flex; align-items: center; gap: 10px; inline-size: 100%; text-align: start;
+  padding: 9px 12px; margin-block-end: 6px; border: 1px solid #e2e8f0; border-radius: 9px; background: #fff;
+  font-family: inherit; cursor: pointer;
+}
+.es-suppRow:hover { border-color: #f97316; background: #fffbf7; }
+.es-suppNo { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; color: #15294a; }
+.es-suppAmt { margin-inline-start: auto; font-size: 13px; font-weight: 700; color: #15294a; font-variant-numeric: tabular-nums; }
+
 /* send dialog, above the detail */
 .es-overlayTop { z-index: 10000; }
 .es-sendModal { max-width: 640px; }

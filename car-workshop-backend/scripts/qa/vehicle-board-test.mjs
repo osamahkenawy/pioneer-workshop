@@ -54,6 +54,14 @@ try {
   const advisor = await mk('advisor', 'service_advisor', 'service_advisor');
   const store = await mk('store', 'part_advisor', 'storekeeper');
   const supervisor = await mk('supervisor', 'supervisor', 'supervisor');
+  // The estimate follows the work order's completed technical inspection
+  // (client decision, 3 Nov 2026): the Supervisor writes and completes it first.
+  const completeTechnical = async (workOrderId, tok = supervisor) => {
+    const ti = (await call('POST', '/technical-inspections', tok, { work_order_id: workOrderId })).json?.data;
+    await call('PUT', `/technical-inspections/${ti?.id}`, tok, { service_lines: [{ job: 'QA inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await call('PATCH', `/technical-inspections/${ti?.id}/complete`, tok, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  };
   const leader = await mk('leader', 'dispatcher', 'team_leader');
   const manager = await mk('manager', 'workshop_manager', 'workshop_manager');
   const mechTok = await mk('tech', 'mechanic');
@@ -123,6 +131,7 @@ try {
   await agrees('job card open', it);
 
   // ── Steps 4–5 ──────────────────────────────────────────────────────
+  await completeTechnical(woId);
   const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: [
     { job_name: 'Brakes', line_type: 'labour', description: 'Brake service - labour', quantity: 1, unit_price: 150 },
     { job_name: 'Brakes', line_type: 'parts', description: 'Brake pads', quantity: 1 },
@@ -156,6 +165,12 @@ try {
   it = await item();
   expect('customer approved → In work, "Waiting for technician", waiting on the Team Leader', it?.phase === 'work' && it.badges[0]?.key === 'no_technician' && it.waiting_on?.key === 'team_leader', show(it));
   await agrees('approved', it);
+  // The parts are requested (MRN) before the technician is assigned (client meeting, 3 Nov 2026, point 18).
+  const mrn = await call('POST', `/job-cards/${mainJc.id}/requisitions`, leader, { items: [{ description: 'Brake pads', quantity: 1 }, { description: 'AC filter', quantity: 1 }] });
+  // The Store has them on the shelf — nothing for the board to wait on.
+  for (const { id } of await q('SELECT id FROM material_requisition_items WHERE requisition_id = ?', [mrn.json?.requisitionId || 0])) {
+    await call('PATCH', `/workflow/requisition-items/${id}`, store, { availability: 'available', unit_cost: 50 });
+  }
   await call('POST', '/team-leader/assign', leader, { work_order_id: woId, mechanic_id: mech });
   it = await item();
   expect('technician assigned → "Not started", with the technician on the card', it?.phase === 'work' && badgeKeys(it) === 'not_started' && it.technician?.id === mech, show(it));
@@ -258,24 +273,15 @@ try {
   expect('?include_legacy=1 shows it, flagged legacy', shown?.legacy === true && withLegacy.counts.legacy_hidden === 0
     && withLegacy.items.length === def.items.length + def.counts.legacy_hidden, `${withLegacy.items.length} vs ${def.items.length} + ${def.counts.legacy_hidden}`);
 
-  // ── Approved before the physical inspection ────────────────────────
-  // A quote the customer approved before the car was walked round opens its
-  // work order (estimate_approved) with no job card: Reception, the physical
-  // inspection first — not an import's "No job card".
+  // ── A quote before the work order ──────────────────────────────────
+  // There used to be a quote approved before the car was walked round (its
+  // work order opened as estimate_approved, no job card). Since the client's
+  // decision of 3 Nov 2026 an estimate follows the work order's completed
+  // technical inspection, so a quote for a customer alone is refused.
   section = 'inspection first';
   const vehQ = (await call('POST', '/vehicles', advisor, { customer_id: cust.id, make: 'Toyota', model: 'Yaris', year: 2019, plate_emirate: 'Dubai', plate_number: `${plate}Q`, vin: `${vin.slice(0, 16)}Z` })).json?.data;
-  const eq = (await call('POST', '/estimates', advisor, { customer_id: cust.id, vehicle_id: vehQ?.id, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Minor service', quantity: 1, unit_price: 180 }] })).json?.estimateId;
-  await call('POST', `/estimates/${eq}/internal-approve`, supervisor);
-  await call('POST', `/estimates/${eq}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
-  const [{ approval_token: tq }] = await q('SELECT approval_token FROM service_estimates WHERE id = ?', [eq]);
-  const [lq] = await q('SELECT id FROM estimate_lines WHERE estimate_id = ?', [eq]);
-  await call('POST', `/public/estimates/${tq}/lines/${lq.id}/decide`, null, { decision: 'approved' });
-  const [{ work_order_id: woQ }] = await q('SELECT work_order_id FROM service_estimates WHERE id = ?', [eq]);
-  const [woQrow] = await q('SELECT status, customer_approved_at FROM work_orders WHERE id = ?', [woQ || 0]);
-  const itQ = (await board(advisor)).items.find(i => i.id === woQ);
-  expect('quote approved, no job card yet → Reception, "Physical inspection not started" (not "No job card", not legacy)',
-    woQrow?.status === 'estimate_approved' && !!woQrow.customer_approved_at && !(await mainOf(woQ)) && itQ?.phase === 'intake' && itQ.badges[0]?.key === 'physical_not_started'
-    && !badgeKeys(itQ).includes('no_job_card') && itQ.legacy === false, `WO ${woQrow?.status}; ${show(itQ)}`);
+  const eq = await call('POST', '/estimates', advisor, { customer_id: cust.id, vehicle_id: vehQ?.id, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Minor service', quantity: 1, unit_price: 180 }] });
+  expect('a quote with no work order is refused (409 TECHNICAL_INSPECTION_REQUIRED)', eq.status === 409 && eq.json?.code === 'TECHNICAL_INSPECTION_REQUIRED', `HTTP ${eq.status} ${eq.json?.code || ''}`);
 
   // ── Declined ───────────────────────────────────────────────────────
   section = 'declined';
@@ -285,6 +291,7 @@ try {
   expect('QA internal fleet customer created by the manager', !!fleet?.id, `HTTP ${fleetRes.status} ${fleetRes.json?.code || fleetRes.json?.message || ''}`);
   const veh2 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Sunny', year: 2020, plate_emirate: 'Dubai', plate_number: `${plate}X`, vin: `${vin.slice(0, 16)}X` })).json?.data;
   const wo2 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh2.id, customer_name: fleet.full_name, customer_phone: fleet.phone, description: 'Service', odometer_in: 90000, payment_method: 'credit', items: [] })).json?.data?.id;
+  await completeTechnical(wo2);
   const e2 = (await call('POST', '/estimates', advisor, { intake_work_order_id: wo2, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Full service', quantity: 1, unit_price: 250 }] })).json?.estimateId;
   let it2 = (await board(advisor)).items.find(i => i.id === wo2);
   expect('internal customer, priced → "Ready to send" (no Supervisor approval needed)', it2?.phase === 'pricing' && it2.badges[0]?.key === 'ready_to_send' && it2.customer_class === 'internal', show(it2));

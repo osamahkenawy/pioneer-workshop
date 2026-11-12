@@ -359,7 +359,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     query(
       `SELECT id, estimate_number, status, customer_type, total_amount, estimate_format, parts_preference,
               internal_approved_at, sent_to_customer_at, customer_approved_at, customer_notes, created_at,
-              work_order_id, intake_work_order_id
+              work_order_id, intake_work_order_id, kind, parent_estimate_id
          FROM service_estimates
         WHERE workshop_id = ? AND (intake_work_order_id = ? OR work_order_id = ?)
         ORDER BY id DESC`, [workshopId, wo.id, wo.id]),
@@ -393,7 +393,10 @@ export async function buildWorkflow(workOrderId, workshopId) {
   ]);
 
   // Estimate pricing summary (Step 5)
-  const estimate = estimates[0] || null;
+  // "The estimate" is the main one; supplementary estimates (SEST-…, client
+  // meeting 3 Nov 2026) are extra work on top and never reopen Steps 4–6.
+  const estimate = estimates.find(e => e.kind !== 'supplementary') || null;
+  const supplementary = estimates.filter(e => e.kind === 'supplementary');
   let pricing = null;
   if (estimate) {
     const lines = await query(
@@ -720,6 +723,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     job_cards: cards,
     estimate: estimate ? { ...estimate, pricing } : null,
     estimates,
+    supplementary_estimates: supplementary,
     inspections,
     invoice,
     contacts,
@@ -976,8 +980,8 @@ function nextAction(c) {
     case 'inspection_pricing':
       if (!c.estimate) {
         // The Supervisor / Foreman's technical report comes first, once the
-        // job card is open; the advisor raises the estimate from it. An
-        // estimate raised without it is not refused (older jobs were).
+        // job card is open; the advisor raises the estimate from it (POST
+        // /estimates refuses one without a completed report).
         if (c.techDone) return N('service_advisor', 'Service Advisor', 'create_estimate_from_report',
           'Raise the estimate from the technical report: price the labour; the parts go to the Store.', 'create_estimate');
         if (c.physical.job_card_open || !c.physical.needed) return N('supervisor_foreman', 'Supervisor / Foreman', 'technical_inspection',
@@ -1151,8 +1155,16 @@ export async function onWorkApproved({ workOrderId, workshopId, userId = null, h
     await notifyGroups(workshopId, FLOOR, {
       title: `Approved: ${wo.work_order_number}`,
       body: `The customer approved the work${how ? ` (${how})` : ''}. ${next}${main ? ` Job card ${main.job_card_number}.` : ''}`,
-      link: `/work-orders/${workOrderId}`, orderId: workOrderId, icon: '✅', type: 'workflow_work_approved', exceptUserId: userId,
+      link: `/job-cards/${workOrderId}`, orderId: workOrderId, icon: '✅', type: 'workflow_work_approved', exceptUserId: userId,
     });
+    // Points 14/17 (client meeting, 3 Nov 2026): each approved job becomes a
+    // task with its own technician and barcode as soon as it is approved, so
+    // the scan station knows it before anyone opens the job card. Loaded
+    // lazily: job-tasks.js imports this module.
+    if (main) {
+      const { syncJobTasks } = await import('./job-tasks.js');
+      await syncJobTasks({ workOrderId, workshopId, userId });
+    }
   } catch (err) {
     console.error('[Workflow] approval follow-up failed:', err.message);
   }

@@ -29,6 +29,23 @@
  *                                    each, a labour line to price, its parts for the Store
  *   editEstimate                 — the GET /estimates/:id payload ({ estimate, lines }):
  *                                    edit mode (PUT), line ids sent back so Store prices carry over
+ *   kind                         — 'supplementary' to raise one (Estimates: "Supplementary
+ *                                    estimate"); left out: whichever the work order needs next
+ *
+ * Client decisions (3 Nov 2026): an estimate is raised for a work order once
+ * its technical inspection is completed. The form asks the server first
+ * (GET /estimates/raise-check) and says up front what it would refuse — no
+ * technical inspection yet (with the way to it), an estimate already open —
+ * instead of failing at Save. Opened without a work order (the Estimates
+ * page, a quote from an enquiry) it offers the work orders that are ready
+ * (GET /estimates/ready-jobs) instead of a customer: a quote from an enquiry
+ * or for a customer alone has no technical inspection, so it is not raised.
+ * Once the customer has decided the main estimate, the next one for the job
+ * is a SUPPLEMENTARY estimate (SEST-…): extra work at a fixed cost — its
+ * parts priced by the Store in ONE type (the type the customer took on the
+ * main estimate unless changed here), so every line has one firm price —
+ * approved by the customer with their consent; it is not pre-filled from
+ * the technical report (that was the main estimate's work).
  *
  * Also exports the parts-category helpers and SendEstimatePanel (the
  * preference with its totals + channel picker) shared with pages/Estimates.jsx
@@ -42,7 +59,6 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
-import CustomerPicker from './CustomerPicker';
 
 const ORANGE = '#f97316';
 const NAVY = '#1e3a6b';
@@ -285,7 +301,7 @@ const CUSTOMER_TYPES = [
   // Asset); shown as "Internal" with the Step 1 subcategory.
   { value: 'internal_fleet', label: 'Internal' },
 ];
-const SUB_LABELS = { fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', walkin: 'Walk-in' };
+const SUB_LABELS = { fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', staff: 'Staff', walkin: 'Walk-in' };
 
 /** The account type that follows from Step 1 (main category + subcategory). */
 function typeFromClass(k) {
@@ -296,22 +312,31 @@ function typeFromClass(k) {
   return 'retail_cash';
 }
 
-export default function NewEstimateModal({ open, onClose, onSent, onSaved, intakeWorkOrder = null, editEstimate = null, enquiry = null }) {
+export default function NewEstimateModal({ open, onClose, onSent, onSaved, intakeWorkOrder = null, editEstimate = null, enquiry = null, kind: requestedKind = null }) {
   const { t } = useTranslation();
   const { user } = useContext(AuthContext) || {};
   const canParts = mayPriceParts(user);
   const canLabour = mayPriceLabour(user);
   const editE = editEstimate?.estimate || null;
   const isEdit = !!editE;
-  const locked = isEdit || !!intakeWorkOrder;
+  // The work order the estimate is for: as given, or chosen here from the ones ready for an estimate.
+  const [pickedWo, setPickedWo] = useState(null);
+  const intakeWo = intakeWorkOrder || pickedWo;
+  const locked = isEdit || !!intakeWo;
+  // GET /estimates/raise-check for the work order: { ok, kind, code, message, main, technical_inspection, fixed_type }.
+  const [check, setCheck] = useState(null);
+  const [wantKind, setWantKind] = useState(requestedKind);
+  const [readyJobs, setReadyJobs] = useState(null);
+  // A supplementary estimate: its one part type (the fixed cost).
+  const [fixedType, setFixedType] = useState(null);
+  const supp = isEdit ? editE.kind === 'supplementary' : check?.ok && check.kind === 'supplementary';
+  // Nothing can be saved until the server has said this work order can take an estimate.
+  const blocked = !isEdit && (!intakeWo || !check?.ok);
 
-  const [customer, setCustomer] = useState(null);
-  const [vehicles, setVehicles] = useState([]);
-  const [vehicleId, setVehicleId] = useState('');
   const [customerType, setCustomerType] = useState('retail_cash');
   const [typeTouched, setTypeTouched] = useState(false);
   // Step 1 classification of the job card (its snapshot, else the customer's
-  // account) or of the chosen customer: { cls, sub } or null while unknown.
+  // account): { cls, sub } or null while unknown.
   const [klass, setKlass] = useState(null);
   // Insurer's claim / policy number (or a fleet's LPO), kept on every line (estimate_lines.insurance_ref).
   const [claimRef, setClaimRef] = useState('');
@@ -319,7 +344,9 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const [jobs, setJobs] = useState(() => [blankJob()]);
   const [extras, setExtras] = useState([]);
   // The customer's parts preference: which categories the Store prices and the customer chooses from.
-  const [pref, setPref] = useState(DEFAULT_PREFERENCE);
+  // A supplementary estimate has one: its fixed type.
+  const [prefState, setPref] = useState(DEFAULT_PREFERENCE);
+  const pref = supp ? [fixedType || prefState[0] || 'genuine'] : prefState;
   // As the customer asked at the enquiry / work order (client review,
   // 2 Nov 2026): then the estimate offers only those categories.
   const [askedPref, setAskedPref] = useState(null);
@@ -335,8 +362,9 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const editKey = editE ? `${editE.id}:${editE.version}` : '';
   useEffect(() => {
     if (!open) return;
-    setCustomer(null); setVehicles([]); setVehicleId(''); setCustomerType('retail_cash'); setTypeTouched(false); setKlass(null); setClaimRef('');
-    setFromReport(null);
+    setCustomerType('retail_cash'); setTypeTouched(false); setKlass(null); setClaimRef('');
+    setFromReport(null); setPickedWo(null); setCheck(null); setWantKind(requestedKind); setReadyJobs(null);
+    setFixedType(editE?.kind === 'supplementary' ? preferenceOf(editE)[0] : null);
     const fromEnquiry = !editE ? PART_CATEGORIES.filter(c => String(enquiry?.parts_preference || '').split(',').includes(c)) : [];
     setAskedPref(fromEnquiry.length ? fromEnquiry : null);
     setPref(editE ? preferenceOf(editE) : fromEnquiry.length ? fromEnquiry : DEFAULT_PREFERENCE);
@@ -347,20 +375,45 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
       setJobs([blankJob()]); setExtras([]);
     }
     setSubmitting(null); setError(''); setResult(null); setSendData(null);
-    // A quote for an enquiry starts with its customer (and car) chosen.
-    if (enquiry?.customer?.id) setCustomer(enquiry.customer);
-  }, [open, editKey, intakeWorkOrder?.id, enquiry?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, editKey, intakeWorkOrder?.id, enquiry?.id, requestedKind]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Can the work order take an estimate now, and which kind? Asked before
+  // anything is typed, so a refusal is said up front.
+  useEffect(() => {
+    if (!open || isEdit || !intakeWo?.id) { setCheck(null); return; }
+    let live = true;
+    setCheck(null);
+    const q = new URLSearchParams({ work_order_id: String(intakeWo.id) });
+    if (wantKind) q.set('kind', wantKind);
+    api.get(`/estimates/raise-check?${q}`).then(r => {
+      if (!live) return;
+      if (r?.success) {
+        setCheck(r.data);
+        if (r.data?.kind === 'supplementary' && r.data.fixed_type) setFixedType(r.data.fixed_type);
+      } else setCheck({ ok: false, code: 'CHECK_FAILED', message: r?.message || t('estimates.err_check', 'Could not check the work order — try again.') });
+    }).catch(() => { if (live) setCheck({ ok: false, code: 'CHECK_FAILED', message: t('estimates.err_check', 'Could not check the work order — try again.') }); });
+    return () => { live = false; };
+  }, [open, isEdit, intakeWo?.id, wantKind]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Opened without a work order: the ones ready for an estimate, to choose from.
+  useEffect(() => {
+    if (!open || isEdit || intakeWorkOrder) return;
+    let live = true;
+    api.get('/estimates/ready-jobs').then(r => { if (live) setReadyJobs(r?.success ? (r.data || []) : []); })
+      .catch(() => { if (live) setReadyJobs([]); });
+    return () => { live = false; };
+  }, [open, isEdit, intakeWorkOrder]);
 
   // The job card's classification decides the account type ("From the job
   // card") and whether the external-customer approval applies.
   useEffect(() => {
-    if (!open || !intakeWorkOrder?.id || isEdit) return;
+    if (!open || !intakeWo?.id || isEdit) return;
     let live = true;
     (async () => {
       try {
         const [w, c] = await Promise.all([
-          api.get(`/work-orders/${intakeWorkOrder.id}`).catch(() => null),
-          intakeWorkOrder.customer_id ? api.get(`/customers/${intakeWorkOrder.customer_id}`).catch(() => null) : null,
+          api.get(`/work-orders/${intakeWo.id}`).catch(() => null),
+          intakeWo.customer_id ? api.get(`/customers/${intakeWo.customer_id}`).catch(() => null) : null,
         ]);
         if (!live) return;
         const wo = w?.success ? w.data : {};
@@ -373,49 +426,24 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
       } catch { if (live) setKlass({ cls: 'external', sub: null }); }
     })();
     return () => { live = false; };
-  }, [open, intakeWorkOrder?.id, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, intakeWo?.id, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Step 4: a new estimate on a work order whose technical report is
+  // Step 4: a new main estimate on a work order whose technical report is
   // completed starts from the report's service lines — unless the advisor
-  // has typed something meanwhile. Everything stays editable.
+  // has typed something meanwhile. Everything stays editable. A
+  // supplementary estimate is extra work, so it starts empty.
+  const mainReady = !!check?.ok && check.kind === 'main';
   useEffect(() => {
-    if (!open || !intakeWorkOrder?.id || isEdit) return;
+    if (!open || !intakeWo?.id || isEdit || !mainReady) return;
     let live = true;
-    api.get(`/technical-inspections?work_order_id=${encodeURIComponent(intakeWorkOrder.id)}`).then(r => {
+    api.get(`/technical-inspections?work_order_id=${encodeURIComponent(intakeWo.id)}`).then(r => {
       const report = r?.success ? r.data : null;
       if (!live || report?.status !== 'completed' || !report.service_lines?.length || !untouched(jobsRef.current)) return;
       setJobs(jobsFromReport(report.service_lines));
       setFromReport({ by: report.completed_by_name || '', at: report.completed_at });
     }).catch(() => { /* the form starts empty, as before */ });
     return () => { live = false; };
-  }, [open, intakeWorkOrder?.id, isEdit]);
-
-  // A customer chosen here (no job card): its account type follows Step 1 too.
-  useEffect(() => {
-    if (intakeWorkOrder || isEdit) return;
-    const k = customer?.id ? { cls: customer.customer_class || 'external', sub: customer.customer_subcategory || null } : null;
-    setKlass(k);
-    if (!typeTouched || (!manager && k?.cls !== 'internal' && customerType === 'internal_fleet')) {
-      setCustomerType(typeFromClass(k)); setTypeTouched(false);
-    }
-  }, [customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!customer?.id) { setVehicles([]); setVehicleId(''); return; }
-    let live = true;
-    (async () => {
-      try {
-        const res = await api.get(`/vehicles?customer_id=${customer.id}`);
-        if (live && res.success) {
-          setVehicles(res.data || []);
-          if (enquiry?.vehicle_id && enquiry.customer?.id === customer.id && (res.data || []).some(v => v.id === enquiry.vehicle_id)) {
-            setVehicleId(String(enquiry.vehicle_id));
-          }
-        }
-      } catch { /* the select just stays empty */ }
-    })();
-    return () => { live = false; };
-  }, [customer]);
+  }, [open, intakeWo?.id, isEdit, mainReady]);
 
   if (!open) return null;
 
@@ -429,7 +457,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const typeLabel = v => (v === 'internal_fleet' && klass?.cls === 'internal' && klass.sub
     ? `${t('estimates.ctype_internal_fleet', 'Internal')} · ${t(`workflow.val.sub_${klass.sub}`, SUB_LABELS[klass.sub] || klass.sub)}`
     : t(`estimates.ctype_${v}`, (CUSTOMER_TYPES.find(o => o.value === v) || {}).label || v));
-  const effectiveType = intakeWorkOrder ? (typeTouched ? customerType : fromClass) : customerType;
+  const effectiveType = intakeWo ? (typeTouched ? customerType : fromClass) : customerType;
 
   /* ── edits ── */
   const patchJob = (jobKey, fn) => setJobs(prev => prev.map(j => (j.key === jobKey ? fn(j) : j)));
@@ -506,8 +534,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   }
 
   function validate() {
-    if (!locked && !customer?.id) return t('estimates.err_choose_customer', 'Choose a customer.');
-    if (!isEdit && !manager && effectiveType === 'internal_fleet' && klass?.cls !== 'internal') {
+    if (blocked) return check?.message || t('estimates.err_choose_wo', 'Choose the work order the estimate is for.');
+    if (!isEdit && !supp && !manager && effectiveType === 'internal_fleet' && klass?.cls !== 'internal') {
       return t('estimates.err_internal_manager', 'This customer is External: only a manager can raise the estimate as Internal.');
     }
     if (!allLabour.length && !allParts.length) return t('estimates.err_no_lines', 'Add at least one labour or part line with a description.');
@@ -540,28 +568,35 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
         onClose?.();
         return;
       }
+      // Always for a work order (the estimate follows its technical inspection).
       const body = {
         vat_rate: 5,
+        kind: supp ? 'supplementary' : 'main',
         parts_preference: pref,
         lines: buildLines(),
+        intake_work_order_id: Number(intakeWo.id),
       };
-      if (intakeWorkOrder) {
-        body.intake_work_order_id = Number(intakeWorkOrder.id);
-        if (intakeWorkOrder.customer_id) body.customer_id = Number(intakeWorkOrder.customer_id);
-        if (intakeWorkOrder.vehicle_id) body.vehicle_id = Number(intakeWorkOrder.vehicle_id);
-        // "From the work order": the type that follows from its classification
-        // (Retail, Credit for a fleet, Insurance, Internal). Unknown → the server decides.
+      if (intakeWo.customer_id) body.customer_id = Number(intakeWo.customer_id);
+      if (intakeWo.vehicle_id) body.vehicle_id = Number(intakeWo.vehicle_id);
+      // "From the work order": the type that follows from its classification
+      // (Retail, Credit for a fleet, Insurance, Internal). Unknown → the server
+      // decides. A supplementary estimate is on its main estimate's account.
+      if (!supp) {
         if (typeTouched) body.customer_type = customerType;
         else if (klass) body.customer_type = fromClass;
-      } else {
-        body.customer_id = Number(customer.id);
-        body.vehicle_id = vehicleId ? Number(vehicleId) : null;
-        body.customer_type = customerType;
-        if (enquiry?.id) body.enquiry_id = Number(enquiry.id);
       }
       const res = await api.post('/estimates', body);
-      if (!res.success) { setError(res.message || t('estimates.err_save', 'Could not save the estimate.')); return; }
-      const base = { estimateId: res.estimateId, estimate_number: res.estimate_number, parts_to_price: Number(res.parts_to_price) || 0, pref: res.parts_preference || pref };
+      if (!res.success) {
+        setError(res.message || t('estimates.err_save', 'Could not save the estimate.'));
+        // Refused for the work order's state (no technical inspection, an
+        // estimate opened meanwhile …): show it as the form's notice too.
+        if (res.code && !['PARTS_PREFERENCE_REQUIRED', 'FIXED_COST_ONE_TYPE', 'ROLE_NOT_ALLOWED'].includes(res.code)) {
+          setCheck(c => ({ ...(c || {}), ok: false, code: res.code, message: res.message, main: res.main_estimate || c?.main || null }));
+        }
+        return;
+      }
+      const base = { estimateId: res.estimateId, estimate_number: res.estimate_number, parts_to_price: Number(res.parts_to_price) || 0, pref: res.parts_preference || pref,
+        supplementary: res.kind === 'supplementary' };
       onSaved?.(base);
       // From here on the estimate exists: never show an error that invites a
       // retry from this form, which would create a second copy.
@@ -577,11 +612,21 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     }
   }
 
-  const lockedName = isEdit ? (editE.customer_full_name || editE.customer_name) : intakeWorkOrder?.customer_name;
+  const lockedName = isEdit ? (editE.customer_full_name || editE.customer_name) : intakeWo?.customer_name;
   const lockedPlate = isEdit
     ? [editE.plate_number || editE.vehicle_plate, [editE.make, editE.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ')
-    : intakeWorkOrder?.plate_number;
-  const woNumber = intakeWorkOrder?.work_order_number || (isEdit && editE.intake_work_order_id ? `#${editE.intake_work_order_id}` : '');
+    : intakeWo?.plate_number;
+  const woNumber = intakeWo?.work_order_number || (isEdit && (editE.intake_work_order_number || editE.intake_work_order_id)
+    ? editE.intake_work_order_number || `#${editE.intake_work_order_id}` : '');
+  // The main estimate a supplementary one adds to.
+  const mainNumber = isEdit ? editE.parent_estimate?.estimate_number : check?.main?.estimate_number;
+  /** Choosing the work order here: a fresh form for it (pre-filled from its report when it is ready). */
+  const pickWo = j => {
+    setPickedWo(j ? { id: j.id, work_order_number: j.work_order_number, customer_id: j.customer_id, customer_name: j.customer_name,
+      vehicle_id: j.vehicle_id, plate_number: [j.plate_number, [j.make, j.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ') } : null);
+    setJobs([blankJob()]); setExtras([]); setFromReport(null); setKlass(null); setTypeTouched(false); setAskedPref(null); setPref(DEFAULT_PREFERENCE);
+    setWantKind(requestedKind); setError('');
+  };
 
   return (
     <div style={st.overlay} onClick={onClose}>
@@ -589,17 +634,26 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
         <div style={st.header}>
           <div style={{ minWidth: 0 }}>
             <h2 style={st.title}>
-              {isEdit ? t('estimates.edit_title', 'Edit estimate {{n}}', { n: editE.estimate_number }) : t('estimates.new_title', 'New Estimate')}
+              {isEdit
+                ? (supp ? t('estimates.edit_supp_title', 'Edit supplementary estimate {{n}}', { n: editE.estimate_number }) : t('estimates.edit_title', 'Edit estimate {{n}}', { n: editE.estimate_number }))
+                : supp ? t('estimates.new_supp_title', 'New supplementary estimate') : t('estimates.new_title', 'New Estimate')}
             </h2>
-            {woNumber ? (
-              <p style={st.woChip}>{t('estimates.for_job_card', 'For work order {{wo}}', { wo: woNumber })}</p>
-            ) : enquiry?.enquiry_number ? (
-              <p style={st.woChip}>{t('estimates.for_enquiry', 'For enquiry {{n}}', { n: enquiry.enquiry_number })}</p>
-            ) : (
-              <p style={st.subtitle}>
-                {t('estimates.new_sub_pref', 'Group the work into jobs — labour and parts for each. The Store prices the parts in the customer’s parts preference, then it goes to the customer for approval line by line.')}
-              </p>
-            )}
+            <div style={st.chips}>
+              {woNumber ? (
+                <p style={st.woChip}>{t('estimates.for_job_card', 'For work order {{wo}}', { wo: woNumber })}</p>
+              ) : enquiry?.enquiry_number ? (
+                <p style={st.woChip}>{t('estimates.for_enquiry', 'For enquiry {{n}}', { n: enquiry.enquiry_number })}</p>
+              ) : (
+                <p style={st.subtitle}>
+                  {t('estimates.new_sub_wo', 'An estimate is raised for a work order once its technical inspection is completed. Group the work into jobs — labour and parts for each; the Store prices the parts, then it goes to the customer for approval line by line.')}
+                </p>
+              )}
+              {supp && (
+                <p style={st.suppChip}>{mainNumber
+                  ? t('estimates.supp_chip', 'Supplementary to {{n}} · fixed cost', { n: mainNumber })
+                  : t('estimates.supp_chip_plain', 'Supplementary · fixed cost')}</p>
+              )}
+            </div>
           </div>
           <button style={st.closeBtn} onClick={onClose} aria-label={t('estimates.close', 'Close')}><Xmark width={18} height={18} /></button>
         </div>
@@ -619,6 +673,18 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
             />
           ) : (
             <>
+              {/* No work order given: choose one of those ready for an estimate. */}
+              {!isEdit && !intakeWorkOrder && (
+                <WorkOrderPicker t={t} jobs={readyJobs} value={pickedWo?.id} enquiry={enquiry} onPick={pickWo} />
+              )}
+              {!isEdit && intakeWo && (
+                <RaiseNotice t={t} check={check} woId={intakeWo.id} onClose={onClose}
+                  onKind={k => { setWantKind(k); setJobs([blankJob()]); setFromReport(null); setError(''); }} />
+              )}
+            </>
+          )}
+          {!result && !blocked && (
+            <>
               {isEdit && editE.status === 'sent_to_customer' && (
                 <div style={st.warn}>
                   <WarningCircle width={16} height={16} style={{ flexShrink: 0 }} />
@@ -626,7 +692,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 </div>
               )}
 
-              {locked ? (
+              {locked && (
                 <div style={st.lockedBox}>
                   <div style={{ minWidth: 0 }}>
                     <div style={st.fieldLabel}>{t('estimates.customer', 'Customer')}</div>
@@ -636,7 +702,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                     <div style={st.fieldLabel}>{t('estimates.vehicle', 'Vehicle')}</div>
                     <div style={st.lockedVal}>{lockedPlate || t('estimates.no_vehicle', 'No vehicle')}</div>
                   </div>
-                  {!isEdit && (
+                  {!isEdit && !supp && (
                     <Field label={t('estimates.account_type', 'Account type')}>
                       <select style={st.input} value={typeTouched ? customerType : ''} onChange={e => { setCustomerType(e.target.value); setTypeTouched(!!e.target.value); }}>
                         <option value="">{t('estimates.account_from_wo', 'From the work order')}{klass ? ` (${typeLabel(fromClass)})` : ''}</option>
@@ -644,31 +710,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                       </select>
                     </Field>
                   )}
-                  {!isEdit && ['insurance', 'credit'].includes(effectiveType) && (
-                    <Field label={effectiveType === 'insurance' ? t('estimates.claim_ref', 'Claim / policy no. (optional)') : t('estimates.lpo_ref', 'LPO / PO no. (optional)')}>
-                      <input style={st.input} value={claimRef} maxLength={200} onChange={e => setClaimRef(e.target.value)} />
-                    </Field>
-                  )}
-                </div>
-              ) : (
-                <div style={st.grid2}>
-                  <Field label={t('estimates.customer_req', 'Customer *')}>
-                    <CustomerPicker value={customer} onChange={setCustomer} />
-                  </Field>
-                  <Field label={t('estimates.vehicle', 'Vehicle')}>
-                    <select style={st.input} value={vehicleId} onChange={e => setVehicleId(e.target.value)} disabled={!customer?.id}>
-                      <option value="">{customer?.id ? t('estimates.select_vehicle', 'Select vehicle…') : t('estimates.choose_customer_first', 'Choose a customer first')}</option>
-                      {vehicles.map(v => (
-                        <option key={v.id} value={v.id}>{v.make} {v.model}{v.plate_number ? ` — ${v.plate_number}` : ''}</option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label={t('estimates.account_type', 'Account type')}>
-                    <select style={st.input} value={customerType} onChange={e => { setCustomerType(e.target.value); setTypeTouched(true); }}>
-                      {typeOptions.map(o => <option key={o.value} value={o.value}>{typeLabel(o.value)}</option>)}
-                    </select>
-                  </Field>
-                  {['insurance', 'credit'].includes(effectiveType) && (
+                  {!isEdit && !supp && ['insurance', 'credit'].includes(effectiveType) && (
                     <Field label={effectiveType === 'insurance' ? t('estimates.claim_ref', 'Claim / policy no. (optional)') : t('estimates.lpo_ref', 'LPO / PO no. (optional)')}>
                       <input style={st.input} value={claimRef} maxLength={200} onChange={e => setClaimRef(e.target.value)} />
                     </Field>
@@ -676,6 +718,34 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 </div>
               )}
 
+              {supp && (
+                <div style={st.suppNote} role="note">
+                  <Label width={15} height={15} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <span>{mainNumber
+                    ? t('estimates.supp_note', 'Supplementary estimate — extra work on this job at a fixed cost, linked to the main estimate {{n}}. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.', { n: mainNumber })
+                    : t('estimates.supp_note_plain', 'Supplementary estimate — extra work on this job at a fixed cost. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.')}</span>
+                </div>
+              )}
+
+              {supp ? (
+                <div style={st.prefBox}>
+                  <div style={st.prefHead}>
+                    <span style={st.fieldLabel} id="est-fixed-label">{t('estimates.fixed_type_label', 'Part type — fixed cost')}</span>
+                    <span style={st.prefHint}>{t('estimates.fixed_type_hint', 'One type for every part, so each line has one price — the customer does not choose between types.')}</span>
+                  </div>
+                  <div style={st.prefChips} role="radiogroup" aria-labelledby="est-fixed-label">
+                    {PART_CATEGORIES.map(c => {
+                      const on = pref[0] === c;
+                      return (
+                        <button key={c} type="button" role="radio" aria-checked={on} style={{ ...st.prefChip, ...(on ? st.prefChipOn : null) }}
+                          onClick={() => setFixedType(c)}>
+                          {on ? <Check width={14} height={14} /> : null} {categoryLabel(t, c)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
               <div style={st.prefBox}>
                 <div style={st.prefHead}>
                   <span style={st.fieldLabel} id="est-pref-label">{t('estimates.pref_label', 'Customer’s parts preference')}</span>
@@ -700,6 +770,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                   })}
                 </div>
               </div>
+              )}
 
               {fromReport && (
                 <div style={st.reportNote} role="status">
@@ -760,8 +831,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
 
         {!result && (
           <div style={st.footer}>
-            <button style={st.ghostBtn} onClick={onClose}>{t('estimates.cancel', 'Cancel')}</button>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button style={st.ghostBtn} onClick={onClose}>{blocked ? t('estimates.close', 'Close') : t('estimates.cancel', 'Cancel')}</button>
+            {!blocked && <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               {isEdit ? (
                 <button style={{ ...st.primaryBtn, opacity: submitting ? 0.7 : 1 }} disabled={!!submitting} onClick={() => submit('save')}>
                   <FloppyDisk width={15} height={15} /> {submitting ? t('estimates.saving', 'Saving…') : t('estimates.save_changes', 'Save changes')}
@@ -784,9 +855,91 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                   </button>
                 </>
               )}
-            </div>
+            </div>}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Which work order, and can it take an estimate now ─────────────────── */
+
+/**
+ * The form opened without a work order: the open work orders whose technical
+ * inspection is completed and that can take an estimate now — a main one, or
+ * a supplementary one once the customer has decided the main estimate.
+ */
+function WorkOrderPicker({ t, jobs, value, enquiry, onPick }) {
+  const label = j => [
+    j.work_order_number, [j.plate_number, [j.make, j.model].filter(Boolean).join(' ')].filter(Boolean).join(' '), j.customer_name,
+  ].filter(Boolean).join(' · ') + ' — ' + (j.kind === 'supplementary'
+    ? t('estimates.wo_kind_supp', 'supplementary estimate (to {{n}})', { n: j.main?.estimate_number || '—' })
+    : t('estimates.wo_kind_main', 'main estimate'));
+  return (
+    <div style={{ marginBottom: 16 }}>
+      {enquiry && (
+        <div style={st.warn}>
+          <WarningCircle width={16} height={16} style={{ flexShrink: 0 }} />
+          <span>{t('estimates.enquiry_no_quote', 'A quote is no longer raised from an enquiry: the estimate follows the work order\'s technical inspection. Open the work order for this car, do the physical and technical inspections, then raise the estimate — or choose its work order below if it is ready.')}</span>
+        </div>
+      )}
+      <Field label={t('estimates.choose_wo', 'Work order *')}>
+        <select style={st.input} value={value ? String(value) : ''} disabled={!jobs}
+          onChange={e => onPick((jobs || []).find(j => String(j.id) === e.target.value) || null)}>
+          <option value="">{!jobs ? t('estimates.loading', 'Loading…')
+            : jobs.length ? t('estimates.choose_wo_ph', 'Choose the work order…') : t('estimates.no_ready_wo', 'No work order is ready for an estimate')}</option>
+          {(jobs || []).map(j => <option key={j.id} value={j.id}>{label(j)}</option>)}
+        </select>
+      </Field>
+      <p style={{ ...st.note, margin: '6px 0 0' }}>
+        {t('estimates.choose_wo_hint', 'Listed: open work orders whose technical inspection is completed — the estimate follows it. A job whose main estimate the customer has decided takes a supplementary estimate.')}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * What GET /estimates/raise-check said for the work order, before anything
+ * is typed: checking…, or why no estimate can be raised now and the way on —
+ * the technical inspection, the physical inspection, the estimate already
+ * open, or a supplementary estimate instead of a second main one.
+ */
+function RaiseNotice({ t, check, woId, onClose, onKind }) {
+  if (!check) return <div style={st.checking}>{t('estimates.checking_wo', 'Checking the work order…')}</div>;
+  if (check.ok) return null;
+  const est = check.code === 'SUPPLEMENTARY_OPEN' ? check.open_supplementary : check.main;
+  const go = {
+    TECHNICAL_INSPECTION_REQUIRED: { to: `/work-orders/${woId}/technical-inspection`, label: t('estimates.open_tech_insp', 'Open the technical inspection') },
+    PHYSICAL_INSPECTION_REQUIRED: { to: `/work-orders/${woId}/inspection?type=intake`, label: t('estimates.open_phys_insp', 'Open the physical inspection') },
+    ESTIMATE_OPEN: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
+    MAIN_ESTIMATE_NOT_DECIDED: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
+    SUPPLEMENTARY_OPEN: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
+  }[check.code];
+  const title = {
+    TECHNICAL_INSPECTION_REQUIRED: t('estimates.tech_first_title', 'The technical inspection comes first'),
+    PHYSICAL_INSPECTION_REQUIRED: t('estimates.phys_first_title', 'The physical inspection comes first'),
+    MAIN_ESTIMATE_DECIDED: t('estimates.main_decided_title', 'The main estimate is decided'),
+  }[check.code] || t('estimates.cannot_raise_title', 'No estimate can be raised for this work order now');
+  return (
+    <div style={st.notice} role="alert">
+      <WarningCircle width={18} height={18} style={{ flexShrink: 0, marginTop: 1 }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 800, marginBottom: 2 }}>{title}</div>
+        <div>{check.message}</div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+          {go && <Link to={go.to} onClick={onClose} style={{ ...st.ghostBtn, textDecoration: 'none', padding: '7px 12px', fontSize: 12.5 }}>{go.label}</Link>}
+          {check.code === 'MAIN_ESTIMATE_DECIDED' && (
+            <button type="button" style={{ ...st.primaryBtn, padding: '7px 14px', fontSize: 12.5 }} onClick={() => onKind('supplementary')}>
+              <Plus width={14} height={14} /> {t('estimates.raise_supp_instead', 'Raise a supplementary estimate')}
+            </button>
+          )}
+          {check.code === 'MAIN_ESTIMATE_REQUIRED' && (
+            <button type="button" style={{ ...st.primaryBtn, padding: '7px 14px', fontSize: 12.5 }} onClick={() => onKind('main')}>
+              {t('estimates.raise_main_instead', 'Raise the main estimate')}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -981,6 +1134,12 @@ export function sendErrorText(t, res) {
         title: t('estimates.err_labour_title', 'Labour has no price yet'),
         body: t('estimates.err_labour_body', 'The Service Advisor has to enter the labour price before this can go to the customer. Use Edit to add it.'),
       };
+    case 'FIXED_COST_INCOMPLETE':
+      // A supplementary estimate goes out at a fixed cost: every part needs its price.
+      return {
+        title: t('estimates.err_fixed_title', 'Not every line has a fixed price'),
+        body: res.message || t('estimates.err_fixed_body', 'A part is not available in the estimate’s type — change or remove it with Edit, then send.'),
+      };
     case 'EMAIL_FAILED':
       // The estimate is marked sent and its link is live; only the e-mail failed.
       return {
@@ -1028,6 +1187,8 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
   const [err, setErr] = useState(null);
 
   const needsSignOff = !!e.needs_internal_approval && !data.can_approve;
+  // A supplementary estimate: one type, one firm price per part, approved with the customer's consent.
+  const fixed = e.kind === 'supplementary';
   const blocked = summary.unpricedParts > 0 || summary.unpricedLabour > 0;
   // Parts with nothing on offer in the preference and no alternative: the customer can only reject them.
   const unavailable = parts.filter(l => hasCategoryPricing(l) && !partUnpriced(l, pref)
@@ -1089,12 +1250,13 @@ export function SendEstimatePanel({ data, onDone, onCancel, cancelLabel }) {
 
       {parts.length > 0 && (
         <>
-          <div style={sp.h}>{t('estimates.send_pref', 'Customer’s parts preference')}</div>
+          <div style={sp.h}>{fixed ? t('estimates.send_fixed', 'Fixed cost') : t('estimates.send_pref', 'Customer’s parts preference')}</div>
           <div style={sp.formats}>
             {pref.map(c => (
               <div key={c} style={sp.fmt}>
                 <span style={sp.fmtLabel}>{categoryLabel(t, c)}</span>
-                <span style={sp.fmtSub}>{pref.length > 1 ? t('estimates.send_cat_sub_choose', 'The customer chooses per part') : t('estimates.send_cat_sub_only', 'Every part in this category')}</span>
+                <span style={sp.fmtSub}>{fixed ? t('estimates.send_fixed_sub', 'One price per part — the customer approves it with their consent')
+                  : pref.length > 1 ? t('estimates.send_cat_sub_choose', 'The customer chooses per part') : t('estimates.send_cat_sub_only', 'Every part in this category')}</span>
                 <span style={sp.fmtAmt}>{money(summary.totals[c])}</span>
               </div>
             ))}
@@ -1188,6 +1350,11 @@ const st = {
   header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, padding: '20px 24px 16px', borderBottom: '1px solid #eef1f5' },
   title: { margin: 0, fontSize: 20, fontWeight: 800, color: NAVY },
   subtitle: { margin: '4px 0 0', fontSize: 13, color: '#64748b', maxWidth: 560, lineHeight: 1.45 },
+  chips: { display: 'flex', flexWrap: 'wrap', gap: '0 8px', alignItems: 'center' },
+  suppChip: { display: 'inline-block', margin: '6px 0 0', fontSize: 12.5, fontWeight: 700, color: NAVY, background: '#eef2f8', border: '1px solid #c9d4e8', borderRadius: 999, padding: '3px 10px' },
+  suppNote: { display: 'flex', gap: 8, alignItems: 'flex-start', background: '#eef2f8', border: '1px solid #c9d4e8', color: '#1e3a6b', padding: '10px 12px', borderRadius: 10, fontSize: 13, marginBottom: 14, lineHeight: 1.45 },
+  notice: { display: 'flex', gap: 10, alignItems: 'flex-start', background: '#fdf4e5', border: '1px solid #f3d9a8', color: '#92400e', padding: '12px 14px', borderRadius: 12, fontSize: 13.5, marginBottom: 14, lineHeight: 1.5 },
+  checking: { padding: '18px 4px', textAlign: 'center', color: '#94a3b8', fontSize: 13.5 },
   woChip: { display: 'inline-block', margin: '6px 0 0', fontSize: 12.5, fontWeight: 700, color: '#9a3412', background: '#fff7ed', border: '1px solid #fdba74', borderRadius: 999, padding: '3px 10px' },
   closeBtn: { background: '#f1f5f9', border: 'none', borderRadius: 10, width: 32, height: 32, cursor: 'pointer', color: '#475569', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   body: { padding: '18px 24px', overflowY: 'auto', flex: 1 },

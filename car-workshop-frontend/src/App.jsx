@@ -14,6 +14,7 @@ const WorkOrderDetail   = lazy(() => import('./pages/WorkOrderDetail'));
 const VehicleInspection = lazy(() => import('./pages/VehicleInspection'));
 const TechnicalInspection = lazy(() => import('./pages/TechnicalInspection'));
 const TeamLeader = lazy(() => import('./pages/TeamLeader'));
+const ScanStation = lazy(() => import('./pages/ScanStation'));
 const FleetIntake = lazy(() => import('./pages/FleetIntake'));
 const FleetIntakeQueue = lazy(() => import('./pages/FleetIntakeQueue'));
 const Estimates = lazy(() => import('./pages/Estimates'));
@@ -174,6 +175,7 @@ export default function App() {
         <Route path="/mechanics" element={<Protected><Mechanics /></Protected>} />
         <Route path="/job-assignment" element={<Protected><JobAssignment /></Protected>} />
         <Route path="/team-leader" element={<Protected><TeamLeader /></Protected>} />
+        <Route path="/scan-station" element={<Protected module="team-leader"><ScanStation /></Protected>} />
         <Route path="/fleet-intake" element={<Protected><FleetIntakeQueue /></Protected>} />
         <Route path="/estimates" element={<Protected><Estimates /></Protected>} />
         <Route path="/appointments" element={<Protected><Appointments /></Protected>} />

@@ -1,0 +1,28 @@
+/* JobTasksPanel — the jobs on the job card and their technicians (Step 6).
+   Sits inside .wf, so it uses the workflow's colour variables and buttons. */
+.jt { border: 1px solid var(--wf-line, #e2e8f0); border-radius: 14px; padding: 14px; background: #fff; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.jt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jt-title { font-size: 14px; font-weight: 800; color: var(--wf-ink, #0f172a); }
+.jt-ok { margin: 0; font-size: 13px; font-weight: 600; color: #166534; background: var(--wf-good-soft, #dcfce7); padding: 8px 10px; border-radius: 10px; }
+.jt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.jt-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; border: 1px solid var(--wf-line, #e2e8f0); border-radius: 12px; padding: 10px 12px; }
+.jt-row.is-cancelled { opacity: .55; }
+.jt-row.is-cancelled .jt-job-name { text-decoration: line-through; }
+.jt-n { width: 24px; height: 24px; border-radius: 50%; background: var(--wf-soft, #f8fafc); border: 1px solid var(--wf-line, #e2e8f0); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; color: var(--wf-navy, #1e3a6b); }
+.jt-main { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.jt-job { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.jt-job-name { font-size: 14px; font-weight: 700; color: var(--wf-ink, #0f172a); overflow-wrap: anywhere; }
+.jt-tech { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--wf-ink, #0f172a); }
+.jt-tech-name { font-weight: 600; }
+.jt-tech .wf-pill { display: inline-flex; align-items: center; gap: 4px; white-space: normal; }
+.jt-assign { margin-left: auto; }
+.jt-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
+.jt-times { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.jt-code { font-size: 11px; color: var(--wf-muted, #64748b); background: var(--wf-soft, #f8fafc); border: 1px solid var(--wf-line, #e2e8f0); border-radius: 6px; padding: 1px 6px; letter-spacing: .04em; }
+
+@media (max-width: 640px) {
+  .jt-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .jt-side { grid-column: 2; align-items: flex-start; text-align: left; }
+  .jt-times { justify-content: flex-start; }
+  .jt-assign { margin-left: 0; }
+}

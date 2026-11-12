@@ -91,6 +91,7 @@ import workflowRouter from './routes/workflow.js';
 import technicalInspectionsRouter from './routes/technical-inspections.js';
 import vehicleBoardRouter from './routes/vehicle-board.js';
 import teamLeaderRouter from './routes/team-leader.js';
+import jobTasksRouter from './routes/job-tasks.js';
 import fleetIntakeRouter, { publicFleetIntakeRouter } from './routes/fleet-intake.js';
 import inventoryRouter from './routes/inventory.js';
 import subletRouter, { proformaRouter } from './routes/sublet.js';
@@ -333,6 +334,8 @@ app.use('/api/technical-inspections', technicalInspectionsRouter);
 app.use('/api/vehicle-board', vehicleBoardRouter);
 // Team leader board: their technicians, the vehicles on the team, time bookings
 app.use('/api/team-leader', teamLeaderRouter);
+// Technicians per job and the scan station (client meeting, 3 Nov 2026)
+app.use('/api/job-tasks', jobTasksRouter);
 // Fleet coordinator intake: the vehicle information section on its own page
 app.use('/api/fleet-intake', fleetIntakeRouter);
 // The coordinator-facing form itself, opened from a tokenised link, no login

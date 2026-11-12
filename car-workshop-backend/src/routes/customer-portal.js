@@ -436,7 +436,7 @@ router.get('/service-status', async (req, res) => {
                 v.plate_number, v.make, v.model,
                 (SELECT se.status FROM service_estimates se
                   WHERE se.workshop_id = wo.workshop_id AND (se.intake_work_order_id = wo.id OR se.work_order_id = wo.id)
-                  ORDER BY se.id DESC LIMIT 1) AS estimate_status,
+                  ORDER BY se.kind = 'supplementary', se.id DESC LIMIT 1) AS estimate_status,
                 (SELECT jc.job_card_number FROM job_cards jc
                   WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL ORDER BY jc.id LIMIT 1) AS job_card_number
            FROM work_orders wo

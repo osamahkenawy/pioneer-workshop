@@ -47,6 +47,14 @@ try {
   const advisor = await mk('advisor', 'service_advisor', 'service_advisor');
   const store = await mk('store', 'part_advisor', 'storekeeper');
   const supervisor = await mk('supervisor', 'supervisor', 'supervisor');
+  // The estimate follows the work order's completed technical inspection
+  // (client decision, 3 Nov 2026): the Supervisor writes and completes it first.
+  const completeTechnical = async (workOrderId, tok = supervisor) => {
+    const ti = (await call('POST', '/technical-inspections', tok, { work_order_id: workOrderId })).json?.data;
+    await call('PUT', `/technical-inspections/${ti?.id}`, tok, { service_lines: [{ job: 'QA inspection', service_type: 'repair', labour: 'As found', hours: 1, parts: [] }] });
+    const done = await call('PATCH', `/technical-inspections/${ti?.id}/complete`, tok, {});
+    if (done.status !== 200) throw new Error(`technical inspection not completed: HTTP ${done.status} ${done.json?.message || ''}`);
+  };
   const leader = await mk('leader', 'dispatcher', 'team_leader');
   const mechTok = await mk('tech', 'mechanic');
   const mech = (await q(`INSERT INTO mechanics (workshop_id, user_id, full_name, phone, is_active, status, team_leader_id) VALUES (1,?,'QA WF Technician','+971500000555',1,'available',?)`, [users.tech.id, users.leader.id])).insertId;
@@ -102,6 +110,7 @@ try {
   section = '4-5 pricing';
   const noPref = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, parts_preference: [], lines: LINES1 });
   expect('the customer\'s parts preference cannot be empty (400 PARTS_PREFERENCE_REQUIRED)', noPref.status === 400 && noPref.json?.code === 'PARTS_PREFERENCE_REQUIRED', `HTTP ${noPref.status} ${noPref.json?.code || ''}`);
+  await completeTechnical(woId);
   const est = await call('POST', '/estimates', advisor, { intake_work_order_id: woId, lines: LINES1 });
   const estId = est.json?.estimateId;
   expect('advisor raises the estimate for this visit (default preference Genuine + After-Market); 2 part lines wait for the Store',
@@ -176,6 +185,15 @@ try {
   section = '6 work';
   const notMine = await call('POST', `/job-cards/${mainJc.id}/time/start`, mechTok);
   expect('technician cannot book time on a job card not assigned to them', notMine.status === 403, `HTTP ${notMine.status}`);
+  // Point 18 (client meeting, 3 Nov 2026): the parts are requested from the
+  // Store (MRN) before the technician is assigned.
+  const dParts = await wf(leader, woId);
+  const noMrn = await call('POST', '/team-leader/assign', leader, { work_order_id: woId, mechanic_id: mech });
+  expect('no technician before the parts are requested (409 MRN_REQUIRED); the workflow says to request them first',
+    noMrn.status === 409 && noMrn.json?.code === 'MRN_REQUIRED' && dParts.next?.key === 'request_parts' && chk(dParts, 6, 'mrn')?.done === false,
+    `HTTP ${noMrn.status} ${noMrn.json?.code || ''} · next ${dParts.next?.key}`);
+  const mrn = await call('POST', `/job-cards/${mainJc.id}/requisitions`, leader, { items: [{ description: 'AC compressor', quantity: 1 }, { description: 'Brake pads', quantity: 1 }] });
+  expect('the floor requests the parts (MRN); Store notified', mrn.status === 201 && await notesFor(users.store.id, 'Material requisition%') === 1, `HTTP ${mrn.status} ${mrn.json?.message || ''}`);
   const tl = await call('POST', '/team-leader/assign', leader, { work_order_id: woId, mechanic_id: mech });
   const [jcAfterAssign] = await q('SELECT mechanic_id FROM job_cards WHERE id = ?', [mainJc.id]);
   expect('Team Leader assigns; the main job card follows and the technician is told', tl.status === 200 && jcAfterAssign.mechanic_id === mech && await notesFor(users.tech.id, 'Job assigned%') >= 1, `HTTP ${tl.status} ${tl.json?.message || ''}`);
@@ -191,7 +209,7 @@ try {
   const twice = await call('POST', `/job-cards/${mainJc.id}/time/start`, mechTok);
   expect('Pause and resume; cannot start twice', pa.status === 200 && st2.status === 201 && twice.status === 409, `${pa.status}/${st2.status}/${twice.status}`);
   const rq = await call('POST', `/job-cards/${mainJc.id}/requisitions`, mechTok, { items: [{ description: 'Compressor oil PAG46', quantity: 1 }] });
-  expect('technician raises a material requisition; Store notified', rq.status === 201 && await notesFor(users.store.id, 'Material requisition%') === 1, `HTTP ${rq.status}`);
+  expect('technician raises a further material requisition; Store notified', rq.status === 201 && await notesFor(users.store.id, 'Material requisition%') === 2, `HTTP ${rq.status}`);
   const [ri] = await q('SELECT i.id FROM material_requisition_items i WHERE i.requisition_id = ?', [rq.json.requisitionId]);
   const tomorrow = new Date(Date.now() + 86400000); const tmr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
   const mechNa = await call('PATCH', `/workflow/requisition-items/${ri.id}`, advisor, { availability: 'not_available', expected_date: tmr });
@@ -333,6 +351,7 @@ try {
   expect('internal customer: no physical inspection — the main job card opens with the work order',
     !!(await mainOf(wo2)) && d.steps[2].state === 'done' && chk(d, 3, 'physical_ack')?.done === true && chk(d, 3, 'physical_ack')?.detail === 'Not needed — internal customer',
     `${stepStates(d)} · ${chk(d, 3, 'physical_ack')?.detail}`);
+  await completeTechnical(wo2);
   const e2 = (await call('POST', '/estimates', advisor, { intake_work_order_id: wo2, lines: [{ job_name: 'Service', line_type: 'labour', description: 'Full service', quantity: 1, unit_price: 250 }] })).json?.estimateId;
   const s2 = await call('POST', `/estimates/${e2}/send`, advisor, { format: 'genuine', channel: 'whatsapp' });
   expect('internal (fleet) customer: estimate goes straight out, no manager approval', s2.status === 200, `HTTP ${s2.status} ${s2.json?.message || ''}`);
@@ -374,6 +393,7 @@ try {
   const veh4 = (await call('POST', '/vehicles', advisor, { customer_id: fleet.id, make: 'Nissan', model: 'Patrol', year: 2018, plate_emirate: 'Dubai', plate_number: 'QAWF04', vin: 'TSTWFA00000000004' })).json?.data;
   const wo4 = (await call('POST', '/work-orders', advisor, { customer_id: fleet.id, vehicle_id: veh4.id, customer_name: fleet.full_name, customer_phone: fleet.phone || '+971500000552',
     description: 'Charging fault; mirror broken; wipers', odometer_in: 98000, payment_method: 'credit', items: [] })).json?.data?.id;
+  await completeTechnical(wo4);
   const e4 = await call('POST', '/estimates', advisor, { intake_work_order_id: wo4, parts_preference: 'genuine,used', lines: [
     { job_name: 'Alternator', line_type: 'labour', description: 'Alternator - labour', quantity: 1, unit_price: 100 },
     { job_name: 'Alternator', line_type: 'parts', description: 'Alternator', quantity: 2 },

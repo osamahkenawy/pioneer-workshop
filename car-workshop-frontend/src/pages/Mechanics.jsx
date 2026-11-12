@@ -4,10 +4,12 @@ import {
   Plus, Search, EditPencil, Eye, EyeClosed, Refresh, NavArrowLeft, NavArrowRight,
   StatsReport, Medal, Timer, Clock, Calendar, XmarkCircle,
   MoreHoriz, Prohibition, DollarCircle, ArrowRight, Copy,
-  Key as KeyIcon, InfoCircle,
+  Key as KeyIcon, InfoCircle, Printer,
 } from 'iconoir-react';
 import { AuthContext } from '../context/AuthContext';
 import api from '../lib/api';
+import { canDo } from '../lib/permissions';
+import { JOB_TYPES, jobTypeLabel } from '../lib/intakeOptions';
 import usePlanUsage from '../hooks/usePlanUsage';
 import { dispatchPlanUpdate } from '../hooks/usePlanUsage';
 import UpgradeModal from '../components/dashboard/UpgradeModal';
@@ -153,6 +155,110 @@ const jobsToday = d => parseInt(d?.work_orders_today ?? d?.orders_today) || 0;
 const jobsActive = d => parseInt(d?.active_work_orders ?? d?.active_orders) || 0;
 // The API sends the default bay as service_bay_name (zone_name is courier-era).
 const bayName   = d => d?.service_bay_name || d?.zone_name || '';
+
+/* Skills (the service types the technician is qualified for — a job is only
+   offered to qualified technicians, backend lib/job-tasks.js) and the badge
+   scanned at the scan station. Set by whoever assigns work (job.assign). */
+function SkillsAndBadge({ mechanic, canEdit, onSaved }) {
+  const { t } = useTranslation();
+  const stored = mechanic.skills || [];
+  const storedKey = JSON.stringify(stored);
+  const [skills, setSkills] = useState(stored);
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+  useEffect(() => { setSkills(JSON.parse(storedKey)); setMsg(null); }, [mechanic.id, storedKey]);
+  const dirty = JSON.stringify(JOB_TYPES.map(o => o.value).filter(k => skills.includes(k))) !== storedKey || mechanic.skills === null;
+  const toggle = k => setSkills(s => (s.includes(k) ? s.filter(x => x !== k) : [...s, k]));
+
+  const save = async () => {
+    setBusy('save'); setMsg(null);
+    try {
+      const r = await api.patch(`/mechanics/${mechanic.id}/skills`, { skills });
+      if (r.success) { onSaved(r.data?.skills ?? skills); setMsg({ ok: true, text: t('mechanics.skills_saved', 'Skills saved.') }); }
+      else setMsg({ ok: false, text: r.message || t('mechanics.skills_failed', 'Could not save the skills.') });
+    } catch { setMsg({ ok: false, text: t('mechanics.skills_failed', 'Could not save the skills.') }); }
+    setBusy('');
+  };
+  const printBadge = async () => {
+    setBusy('badge'); setMsg(null);
+    try {
+      const r = await api.raw(`/mechanics/${mechanic.id}/badge`);
+      if (!r.ok) throw new Error(String(r.status));
+      const url = URL.createObjectURL(await r.blob());
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      onSaved(undefined, true);
+    } catch { setMsg({ ok: false, text: t('mechanics.badge_failed', 'Could not print the badge.') }); }
+    setBusy('');
+  };
+  const replaceBadge = async () => {
+    if (!window.confirm(t('mechanics.badge_replace_confirm', 'Make a new badge for {{name}}? The old badge stops working at the scan station.', { name: mechanic.full_name }))) return;
+    setBusy('badge');
+    const r = await api.post(`/mechanics/${mechanic.id}/badge/reset`).catch(() => null);
+    setBusy('');
+    if (r?.success) await printBadge();
+    else setMsg({ ok: false, text: r?.message || t('mechanics.badge_failed', 'Could not print the badge.') });
+  };
+
+  return (
+    <div className="ord-view-section">
+      <div className="ord-view-section-title"><Wrench width={14} height={14} /> {t('mechanics.skills_title', 'Skills — service types')}</div>
+      <div className="ord-view-card">
+        {canEdit ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px', padding: '4px 0' }}>
+            {JOB_TYPES.map(o => (
+              <label key={o.value} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={skills.includes(o.value)} onChange={() => toggle(o.value)} />
+                {t(`jobTasks.type.${o.value}`, o.label)}
+              </label>
+            ))}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {mechanic.skills === null || mechanic.skills === undefined
+              ? <span style={{ color: '#94a3b8', fontSize: 13 }}>{t('mechanics.skills_none', 'Not recorded yet')}</span>
+              : stored.length ? stored.map(k => <span key={k} className="drv-tag vehicle" style={{ background: '#ecfdf5', color: '#047857' }}>{t(`jobTasks.type.${k}`, jobTypeLabel(k))}</span>)
+                : <span style={{ color: '#94a3b8', fontSize: 13 }}>{t('mechanics.skills_empty', 'None')}</span>}
+          </div>
+        )}
+        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
+          {mechanic.skills === null || mechanic.skills === undefined
+            ? t('mechanics.skills_hint_none', 'Not recorded yet: until their skills are ticked, this technician is only offered jobs without a service type.')
+            : t('mechanics.skills_hint', 'Jobs are offered to this technician only for these service types.')}
+        </div>
+        {canEdit && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+            <button type="button" className="module-btn module-btn-primary" disabled={!dirty || busy === 'save'} onClick={save}>
+              <Check width={14} height={14} /> {t('mechanics.skills_save', 'Save skills')}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="ord-view-section-title" style={{ marginTop: 14 }}><KeyIcon width={14} height={14} /> {t('mechanics.badge_title', 'Scan station badge')}</div>
+      <div className="ord-view-card">
+        <div style={{ fontSize: 13, color: '#475569' }}>
+          {mechanic.has_badge
+            ? t('mechanics.badge_has', 'Has a badge. Scanned at the station before the job, it shows the job is really theirs.')
+            : t('mechanics.badge_none', 'No badge printed yet. Printing makes the badge\'s code.')}
+        </div>
+        {canEdit && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <button type="button" className="module-btn module-btn-outline" disabled={busy === 'badge'} onClick={printBadge}>
+              <Printer width={14} height={14} /> {t('mechanics.badge_print', 'Print badge')}
+            </button>
+            {mechanic.has_badge && (
+              <button type="button" className="module-btn module-btn-outline" disabled={busy === 'badge'} onClick={replaceBadge}>
+                <Refresh width={14} height={14} /> {t('mechanics.badge_replace', 'Lost badge — make a new one')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {msg && <div style={{ marginTop: 8, fontSize: 13, fontWeight: 600, color: msg.ok ? '#15803d' : '#b91c1c' }}>{msg.text}</div>}
+    </div>
+  );
+}
 
 export default function Mechanics() {
   const { t } = useTranslation();
@@ -616,6 +722,10 @@ export default function Mechanics() {
                       <MapPin width={11} height={11} /> {bayName(mechanic)}
                     </span>
                   )}
+                  {/* Skills: the service types jobs are offered for (lib/job-tasks.js) */}
+                  {Array.isArray(mechanic.skills)
+                    ? mechanic.skills.map(k => <span key={k} className="drv-tag" style={{ background: '#ecfdf5', color: '#047857' }}>{t(`jobTasks.type.${k}`, jobTypeLabel(k))}</span>)
+                    : <span className="drv-tag" style={{ background: '#f8fafc', color: '#94a3b8' }}>{t('mechanics.skills_none_short', 'Skills not recorded')}</span>}
                   {isInactive && <span className="drv-tag inactive">{t('mechanics.inactive')}</span>}
                 </div>
 
@@ -804,6 +914,14 @@ export default function Mechanics() {
                       </div>
                     </div>
                   )}
+
+                  <SkillsAndBadge mechanic={{ ...viewMechanic, ...(viewDetail || {}) }} canEdit={canDo(user, 'job.assign')}
+                    onSaved={(skills, badgePrinted) => {
+                      const patch = badgePrinted ? { has_badge: true } : { skills };
+                      setMechanics(ms => ms.map(m => (m.id === viewMechanic.id ? { ...m, ...patch } : m)));
+                      setViewMechanic(v => ({ ...v, ...patch }));
+                      setViewDetail(d => (d ? { ...d, ...patch } : d));
+                    }} />
 
                   {/* Notes — plain text for freeform notes, key/value grid when
                       the notes column holds the JSON payload the migration stamps. */}

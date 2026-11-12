@@ -172,7 +172,8 @@ router.get('/', async (req, res) => {
 
     return res.json({ success: true, data: {
       unassigned: attachData(unassigned),
-      available_mechanics: mechanics,
+      // The scan-station badge code stays off the staff screens (it is printed on the badge only).
+      available_mechanics: mechanics.map(({ badge_code, ...m }) => m),
       all_mechanics: allMechanics,
       // The key keeps its courier-era name so existing clients still read it;
       // it holds the job cards a technician is on (assigned → ready for collection).
