@@ -28,6 +28,7 @@ import { onTechnicianAssigned } from '../lib/workflow.js';
 import { can, capabilitiesOf, requireCapability } from '../lib/roles.js';
 import { customerApprovalMissing } from '../lib/job-card-approval.js';
 import { awaitingPhysicalInspection, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
+import { partsRequestMissing } from '../lib/parts-request.js';
 import {
   ASSIGN_WHERE, AWAITING_CUSTOMER_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE,
 } from '../lib/floor-queues.js';
@@ -435,6 +436,9 @@ router.post('/assign', requireCapability('job.assign'), async (req, res) => {
       return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED,
         message: `${workOrder.work_order_number} can't be assigned yet — its job card opens once the customer has acknowledged the physical inspection.` });
     }
+    // The parts are requested (MRN) before anyone is assigned (lib/parts-request.js).
+    const mrn = await partsRequestMissing({ workOrderId: workOrder.id, workshopId: req.workshopId });
+    if (mrn) return res.status(409).json({ success: false, ...mrn });
 
     // The board's queue is shared by every leader and it holds its refreshes
     // while the dialog is open, so it says who it expects to be on the job

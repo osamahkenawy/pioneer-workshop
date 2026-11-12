@@ -12,7 +12,7 @@ import { canDo } from '../lib/permissions';
 import { shareViaWhatsApp, buildStatusMessage } from '../lib/whatsapp';
 import { woLabel, woTone } from '../lib/statusLabels';
 import { customerStatusUrl } from '../lib/customerLink';
-import { isTechnician } from '../lib/modules';
+import { isTechnician, hasModule } from '../lib/modules';
 import './CRMPages.css';
 import './WorkOrderDetail.css';
 import JobCardWorkflow from '../components/workflow/JobCardWorkflow';
@@ -122,8 +122,16 @@ function parseSrcNotes(raw) {
 /* The work order's status in the workshop's words (lib/statusLabels.js). */
 const StatusBadge = ({ wo, size = 'md' }) => {
   const { t } = useTranslation();
-  const tone = woTone(wo);
+  // On the Work Orders side a job whose job card is open reads "Completed".
+  const tone = woTone(wo === 'wo_completed' ? 'completed' : wo);
   const Icon = tone.icon;
+  if (wo === 'wo_completed') {
+    return (
+      <span className={`ord-status-badge ${size === 'lg' ? 'lg' : ''}`} style={{ background: tone.bg, color: tone.color }}>
+        <Icon width={size === 'lg' ? 14 : 12} height={size === 'lg' ? 14 : 12} /> {t('orders.wo_completed', 'Completed')}
+      </span>
+    );
+  }
   return (
     <span className={`ord-status-badge ${size === 'lg' ? 'lg' : ''}`} style={{ background: tone.bg, color: tone.color }}>
       <Icon width={size === 'lg' ? 14 : 12} height={size === 'lg' ? 14 : 12} /> {woLabel(t, wo)}
@@ -154,9 +162,18 @@ const InfoRow = ({ icon: Icon, label, value, mono, accent }) => (
 /* ══════════════════════════════════════════════════════════════
    Main Component
    ══════════════════════════════════════════════════════════════ */
-export default function WorkOrderDetail() {
+/*
+ * mode — 'work-order' (/work-orders/:id) or 'job-card' (/job-cards/:id, the
+ * Job Cards module). Two modules, one job (client meeting, 3 Nov 2026,
+ * point 6): the work order is Steps 1–3 and reads "Completed" once its main
+ * job card opens; the job carries on on the job card page, Steps 4–7. Both
+ * are keyed by the work order's id. A job without a job card (older jobs)
+ * shows all seven steps here.
+ */
+export default function WorkOrderDetail({ mode = 'work-order' }) {
   const { t } = useTranslation();
   const { id } = useParams();
+  const jobCardMode = mode === 'job-card';
   const navigate = useNavigate();
   const { user, workshop } = useContext(AuthContext);
   // A technician works from My Jobs, which opens this job's card for them:
@@ -314,10 +331,14 @@ export default function WorkOrderDetail() {
       <div className="ord-empty">
         <ClipboardCheck width={48} height={48} />
         <h3>{t("orderDetail.order_not_found")}</h3>
-        <button className="module-btn module-btn-primary" onClick={() => navigate('/work-orders')}><ArrowLeft width={15} height={15} /> {t('orderDetail.back_to_orders')}</button>
+        <button className="module-btn module-btn-primary" onClick={() => navigate(jobCardMode ? '/job-cards' : '/work-orders')}><ArrowLeft width={15} height={15} /> {jobCardMode ? t('jobCards.back', 'Job cards') : t('orderDetail.back_to_orders')}</button>
       </div>
     </div>
   );
+
+  const jcNumber = order.main_job_card_number || null;
+  const woCompleted = !jobCardMode && !!jcNumber && order.status !== 'cancelled';
+  const range = jobCardMode ? [4, 7] : jcNumber ? [1, 3] : [1, 7];
 
   return (
     <div className="page-container od-modern">
@@ -325,7 +346,7 @@ export default function WorkOrderDetail() {
       {/* ════════════════ HERO HEADER ════════════════ */}
       <div className="od-hero">
         <div className="od-hero-top">
-          <button className="od-back-btn" onClick={() => navigate('/work-orders')}><ArrowLeft width={16} height={16} /> {t('orderDetail.orders_back')}</button>
+          <button className="od-back-btn" onClick={() => navigate(jobCardMode ? '/job-cards' : '/work-orders')}><ArrowLeft width={16} height={16} /> {jobCardMode ? t('jobCards.back', 'Job cards') : t('orderDetail.orders_back')}</button>
           <div className="od-hero-actions">
             <button className="od-icon-action" onClick={fetchOrder} title={t('orderDetail.refresh')} aria-label={t('orderDetail.refresh')}><Refresh width={16} height={16} /></button>
             {/* No token (e.g. older imported jobs): no customer link. */}
@@ -347,9 +368,25 @@ export default function WorkOrderDetail() {
         <div className="od-hero-identity">
           <div className="od-hero-left">
             <div className="od-hero-number-row">
-              <h1 className="od-hero-number">{order.work_order_number}</h1>
-              <StatusBadge wo={order} size="lg" />
+              <h1 className="od-hero-number">{jobCardMode && jcNumber ? jcNumber : order.work_order_number}</h1>
+              <StatusBadge wo={woCompleted ? 'wo_completed' : order} size="lg" />
             </div>
+            {/* The other half of the same job. */}
+            {jobCardMode ? (
+              <div className="od-hero-sub">
+                {t('jobCards.of_work_order', 'Work order')}{' '}
+                {hasModule(user, 'work-orders')
+                  ? <button type="button" className="od-link-btn" onClick={() => navigate(`/work-orders/${id}`)}>{order.work_order_number}</button>
+                  : <strong>{order.work_order_number}</strong>}
+              </div>
+            ) : jcNumber && (
+              <div className="od-hero-sub">
+                {t('jobCards.job_card', 'Job card')}{' '}
+                {hasModule(user, 'job-cards')
+                  ? <button type="button" className="od-link-btn" onClick={() => navigate(`/job-cards/${id}`)}>{jcNumber}</button>
+                  : <strong>{jcNumber}</strong>}
+              </div>
+            )}
             <div className="od-hero-meta">
               {/* The job types the advisor ticked at Step 4 (the single "Job type" left the form, 2 Nov 2026). */}
               {jobTypesOf(order).map(jt => <span key={jt} className="od-meta-chip type">{jobTypeLabel(jt)}</span>)}
@@ -383,7 +420,7 @@ export default function WorkOrderDetail() {
       {/* Replaces the six "Customer Journey" timestamp chips (an earlier
           12-step draft of the process) with the client's Steps 1–7. */}
       <JobCardWorkflow workOrderId={id} user={user} currency={cur} mechanics={mechanics} workshopName={workshop?.name} onChanged={() => fetchOrder(true)}
-        version={`${order.status}|${order.mechanic_id}|${order.updated_at}|${order.customer_approved_at}`} />
+        version={`${order.status}|${order.mechanic_id}|${order.updated_at}|${order.customer_approved_at}`} range={range} />
 
       <div className="od-progress-card od-extras">
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

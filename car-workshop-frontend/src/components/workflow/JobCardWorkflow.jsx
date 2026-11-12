@@ -34,7 +34,9 @@ const JC_TONE = {
   qc_passed: 'good', qc_failed: 'bad', ready_for_billing: 'good', billed: 'good', cancelled: 'neutral',
 };
 const jcPill = (t, status) => [jcLabel(t, status), JC_TONE[status] || 'neutral'];
-const SUBCATS = { internal: [['fleet', 'Fleet'], ['insurance', 'Insurance'], ['asset', 'Asset']], external: [['fleet', 'Fleet'], ['insurance', 'Insurance'], ['walkin', 'Walk-in']] };
+const SUBCATS = { internal: [['fleet', 'Fleet'], ['insurance', 'Insurance'], ['asset', 'Asset'], ['staff', 'Staff']], external: [['fleet', 'Fleet'], ['insurance', 'Insurance'], ['walkin', 'Walk-in']] };
+/** English names of the subcategories (the fallback when a key is not translated). */
+const SUB_NAMES = { fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', walkin: 'Walk-in', staff: 'Staff' };
 
 // What the viewer may do comes from the server (lib/roles.js capabilities),
 // so the screen and the API agree — including roles changed in Settings.
@@ -54,7 +56,7 @@ const NEXT_CAP = {
   physical_inspection: 'job.open', finish_physical_inspection: 'job.open', send_inspection_link: 'estimate.raise', counter_needs_estimate: 'estimate.raise', create_estimate: 'estimate.raise', create_estimate_from_inspection: 'estimate.raise', price_labour: 'estimate.raise',
   technical_inspection: 'tech.inspect', create_estimate_from_report: 'estimate.raise',
   send_estimate: 'estimate.raise', price_parts: 'estimate.price_parts', price_parts_categories: 'estimate.price_parts', approve_estimate: 'estimate.approve', record_approval: 'customer.approval',
-  assign: 'job.assign', parts_waiting: 'store.issue', work: 'time.book', qc_failed: 'job.assign', qc: 'qc.perform',
+  request_parts: 'parts.request', assign: 'job.assign', parts_waiting: 'store.issue', work: 'time.book', qc_failed: 'job.assign', qc: 'qc.perform',
   contact: 'delivery.handover', payment: 'delivery.handover', gate_pass: 'delivery.handover', close: 'delivery.handover', rejected_all: 'customer.approval',
 };
 
@@ -79,7 +81,13 @@ const hhmm = s => (s ? String(s).replace('T', ' ').slice(11, 16) : '');
 const dateOnly = s => (s ? String(s).slice(0, 10) : '');
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', mechanics = [], workshopName, onChanged, version }) {
+/*
+ * `range` — the steps this page shows (client meeting, 3 Nov 2026, point 6):
+ * the work order is Steps 1–3 and is completed once its job card opens; the
+ * job card (Job Cards module) is Steps 4–7. Each side points to the other
+ * when the next action is there. Default: all seven (older jobs without a job card).
+ */
+export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', mechanics = [], workshopName, onChanged, version, range = [1, 7] }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [capsState, setCapsState] = useState([]);
@@ -90,7 +98,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
     if (!i18n?.key) return fallback;
     // "Internal · Fleet": both halves translated separately
     if (i18n.key.startsWith('sum.class_') && i18n.params?.sub) {
-      return `${t(`workflow.val.${i18n.key.slice(4)}`)} · ${t(`workflow.val.sub_${i18n.params.sub}`)}`;
+      return `${t(`workflow.val.${i18n.key.slice(4)}`)} · ${t(`workflow.val.sub_${i18n.params.sub}`, SUB_NAMES[i18n.params.sub] || i18n.params.sub)}`;
     }
     return t(`workflow.${i18n.key}`, { defaultValue: fallback, ...(i18n.params || {}) });
   };
@@ -123,7 +131,10 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
   // live timers tick between reloads
   const running = data?.job_cards?.some(c => c.time?.state === 'running');
   useEffect(() => { if (!running) return; const i = setInterval(() => setTick(x => x + 1), 15000); return () => clearInterval(i); }, [running]);
-  useEffect(() => { if (data && selected == null) setSelected(data.current_step || 7); }, [data, selected]);
+  const inRange = n => n >= range[0] && n <= range[1];
+  useEffect(() => {
+    if (data && selected == null) setSelected(Math.min(Math.max(data.current_step || 7, range[0]), range[1]));
+  }, [data, selected]); // eslint-disable-line react-hooks/exhaustive-deps
   // On a phone the stepper scrolls sideways: keep the selected step in view.
   const stepperRef = useRef(null);
   useEffect(() => {
@@ -192,9 +203,15 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
       </section>
     );
   }
-  const steps = data.steps;
+  const steps = data.steps.filter(s => inRange(s.n));
   const doneCount = steps.filter(s => s.state === 'done').length;
   const step = steps.find(s => s.n === selected) || steps[0];
+  const partial = steps.length < data.steps.length;
+  // The job has moved past this page's steps (the work order once its job
+  // card is open) or not reached them yet (the job card before it opens).
+  const beyond = partial && (data.current_step || 7) > range[1];
+  const before = partial && (data.current_step || 1) < range[0];
+  const mainCard = (data.job_cards || []).find(c => !c.parent_job_card_id);
   const elapsed = Math.floor((Date.now() - loadedAt.current) / 60000);
   const closed = wo.status === 'completed' || wo.status === 'cancelled';
 
@@ -235,16 +252,22 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
     <section className="wf" aria-label={t('workflow.title', 'Workshop workflow')}>
       <header className="wf-head">
         <div>
-          <div className="wf-eyebrow">{t('workflow.eyebrow', 'Workshop workflow · Steps 1–7')}</div>
+          <div className="wf-eyebrow">
+            {!partial ? t('workflow.eyebrow', 'Workshop workflow · Steps 1–7')
+              : range[1] <= 3 ? t('workflow.eyebrow_wo', 'Work order · Steps 1–3')
+              : t('workflow.eyebrow_jc', 'Job card · Steps 4–7')}
+          </div>
           <h3 className="wf-title">
             {wo.status === 'cancelled' ? t('workflow.cancelled', 'Job closed — no work carried out')
+              : beyond ? t('workflow.wo_completed', 'Work order completed — the job continues on job card {{n}}', { n: mainCard?.job_card_number || '' })
+              : before ? t('workflow.jc_not_open', 'The job card opens once the physical inspection is acknowledged')
               : wo.status === 'completed' ? t('workflow.closed', 'Job closed')
-              : data.current_step ? `${t('workflow.step', 'Step')} ${data.current_step} · ${stepTitle(t, steps[data.current_step - 1])}` : ''}
+              : data.current_step ? `${t('workflow.step', 'Step')} ${data.current_step} · ${stepTitle(t, data.steps[data.current_step - 1])}` : ''}
           </h3>
         </div>
-        <div className="wf-meter" title={`${doneCount}/7`}>
-          <div className="wf-meter-bar"><span style={{ width: `${(doneCount / 7) * 100}%` }} /></div>
-          <span className="wf-meter-txt">{doneCount}/7</span>
+        <div className="wf-meter" title={`${doneCount}/${steps.length}`}>
+          <div className="wf-meter-bar"><span style={{ width: `${(doneCount / steps.length) * 100}%` }} /></div>
+          <span className="wf-meter-txt">{doneCount}/{steps.length}</span>
           <button className="wf-icon-btn" onClick={() => load()} aria-label={t('workflow.refresh', 'Refresh')}><Refresh width={15} height={15} /></button>
         </div>
       </header>
@@ -265,7 +288,25 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
         })}
       </ol>
 
-      {data.next && !closed && (
+      {/* The next action is on the other page: say where, and link to it. */}
+      {data.next && !closed && (beyond || before) && (
+        <div className="wf-next">
+          <div className="wf-next-who">{data.next.who_key ? t(`workflow.who.${data.next.who_key}`, data.next.who) : '—'}</div>
+          <div className="wf-next-text">{t(`workflow.next.${data.next.key}`, { defaultValue: data.next.text, ...(data.next.params || {}) })}</div>
+          {beyond && hasModule(user, 'job-cards') && (
+            <button className="wf-btn primary" onClick={() => navigate(`/job-cards/${wo.id}`)}>
+              {t('workflow.open_job_card_page', 'Open job card {{n}}', { n: mainCard?.job_card_number || '' })} <NavArrowRight width={15} height={15} />
+            </button>
+          )}
+          {before && hasModule(user, 'work-orders') && (
+            <button className="wf-btn primary" onClick={() => navigate(`/work-orders/${wo.id}`)}>
+              {t('workflow.open_work_order', 'Open work order {{n}}', { n: wo.work_order_number })} <NavArrowRight width={15} height={15} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {data.next && !closed && !beyond && !before && (
         <div className={`wf-next${roles.can(NEXT_CAP[data.next.key]) ? ' is-mine' : ''}`}>
           {roles.can(NEXT_CAP[data.next.key]) && <div className="wf-next-mine">{t('workflow.your_turn', 'Your turn')}</div>}
           <div className="wf-next-who">{data.next.who_key ? t(`workflow.who.${data.next.who_key}`, data.next.who) : '—'}</div>
@@ -382,7 +423,7 @@ function ClassifyBody({ data, t, closed, mayOpen, manager, openClassify, onEditW
       <div className="wf-facts">
         <Fact label={t('workflow.customer', 'Customer')} value={wo.customer_name} />
         <Fact label={t('workflow.category', 'Main category')} value={wo.customer_class ? (wo.customer_class === 'internal' ? t('workflow.internal', 'Internal') : t('workflow.external', 'External')) : '—'} />
-        <Fact label={t('workflow.subcategory', 'Subcategory')} value={wo.customer_subcategory ? t(`workflow.val.sub_${wo.customer_subcategory}`, ({ fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', walkin: 'Walk-in' })[wo.customer_subcategory]) : '—'} />
+        <Fact label={t('workflow.subcategory', 'Subcategory')} value={wo.customer_subcategory ? t(`workflow.val.sub_${wo.customer_subcategory}`, SUB_NAMES[wo.customer_subcategory] || wo.customer_subcategory) : '—'} />
       </div>
       {wo.customer_id && !closed && mayClassify && (
         <button className="wf-btn ghost" onClick={openClassify}><User width={15} height={15} /> {wo.customer_class && wo.customer_subcategory ? t('workflow.reclassify', 'Change classification') : t('workflow.classify', 'Classify customer')}</button>
@@ -711,6 +752,13 @@ function TechInspectionBody({ data, t, closed, mayInspect, busy, onStart, onOpen
         <span className={`wf-pill ${tone}`}>{pill}</span>
       </div>
       <p className="wf-note">{status}</p>
+      {done && (
+        <p className="wf-note">
+          {ti.shared_at
+            ? t('workflow.ti_shared', 'Report sent to the customer ({{via}}) on {{date}}.', { via: ti.shared_via || '—', date: String(ti.shared_at).replace('T', ' ').slice(0, 16) })
+            : t('workflow.ti_not_shared', 'Not sent to the customer yet — open the report and send them their copy.')}
+        </p>
+      )}
       {(mayWrite || ti) && (
         <div className="wf-row">
           {mayWrite && (

@@ -102,6 +102,11 @@ const EMPTY_VEHICLE = {
   fuel_type: 'petrol', transmission: 'automatic',
 };
 
+/* The car an enquiry described — make, model and year only since the client
+ * meeting of 3 Nov 2026 — as the new-vehicle fields; null when it named none. */
+const enquiryCarOf = (e) => (e && (e.vehicle_make || e.vehicle_model || e.vehicle_year)
+  ? { make: e.vehicle_make || '', model: e.vehicle_model || '', year: e.vehicle_year ? String(e.vehicle_year) : '' } : null);
+
 let itemSeq = 0;
 const newItem = (over = {}) => ({ key: `i${++itemSeq}`, name: '', item_type: '', quantity: '1', unit_price: '', notes: '', ...over });
 
@@ -499,9 +504,12 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
           if (stale()) return;
           // The list row can be minutes old; edit what is on the server now.
           const wo = woRes?.success ? woRes.data : editOrder;
-          const [cRes, vRes] = await Promise.all([
+          const [cRes, vRes, eRes] = await Promise.all([
             wo.customer_id ? api.get(`/customers/${wo.customer_id}`).catch(() => null) : null,
             wo.vehicle_id ? api.get(`/vehicles/${wo.vehicle_id}`).catch(() => null) : null,
+            // An enquiry's work order with no car yet: the car the customer
+            // described starts "Add a new vehicle".
+            !wo.vehicle_id && wo.enquiry_id ? api.get(`/enquiries/${wo.enquiry_id}`).catch(() => null) : null,
           ]);
           if (stale()) return;
           const cust = cRes?.success ? cRes.data : null;
@@ -560,6 +568,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
             id: wo.id, number: wo.work_order_number, updatedAt: wo.updated_at ?? null, status: wo.status,
             closed, locked: !!lockReason, lockReason,
             origCustomer: cust, origVehicle: veh,
+            enquiryCar: veh ? null : enquiryCarOf(eRes?.success ? eRes.data : null),
             itemsSig: linesSig(loaded),
             hadCounter: loaded.length > 0 || Number(wo.service_fee) > 0 || Number(wo.discount) > 0,
             approvedAt: wo.customer_approved_at || null,
@@ -966,7 +975,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
         return null;
       }
       if (customerClass === 'internal' && !internalSub) {
-        return { msg: 'Choose the internal subcategory — Fleet, Insurance or Asset.', fields: ['internalSub'] };
+        return { msg: 'Choose the internal subcategory — Fleet, Insurance, Asset or Staff.', fields: ['internalSub'] };
       }
       if (!customerId) {
         if (customerClass === 'internal') {
@@ -1582,6 +1591,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                             { v: 'fleet', label: t('orders.form.sub_fleet', 'Fleet'), Icon: Truck },
                             { v: 'insurance', label: t('orders.form.sub_insurance', 'Insurance'), Icon: ShieldCheck },
                             { v: 'asset', label: 'Asset', Icon: Box },
+                            // Client point 12 (3 Nov 2026): Staff, internal-only like Asset.
+                            { v: 'staff', label: t('orders.form.sub_staff', 'Staff'), Icon: User },
                           ]} />
                       </>
                     )}
@@ -1953,7 +1964,12 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                       </div>
                     )}
                     <button type="button" style={st.addVehicleBtn}
-                      onClick={() => { setPickedVehicle(null); setOdometerIn(''); setAddingVehicle(true); }}>
+                      onClick={() => {
+                        setPickedVehicle(null); setOdometerIn(''); setAddingVehicle(true);
+                        // Make, model and year as asked at the enquiry, unless already typed.
+                        const car = editInfo?.enquiryCar;
+                        if (car) setNewVehicle(v => (v.make || v.model || v.year ? v : { ...v, ...car }));
+                      }}>
                       <Plus width={16} height={16} /> Add a new vehicle
                     </button>
 
@@ -2235,8 +2251,11 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                   value={partsPref.length ? PART_CATEGORIES.filter(c => partsPref.includes(c.value)).map(c => c.label).join(' · ') : '—'} />
                 {specialInstructions.trim() && <ReviewRow icon={Notes} label="Note for workshop" value={specialInstructions.trim()} pre />}
                 {scheduledAt && <ReviewRow icon={Calendar} label="Scheduled" value={new Date(scheduledAt).toLocaleString()} />}
-                <ReviewRow icon={Coins} label="Pricing" value={counterAllowed
-                  ? (hasCounterLines || totals.fee > 0
+                {/* Pricing is the estimate's, after the technical inspection (client
+                    review, 2 Nov 2026): only an older job priced at the counter
+                    still shows its lines here. */}
+                {counterAllowed && (
+                  <ReviewRow icon={Coins} label="Pricing" value={hasCounterLines || totals.fee > 0
                     ? <div>
                         {pricedLines.map(l => (
                           <div key={l.key} style={st.reviewLine}>
@@ -2246,8 +2265,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                         ))}
                         <div style={{ marginTop: 6 }}><TotalsBox totals={totals} fmt={fmt} compact /></div>
                       </div>
-                    : 'No counter pricing — the estimate is raised after the inspection.')
-                  : 'Priced on the estimate after the technical inspection (process steps 4–5).'} />
+                    : 'No counter pricing — the estimate is raised after the inspection.'} />
+                )}
                 {counterAllowed && <ReviewRow icon={Cash} label="Payment method" value={PAYMENT_METHODS.find(p => p.value === paymentMethod)?.label || paymentMethod} />}
               </div>
 

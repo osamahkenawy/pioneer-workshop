@@ -33,6 +33,7 @@ import { customerView } from '../lib/customer-status.js';
 import { saveBase64Signature } from './uploads.js';
 import { readDocs, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
 import { publicView as inspectionView, photosOf, openPhysicalJobCard } from './public-inspections.js';
+import { customerTechnicalReport } from './public-technical-reports.js';
 import { preferBearerToken } from '../lib/portal-access.js';
 
 const router = express.Router();
@@ -503,22 +504,25 @@ router.get('/work-orders', async (req, res) => {
 
 /**
  * GET /work-orders/:id — one job card for the customer: where it stands
- * (stages), its inspections (view + sign), the estimates sent, invoices.
+ * (stages), its inspections (view + sign), the technical report once
+ * completed (the link's view: jobs, service types, labour, parts' names —
+ * public-technical-reports.js), the estimates sent, invoices.
  * Whitelisted like the public status page: no staff, notes or costs.
  */
 router.get('/work-orders/:id', async (req, res) => {
   try {
     const wo = await ownWorkOrder(req, req.params.id);
     if (!wo) return res.status(404).json({ success: false, message: 'Job card not found' });
-    const [status, inspections, estimates, invoices] = await Promise.all([
+    const [status, inspections, estimates, invoices, technicalReport] = await Promise.all([
       customerView(wo.id, req.workshopId),
       ownInspections(req, { workOrderId: wo.id }),
       ownEstimates(req, { workOrderId: wo.id }),
       ownInvoices(req, { workOrderId: wo.id }),
+      customerTechnicalReport(wo.id, req.workshopId),
     ]);
     return res.json({
       success: true,
-      data: { work_order_id: wo.id, status, inspections: inspections.map(portalInspection), estimates, invoices },
+      data: { work_order_id: wo.id, status, inspections: inspections.map(portalInspection), technical_report: technicalReport, estimates, invoices },
     });
   } catch (err) {
     console.error('[CustomerPortal] Work order detail error:', err);

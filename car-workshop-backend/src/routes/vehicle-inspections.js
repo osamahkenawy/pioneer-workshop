@@ -14,7 +14,7 @@ import { can } from '../lib/roles.js';
 import { isTechnician } from '../lib/access.js';
 import { customerAppBase } from '../lib/customer-link.js';
 import { woLabel } from '../lib/status-labels.js';
-import { IMAGE_COORD, DAMAGE_CODES } from '../lib/inspection-marks.js';
+import { IMAGE_COORD, DAMAGE_CODES, damageCodeOf } from '../lib/inspection-marks.js';
 import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { checkOdometer, ODOMETER_REQUIRED } from '../lib/intake-rules.js';
 
@@ -57,15 +57,18 @@ const photoUpload = multer({
  *  Vehicle Inspection Form — the walk-around damage check
  * ═══════════════════════════════════════════════════════════════════
  *
- * Backs the visual inspection form: a car diagram the inspector clicks to
- * drop damage markers (damage codes: DS deep scratch, DD dents/dings, ...),
- * with vehicle photos, done with the customer present at drop-off — the
- * physical inspection, inspection_type 'intake' (Step 3) — and again at
- * handover (Step 7).
+ * Backs the visual inspection form: a car diagram the inspector taps to mark
+ * where there is damage (tap a marker again to remove it), with vehicle
+ * photos, done with the customer present at drop-off — the physical
+ * inspection, inspection_type 'intake' (Step 3) — and again at handover
+ * (Step 7).
  *
  * Markers are stored in `vehicle_inspections.marks` as JSON —
- *   [{ id, view: top|left|right|front|rear, code, x: 0..1, y: 0..1, coord?: 'img', note }]
- * — x/y normalised. With coord 'img' (every marker placed since 2026-10) they
+ *   [{ id, view: top|left|right|front|rear, code?, x: 0..1, y: 0..1, coord?: 'img', note }]
+ * — x/y normalised. There is no damage type since 3 Nov 2026 (client
+ * review): a new marker has no `code`; older ones keep theirs (DS deep
+ * scratch, DD dents/dings, ... — DAMAGE_CODES) and their note, and are still
+ * named wherever they are shown. With coord 'img' (every marker placed since 2026-10) they
  * are relative to the car picture, so they land on the same spot of the car
  * at any size: the staff form, its print-out, the customer's link and the job
  * sheet PDF. Without it (older markers) they are relative to the staff form's
@@ -109,6 +112,24 @@ router.use((req, res, next) => (isTechnician(req.user)
 const VIEWS = ['top', 'left', 'right', 'front', 'rear'];
 // The walk-arounds done with the customer; 'qc' is the workshop's own check.
 const CUSTOMER_FACING = ['intake', 'joint'];
+
+/* The physical inspection's header — who the customer is and which car — is
+ * all required to complete it (client review, 2 Nov 2026); the e-mail and
+ * the estimate fields stay optional. The header is the work order's and is
+ * not edited on the inspection (syncHeader). "-" and "N/A" (imported
+ * accounts) are not a value. */
+const REQUIRED_DETAILS = [
+  ['customer_name', 'name'], ['customer_phone', 'phone number'], ['vehicle_year', 'year'],
+  ['vehicle_make', 'make'], ['vehicle_model', 'model'], ['vin', 'VIN'], ['plate_number', 'plate'],
+];
+const blankish = v => { const s = String(v ?? '').trim(); return !s || /^[-–—.\s]*$/.test(s) || s.toUpperCase() === 'N/A'; };
+/* A number the link can go to: 7–20 digits with an optional +, the spaces,
+ * dashes and brackets people type ignored (the customers route's rule). */
+const phoneOk = v => /^\+?\d{7,20}$/.test(String(v ?? '')
+  .replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))
+  .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06F0))
+  .replace(/[\s\-().]/g, ''));
+const PHONE_INVALID = { code: 'PHONE_INVALID', fields: ['customer_phone'], message: "The customer's phone number on the work order isn't a valid number — correct it on the customer's record, then complete the inspection." };
 const SHARE_CHANNELS = ['whatsapp', 'email', 'link'];
 
 /**
@@ -164,19 +185,21 @@ export function inspectionLinkUrl(token) {
 // The damage types (lib/inspection-marks.js), re-exported for public-inspections.js.
 export { DAMAGE_CODES };
 
-// Keeps a stray click or a malformed payload from being persisted: anything
-// that isn't a known code / known view / in-range coordinate is dropped rather
-// than stored, since a marker with a bad view or x=1e9 renders nowhere.
+// Keeps a stray click or a malformed payload from being persisted: a marker
+// on an unknown view is dropped and coordinates are clamped, since a marker
+// with a bad view or x=1e9 renders nowhere. A marker needs no damage type
+// (client review, 3 Nov 2026): `code` is kept only when it is a known one —
+// an older marker's — and is left off otherwise.
 // `coord` survives only as 'img' (relative to the car picture); any other
 // value means an older, box-relative marker and is left off.
 function sanitizeMarks(marks) {
   if (!Array.isArray(marks)) return [];
   return marks
-    .filter(m => m && VIEWS.includes(m.view) && DAMAGE_CODES[m.code])
+    .filter(m => m && VIEWS.includes(m.view))
     .map((m, i) => ({
       id: String(m.id || `m${i + 1}`).slice(0, 40),
       view: m.view,
-      code: m.code,
+      ...(damageCodeOf(m) ? { code: m.code } : {}),
       x: Math.min(1, Math.max(0, Number(m.x) || 0)),
       y: Math.min(1, Math.max(0, Number(m.y) || 0)),
       ...(m.coord === IMAGE_COORD ? { coord: IMAGE_COORD } : {}),
@@ -226,6 +249,49 @@ async function workOrderOf(row) {
   const [wo] = await query('SELECT id, vehicle_id, odometer_in FROM work_orders WHERE id = ? AND workshop_id = ?',
     [row.work_order_id, row.workshop_id]);
   return wo || null;
+}
+
+/**
+ * A draft inspection's header is the work order's, read again whenever the
+ * inspection is opened or completed: the job's contact (else the customer's
+ * record), the car's details from its record and, on the physical
+ * inspection, this visit's reading. It is not edited on the inspection
+ * (client review, 2 Nov 2026) — a correction is made on the work order, the
+ * customer or the car, and the draft follows. A completed inspection is the
+ * signed record and keeps what it had. Adds work_order_odometer: the screen
+ * lets the reading be typed only while the work order has none.
+ */
+async function syncHeader(row) {
+  if (!row || row.status !== 'draft' || !row.work_order_id) return row;
+  const [w] = await query(
+    `SELECT wo.customer_name, wo.customer_phone, wo.customer_email, wo.odometer_in,
+            c.full_name AS c_name, c.phone AS c_phone, c.email AS c_email,
+            v.year AS v_year, v.make AS v_make, v.model AS v_model, v.vin AS v_vin, v.plate_number AS v_plate
+       FROM work_orders wo
+       LEFT JOIN customers c ON c.id = wo.customer_id
+       LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+      WHERE wo.id = ? AND wo.workshop_id = ?`,
+    [row.work_order_id, row.workshop_id]
+  );
+  if (!w) return row;
+  const first = (...vs) => vs.map(v => (v == null ? '' : String(v).trim())).find(v => !blankish(v)) || null;
+  const next = {
+    customer_name: first(w.customer_name, w.c_name),
+    customer_phone: first(w.customer_phone, w.c_phone),
+    customer_email: first(w.customer_email, w.c_email),
+    vehicle_year: w.v_year != null ? String(w.v_year) : null,
+    vehicle_make: first(w.v_make),
+    vehicle_model: first(w.v_model),
+    vin: first(w.v_vin),
+    plate_number: first(w.v_plate),
+  };
+  if (row.inspection_type === 'intake' && w.odometer_in != null) next.odometer = Number(w.odometer_in);
+  const keys = Object.keys(next).filter(k => String(next[k] ?? '') !== String(row[k] ?? ''));
+  if (keys.length) {
+    await execute(`UPDATE vehicle_inspections SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ? AND status = 'draft'`,
+      [...keys.map(k => next[k]), row.id]);
+  }
+  return { ...row, ...next, work_order_odometer: w.odometer_in ?? null };
 }
 
 /**
@@ -285,7 +351,7 @@ router.get('/:id', async (req, res) => {
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
-    return res.json({ success: true, data: parseMarks(row) });
+    return res.json({ success: true, data: parseMarks(await syncHeader(row)) });
   } catch (err) {
     console.error('[VehicleInspections] Get error:', err);
     return res.status(500).json({ success: false, message: 'Failed to load inspection' });
@@ -330,7 +396,7 @@ router.post('/', async (req, res) => {
         'SELECT * FROM vehicle_inspections WHERE work_order_id = ? AND inspection_type = ? AND workshop_id = ?',
         [work_order_id, inspection_type, req.workshopId]
       );
-      return row ? res.json({ success: true, data: parseMarks(row), reused: true }) : null;
+      return row ? res.json({ success: true, data: parseMarks(await syncHeader(row)), reused: true }) : null;
     };
     const [existing] = await query(
       'SELECT id FROM vehicle_inspections WHERE work_order_id = ? AND inspection_type = ? AND workshop_id = ?',
@@ -374,7 +440,7 @@ router.post('/', async (req, res) => {
     );
 
     const [row] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [result.insertId]);
-    return res.status(201).json({ success: true, data: parseMarks(row) });
+    return res.status(201).json({ success: true, data: parseMarks(await syncHeader(row)) });
   } catch (err) {
     // Lost the race against a concurrent create for the same work order and
     // type — hand back the row that won instead of failing the request.
@@ -397,17 +463,16 @@ router.post('/', async (req, res) => {
 router.put('/:id', recordGuard, async (req, res) => {
   try {
     const [row] = await query(
-      'SELECT id, workshop_id, work_order_id, vehicle_id, status, odometer FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
+      `SELECT id, workshop_id, work_order_id, vehicle_id, inspection_type, status, odometer
+         FROM vehicle_inspections WHERE id = ? AND workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
     if (row.status === 'completed') return res.status(409).json({ success: false, message: 'This inspection is completed; it can no longer be changed.' });
 
-    const editable = [
-      'estimate_date', 'original_estimate', 'customer_name', 'customer_phone', 'customer_email',
-      'vehicle_year', 'vehicle_make', 'vehicle_model', 'vin', 'plate_number',
-      'service_recommended', 'service_accepted', 'notes', 'job_card_id',
-    ];
+    // Not the header (customer, car, estimate date and amount): it is the
+    // work order's (syncHeader), corrected there.
+    const editable = ['service_recommended', 'service_accepted', 'notes', 'job_card_id'];
     // Not signature_url: the signature is written only by PATCH /:id/signature
     // and the customer's link, which check the image and stamp signed_at / signed_via.
     const fields = [];
@@ -415,15 +480,16 @@ router.put('/:id', recordGuard, async (req, res) => {
     for (const f of editable) {
       if (req.body[f] !== undefined) { fields.push(`${f} = ?`); values.push(req.body[f] === '' ? null : req.body[f]); }
     }
-    // The odometer: a whole number, never below the car's previous reading.
-    // Checked when it changes — the reading already on the form passed.
-    // Blank is allowed on a draft; completing the physical inspection asks
-    // for it.
-    if (req.body.odometer !== undefined) {
+    // The odometer is the work order's too; it is typed here only on the
+    // physical inspection of an older job that has no reading yet (completing
+    // puts it on the work order). A whole number, never below the car's
+    // previous reading; blank is allowed on a draft.
+    const woNow = req.body.odometer !== undefined && row.inspection_type === 'intake' ? await workOrderOf(row) : null;
+    if (woNow && woNow.odometer_in == null) {
       const odo = parseReading(req.body.odometer);
       if (odo.error) return res.status(400).json({ success: false, code: 'INVALID_ODOMETER', message: odo.error });
       if (odo.value != null && odo.value !== (row.odometer == null ? null : Number(row.odometer))) {
-        const chk = await odometerCheck(odo.value, row, await workOrderOf(row));
+        const chk = await odometerCheck(odo.value, row, woNow);
         if (chk?.status) return res.status(chk.status).json(chk.body);
       }
       fields.push('odometer = ?'); values.push(odo.value);
@@ -447,13 +513,17 @@ router.put('/:id', recordGuard, async (req, res) => {
     if (req.body.customer_present !== undefined) {
       fields.push('customer_present = ?'); values.push(toFlag(req.body.customer_present));
     }
-    if (!fields.length) return res.status(400).json({ success: false, message: 'No fields to update' });
+    if (!fields.length) {
+      // Only header fields were sent: nothing of them is saved, and that is not an error.
+      const [same] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
+      return res.json({ success: true, data: parseMarks(await syncHeader(same)) });
+    }
 
     values.push(req.params.id, req.workshopId);
     await execute(`UPDATE vehicle_inspections SET ${fields.join(', ')} WHERE id = ? AND workshop_id = ?`, values);
 
     const [updated] = await query('SELECT * FROM vehicle_inspections WHERE id = ?', [req.params.id]);
-    return res.json({ success: true, data: parseMarks(updated) });
+    return res.json({ success: true, data: parseMarks(await syncHeader(updated)) });
   } catch (err) {
     console.error('[VehicleInspections] Update error:', err);
     return res.status(500).json({ success: false, message: 'Failed to save inspection' });
@@ -655,11 +725,13 @@ async function jobCardAfter(row, userId) {
  */
 router.patch('/:id/complete', recordGuard, async (req, res) => {
   try {
-    const [row] = await query(
+    let [row] = await query(
       'SELECT * FROM vehicle_inspections WHERE id = ? AND workshop_id = ?',
       [req.params.id, req.workshopId]
     );
     if (!row) return res.status(404).json({ success: false, message: 'Inspection not found' });
+    // What the work order says now is what the customer signs.
+    row = await syncHeader(row);
     // A second call (a double click, a retry) changes nothing: completed_at and
     // inspected_by are on the customer's copy and decide who hears it was signed.
     if (row.status === 'completed') return res.json({ success: true, data: parseMarks(row), already_completed: true, job_card: await jobCardAfter(row, req.user.id) });
@@ -669,14 +741,25 @@ router.patch('/:id/complete', recordGuard, async (req, res) => {
     // Filled in on screen, the walk-around ends with the customer's signature
     // (the paper form carries its own). Unsigned only when the customer is not
     // at the car — they sign from the link instead (POST /:id/share).
+    // The physical inspection's header must be complete: who the customer is and which car.
+    if (row.inspection_type === 'intake') {
+      const missing = REQUIRED_DETAILS.filter(([k]) => blankish(row[k]));
+      if (missing.length) {
+        return res.status(400).json({
+          success: false, code: 'INSPECTION_DETAILS_REQUIRED', fields: missing.map(([k]) => k),
+          message: `Missing on the work order: ${missing.map(([, l]) => l).join(', ')}. Add ${missing.length > 1 ? 'them' : 'it'} to the work order (its customer and car), then complete the inspection.`,
+        });
+      }
+      if (!phoneOk(row.customer_phone)) return res.status(400).json({ success: false, ...PHONE_INVALID });
+    }
     const customerPresent = req.body?.customer_present !== undefined ? toFlag(req.body.customer_present) : (row.customer_present ? 1 : 0);
     if (row.entry_mode !== 'document' && CUSTOMER_FACING.includes(row.inspection_type) && customerPresent && !row.signature_url) {
       return res.status(400).json({ success: false, code: 'SIGNATURE_REQUIRED', message: SIGNATURE_REQUIRED_MSG });
     }
     // The physical inspection records the odometer (client review, 2 Nov
     // 2026): the form's reading, else the work order's; none at all is
-    // refused, and so is one below the car's previous reading unless a
-    // manager confirms it. The handover inspection keeps it optional.
+    // refused, and so is one below the car's previous reading. The handover
+    // inspection keeps it optional.
     let odometer = row.odometer == null ? null : Number(row.odometer);
     let wo = null;
     if (row.inspection_type === 'intake') {

@@ -31,6 +31,7 @@ const anyCapability = caps => (req, res, next) => caps.some(c => can(req.user, c
   : res.status(403).json({ success: false, code: 'ROLE_NOT_ALLOWED', message: "Your role can't do this." });
 import { applyStatusChange } from './work-orders.js';
 import { parseJobTypes, jobTypesOf } from '../lib/intake-rules.js';
+import { partsRequestMissing } from '../lib/parts-request.js';
 import { createInvoiceFromWorkOrder } from './invoices.js';
 
 const router = express.Router();
@@ -60,7 +61,8 @@ router.get('/my-tasks', async (req, res) => {
       const rows = await query(listSql + ' LIMIT 8', params);
       groups.push({ capability, kind, title, total: Number(n), items: rows.map(map) });
     };
-    const woItem = r => ({ id: r.id, title: r.work_order_number, subtitle: [r.plate_number, r.customer_name].filter(Boolean).join(' · '), link: `/work-orders/${r.id}`, at: r.at });
+    // These tasks are on jobs whose job card is open: they link to the Job Cards module.
+    const woItem = r => ({ id: r.id, title: r.work_order_number, subtitle: [r.plate_number, r.customer_name].filter(Boolean).join(' · '), link: `/job-cards/${r.id}`, at: r.at });
     const WO_BASE = `FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id
                      WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled')
                        AND EXISTS (SELECT 1 FROM job_cards jc WHERE jc.work_order_id = wo.id AND jc.status <> 'cancelled')`;
@@ -190,17 +192,17 @@ router.get('/my-tasks', async (req, res) => {
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${ASSIGN_SUB_WHERE}`,
       `SELECT wo.id, wo.work_order_number, jc.title, jc.job_card_number, jc.created_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
         WHERE ${ASSIGN_SUB_WHERE} ORDER BY jc.created_at`,
-      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title ? ` · ${r.title}` : ''}`, link: `/work-orders/${r.id}`, at: r.at }));
+      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title ? ` · ${r.title}` : ''}`, link: `/job-cards/${r.id}`, at: r.at }));
     await add('qc.perform', 'qc', 'Quality check & test drive',
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${QC_WHERE}`,
       `SELECT wo.id, wo.work_order_number, wo.customer_name, jc.job_card_number, jc.title, jc.completed_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
         WHERE ${QC_WHERE} ORDER BY jc.completed_at`,
-      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title && r.title !== 'Main job card' ? ` · ${r.title}` : ''}`, link: `/work-orders/${r.id}`, at: r.at }));
+      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title && r.title !== 'Main job card' ? ` · ${r.title}` : ''}`, link: `/job-cards/${r.id}`, at: r.at }));
     await add('job.assign', 'rework', 'Rework after a failed quality check',
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${REWORK_WHERE}`,
       `SELECT wo.id, wo.work_order_number, jc.job_card_number, jc.qc_notes, jc.updated_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
         WHERE ${REWORK_WHERE} ORDER BY jc.updated_at`,
-      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.qc_notes ? ` · ${String(r.qc_notes).slice(0, 80)}` : ''}`, link: `/work-orders/${r.id}`, at: r.at }));
+      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.qc_notes ? ` · ${String(r.qc_notes).slice(0, 80)}` : ''}`, link: `/job-cards/${r.id}`, at: r.at }));
 
     res.json({ success: true, data: { capabilities: capabilitiesOf(req.user), groups } });
   } catch (err) {
@@ -314,6 +316,11 @@ router.post('/work-orders/:id/sub-job-cards', anyCapability(['job.open', 'job.as
     // once the customer has acknowledged the physical inspection.
     const { jobCard: main } = await openJobCardIfReady({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
     if (!main) return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
+    // A technician on it means the parts were requested first (lib/parts-request.js).
+    if (mechanicId) {
+      const mrn = await partsRequestMissing({ workOrderId: wo.id, workshopId: req.workshopId });
+      if (mrn) return res.status(409).json({ success: false, ...mrn });
+    }
     const [veh] = wo.vehicle_id ? await query('SELECT plate_number FROM vehicles WHERE id = ?', [wo.vehicle_id]) : [];
 
     let jcId, number;
@@ -337,7 +344,7 @@ router.post('/work-orders/:id/sub-job-cards', anyCapability(['job.open', 'job.as
     await notifyGroups(req.workshopId, FLOOR, {
       title: `Sub-job card ${number}: ${title}`,
       body: `${wo.work_order_number} — part of the approved work moved to its own job card.${mechanicId ? '' : ' Needs a technician.'}`,
-      link: `/work-orders/${wo.id}`, orderId: wo.id, icon: '🧩', type: `workflow_sub_jc_${jcId}`, exceptUserId: req.user.id,
+      link: `/job-cards/${wo.id}`, orderId: wo.id, icon: '🧩', type: `workflow_sub_jc_${jcId}`, exceptUserId: req.user.id,
     });
     if (mechanicId) {
       await notifyMechanic(req.workshopId, mechanicId, {
@@ -369,6 +376,8 @@ router.patch('/job-cards/:id/technician', async (req, res) => {
     if (!jc.parent_job_card_id) return res.status(400).json({ success: false, message: 'Assign the main job card from the work order (Team Leader board).' });
     const [m] = await query('SELECT id, full_name FROM mechanics WHERE id = ? AND workshop_id = ?', [req.body?.mechanic_id, req.workshopId]);
     if (!m) return res.status(404).json({ success: false, message: 'Technician not found' });
+    const mrn = await partsRequestMissing({ workOrderId: jc.work_order_id, workshopId: req.workshopId });
+    if (mrn) return res.status(409).json({ success: false, ...mrn });
     await execute('UPDATE job_cards SET mechanic_id = ? WHERE id = ?', [m.id, jc.id]);
     await notifyMechanic(req.workshopId, m.id, {
       title: `Job assigned: ${jc.work_order_number} · ${jc.title || jc.job_card_number}`, body: `Sub-job card ${jc.job_card_number}.`,
@@ -482,7 +491,7 @@ router.patch('/requisition-items/:id', async (req, res) => {
       await notifyGroups(req.workshopId, FLOOR, {
         title: `Part not on the shelf: ${item.work_order_number}`,
         body: `${item.description} for ${item.job_card_number} — expected ${expected}. The floor will be alerted 24 hours before.`,
-        link: `/work-orders/${item.work_order_id}`, orderId: item.work_order_id, icon: '⏳', type: `workflow_part_eta_${item.id}`, exceptUserId: req.user.id,
+        link: `/job-cards/${item.work_order_id}`, orderId: item.work_order_id, icon: '⏳', type: `workflow_part_eta_${item.id}`, exceptUserId: req.user.id,
       });
       if (item.mechanic_id) {
         await notifyMechanic(req.workshopId, item.mechanic_id, {

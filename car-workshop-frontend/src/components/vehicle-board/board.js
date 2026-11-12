@@ -90,8 +90,8 @@ export const BADGE_EN = {
 export const DEPARTMENTS = ['mechanical', 'body_paint', 'electrical', 'tyres', 'other'];
 export const DEPT_EN = { mechanical: 'Mechanical', body_paint: 'Body & paint', electrical: 'Electrical', tyres: 'Tyres', other: 'Other' };
 export const CLASS_EN = { internal: 'Internal', external: 'External' };
-export const SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'walkin'];
-export const SUB_EN = { fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', walkin: 'Walk-in' };
+export const SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'staff', 'walkin'];
+export const SUB_EN = { fleet: 'Fleet', insurance: 'Insurance', asset: 'Asset', staff: 'Staff', walkin: 'Walk-in' };
 
 // ─── Labels ────────────────────────────────────────────────────
 

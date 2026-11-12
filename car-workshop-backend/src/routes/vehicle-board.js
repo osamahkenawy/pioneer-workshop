@@ -46,7 +46,7 @@ router.use(authMiddleware);
 
 const DEPARTMENTS = ['mechanical', 'body_paint', 'electrical', 'tyres', 'other'];
 const CLASSES = ['internal', 'external'];
-const SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'walkin'];
+const SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'staff', 'walkin'];
 
 // The board is for the people who run the floor and the front desk.
 router.use((req, res, next) => {

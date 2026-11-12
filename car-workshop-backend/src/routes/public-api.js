@@ -10,7 +10,10 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { onEnquiryCreated, findCustomerByContact, enquiryContactMethods, openEnquiryWorkOrder } from '../lib/crm-cycle.js';
+import {
+  onEnquiryCreated, findCustomerByContact, enquiryContactMethods, openEnquiryWorkOrder,
+  parseEmirate, parseVehicleYear, enquiryVehicleText,
+} from '../lib/crm-cycle.js';
 import { parsePartsPreference } from '../lib/intake-rules.js';
 import { query, execute } from '../lib/database.js';
 import { sendEmail, buildEmailTemplate, getWorkshopBranding, getLogoCidAttachment } from '../lib/email.js';
@@ -773,6 +776,12 @@ router.post('/check-availability', async (req, res) => {
    (or parts_preference) — the parts the customer accepts, ['genuine',
    'after_market', 'used'] in any combination or 'genuine,used'; carried to
    the work order. Without it the Service Advisor asks.
+
+   The car (client meeting, 2026-11-03): make, model and year, nested
+   { vehicle: { make, model, year } } as before or flat { make, model, year };
+   vehicle.plateNumber is still accepted. emirate (optional) — one of the
+   seven, any case ('ras al-khaimah'). A year that is not 4 digits from 1950
+   to next year, or an unknown emirate, is a 422 with the field named.
    =========================================== */
 
 // CORS for this route is mounted in server.js, ahead of the global cors()
@@ -801,7 +810,7 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     const email = b.email        != null ? b.email        : nested.email;
     const phone = b.phone        != null ? b.phone        : nested.phone;
     const { service, notes, message, branch, preferredDate, source, reference } = b;
-    const vehicle = b.vehicle || {};
+    const vehicle = b.vehicle && typeof b.vehicle === 'object' ? b.vehicle : {};
     const note = notes != null ? notes : message;
 
     const blank = v => v === undefined || v === null || String(v).trim() === '';
@@ -824,6 +833,10 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     if (partsPref.error) {
       errors.push({ field: b.partsPreference != null ? 'partsPreference' : 'parts_preference', message: partsPref.error });
     }
+    const emirate = parseEmirate(b.emirate);
+    if (emirate.error) errors.push({ field: 'emirate', message: emirate.error });
+    const carYear = parseVehicleYear(vehicle.year ?? b.year);
+    if (carYear.error) errors.push({ field: vehicle.year != null ? 'vehicle.year' : 'year', message: carYear.error });
     if (errors.length) {
       return res.status(422).json({ success: false, message: 'Please check the form', errors });
     }
@@ -851,8 +864,9 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
     const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
     let enquiryNumber = null;
 
-    const vehicleDescription = [vehicle.make, vehicle.model, vehicle.year]
-      .filter(v => !blank(v)).map(v => String(v).trim()).join(' ') || null;
+    const carMake = stripMarkup(blank(vehicle.make ?? b.make) ? null : String(vehicle.make ?? b.make).trim(), 100);
+    const carModel = stripMarkup(blank(vehicle.model ?? b.model) ? null : String(vehicle.model ?? b.model).trim(), 100);
+    const vehicleDescription = enquiryVehicleText(carMake, carModel, carYear.value);
 
     const cleanPhone = blank(phone) ? null : stripMarkup(String(phone).trim(), 32);
     const cleanEmail = blank(email) ? null : stripMarkup(String(email).trim(), 190);
@@ -877,8 +891,8 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
         result = await execute(
           `INSERT INTO enquiries
              (workshop_id, enquiry_number, external_reference, customer_id,
-              contact_name, contact_phone, contact_email,
-              vehicle_description, vehicle_plate,
+              contact_name, contact_phone, contact_email, emirate,
+              vehicle_description, vehicle_make, vehicle_model, vehicle_year, vehicle_plate,
               enquiry_type, description, parts_preference,
               source_channel, source_detail, contact_method,
               branch, service_requested, preferred_date,
@@ -886,11 +900,11 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
            -- intake_origin is enum('internal','api'); this arrives over the API.
            -- source_detail plus contact_method='website_form' (or 'social') identify
            -- it as the public form rather than a keyed server-to-server caller.
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
           [
             workshopId, enquiryNumber, extRef, known ? known.id : null,
-            stripMarkup(String(name).trim()), cleanPhone, cleanEmail,
-            stripMarkup(vehicleDescription, 255),
+            stripMarkup(String(name).trim()), cleanPhone, cleanEmail, emirate.value ?? null,
+            stripMarkup(vehicleDescription, 255), carMake, carModel, carYear.value ?? null,
             blank(vehicle.plateNumber) ? null : stripMarkup(String(vehicle.plateNumber).trim(), 30),
             mapEnquiryType(service),
             blank(note) ? null : clampText(String(note).trim()),

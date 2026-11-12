@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef, useContext } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Group, User, Search, EditPencil, Trash, Plus,
   Mail, Phone, Building, MapPin, Download, NavArrowRight, NavArrowLeft,
   WarningTriangle, Xmark, CheckCircle, Package, Car, PasteClipboard,
-  StatsUpSquare, Wallet, Filter, Eye, Clock,
+  StatsUpSquare, Wallet, Filter, Eye, Clock, Megaphone,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { MakeSelect, ModelSelect } from '../components/MakeModelSelect';
@@ -14,6 +14,8 @@ import PhoneInputShared from '../components/PhoneInput';
 import { useTranslation } from 'react-i18next';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
+import { hasModule } from '../lib/modules';
+import CustomersTabs from '../components/CustomersTabs';
 import { downloadCsv, toCsv, csvCell } from '../utils/csv';
 import { woLabel, woTone } from '../lib/statusLabels';
 import { VEHICLE_TYPES } from '../lib/intakeOptions';
@@ -36,9 +38,9 @@ const TYPE_META = {
 };
 
 // Step 1 of the workshop workflow classifies every customer: Internal
-// (Fleet / Insurance / Asset) or External (Fleet / Insurance / Walk-in).
-// Asset is internal-only and Walk-in external-only — the server refuses the
-// other combinations with a 400, so the form never offers them.
+// (Fleet / Insurance / Asset / Staff) or External (Fleet / Insurance / Walk-in).
+// Asset and Staff are internal-only and Walk-in external-only — the server
+// refuses the other combinations with a 400, so the form never offers them.
 const CLASS_META = {
   internal: { bg: '#e0e7ff', color: '#3730a3' },
   external: { bg: '#f1f5f9', color: '#334155' },
@@ -47,13 +49,29 @@ const SUB_META = {
   fleet:     { bg: '#dcfce7', color: '#15803d' },
   insurance: { bg: '#dbeafe', color: '#1d4ed8' },
   asset:     { bg: '#fae8ff', color: '#a21caf' },
+  staff:     { bg: '#ccfbf1', color: '#0f766e' },
   walkin:    { bg: '#ffedd5', color: '#c2410c' },
 };
 const SUBS_BY_CLASS = {
-  internal: ['fleet', 'insurance', 'asset'],
+  internal: ['fleet', 'insurance', 'asset', 'staff'],
   external: ['fleet', 'insurance', 'walkin'],
 };
-const ALL_SUBS = ['fleet', 'insurance', 'asset', 'walkin'];
+const ALL_SUBS = ['fleet', 'insurance', 'asset', 'staff', 'walkin'];
+
+// "Include the entity names under Customer Type" (client point 12): an
+// internal account is one of the group's own entities (AMAN TAXI, …), so its
+// customer type reads as that entity, not Retail / Corporate / Other. The
+// client's list of entity names is still to come.
+const entityOf = c => (c?.customer_class === 'internal' ? String(c.company_name || c.full_name || '').trim() || null : null);
+
+// The customer's enquiries in the drawer (GET /customers/:id → enquiries).
+const ENQUIRY_STATUS = {
+  new:       { label: 'New',       color: '#2563eb', bg: '#eff6ff' },
+  quoted:    { label: 'Quoted',    color: '#B77900', bg: '#FDF2D6' },
+  converted: { label: 'Converted', color: '#16a34a', bg: '#f0fdf4' },
+  nurture:   { label: 'Nurture',   color: '#7c3aed', bg: '#ede9fe' },
+  lost:      { label: 'Lost',      color: '#dc2626', bg: '#fef2f2' },
+};
 
 const CATEGORIES = ['mechanical','body_paint','electrical','tyres','ac_service','inspection','other'];
 const INPUT = { width:'100%', padding:'10px 13px', borderRadius:9, border:'1px solid #e2e8f0', fontSize:14, boxSizing:'border-box', outline:'none' };
@@ -140,6 +158,7 @@ function classLabels(t) {
       fleet: t('customers.class.fleet', 'Fleet'),
       insurance: t('customers.class.insurance', 'Insurance'),
       asset: t('customers.class.asset', 'Asset'),
+      staff: t('customers.class.staff', 'Staff'),
       walkin: t('customers.class.walkin', 'Walk-in'),
     },
   };
@@ -362,6 +381,9 @@ export default function Customers() {
   // server's rule in routes/customers.js: Service Advisor and managers).
   const mayInvite = canDo(user, 'estimate.raise') || canDo(user, 'customer.approval') || canDo(user, 'delivery.handover');
   const manager = isManager(user);
+  // The Enquiries tab's key: the drawer lists the customer's enquiries only
+  // to a role that can open them.
+  const mayEnquiries = hasModule(user, 'enquiries');
   const [customers,       setCustomers]       = useState([]);
   const [stats,         setStats]         = useState({ total: 0, active: 0, business: 0, fleet: 0, total_work_orders: 0 });
   const [loading,       setLoading]       = useState(true);
@@ -488,6 +510,20 @@ export default function Customers() {
     setDrawerLoading(false);
   };
 
+  // ?highlight=<customer> (links from Enquiries and Vehicles) opens that customer.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    const id = params.get('highlight');
+    if (!id) return;
+    const next = new URLSearchParams(params); next.delete('highlight'); setParams(next, { replace: true });
+    (async () => {
+      try {
+        const res = await api.get(`/customers/${encodeURIComponent(id)}`);
+        if (res.success && res.data) { setDrawer(res.data); setDrawerWorkOrders(res.data.work_orders || []); }
+      } catch { /* the list is still there */ }
+    })();
+  }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const openEdit = (c, e) => {
     e?.stopPropagation();
     setSelected(c);
@@ -525,8 +561,8 @@ export default function Customers() {
     }
     if (step === 2 && form.customer_class === 'internal' && !form.customer_subcategory) {
       // An internal account with no subcategory never shows up in the job
-      // card wizard, which lists internal accounts by Fleet/Insurance/Asset.
-      setFormError(t('customers.validation.internal_sub_required', 'Choose Fleet, Insurance or Asset for an internal customer.'));
+      // card wizard, which lists internal accounts by Fleet/Insurance/Asset/Staff.
+      setFormError(t('customers.validation.internal_sub_pick', 'Choose Fleet, Insurance, Asset or Staff for an internal customer.'));
       return false;
     }
     setFormError('');
@@ -564,7 +600,7 @@ export default function Customers() {
     }
     if (payload.customer_class === 'internal' && !payload.customer_subcategory) {
       setSaving(false); setStep(2);
-      setFormError(t('customers.validation.internal_sub_required', 'Choose Fleet, Insurance or Asset for an internal customer.'));
+      setFormError(t('customers.validation.internal_sub_pick', 'Choose Fleet, Insurance, Asset or Staff for an internal customer.'));
       return;
     }
     if (selected && !manager) {
@@ -649,7 +685,7 @@ export default function Customers() {
     if (statusFilter === 'inactive') filtered = filtered.filter(c => !c.is_active);
     const headers = ['ID','Name','Company','Type','Class','Subcategory','Phone','Email','City','WorkOrders','Completed','Credit Limit','Status'];
     const rows = filtered.map(c => [
-      c.id, c.full_name, c.company_name||'', TYPE_META[c.type]?.label||c.type,
+      c.id, c.full_name, c.company_name||'', entityOf(c) || TYPE_META[c.type]?.label || c.type,
       c.customer_class||'', c.customer_subcategory||'',
       c.phone, c.email||'', c.city||'',
       woCount(c), woDone(c), c.credit_limit||0,
@@ -672,7 +708,7 @@ export default function Customers() {
     ...p,
     customer_class: cls,
     // Keep the subcategory if it is valid for the new class (fleet, insurance);
-    // drop it if not (asset is internal-only, walk-in external-only).
+    // drop it if not (asset and staff are internal-only, walk-in external-only).
     customer_subcategory: SUBS_BY_CLASS[cls].includes(p.customer_subcategory) ? p.customer_subcategory : '',
   }));
   const activeCount  = customers.filter(c => !!c.is_active).length;
@@ -681,6 +717,7 @@ export default function Customers() {
   /* ── Render ── */
   return (
     <div className="page-container">
+      <CustomersTabs />
 
       {/* Page Header */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:24, flexWrap:'wrap', gap:12 }}>
@@ -843,7 +880,10 @@ export default function Customers() {
                           </div>
                         </td>
                         <td style={{ padding:'13px 16px' }}>
-                          <span style={{ background:tm.bg, color:tm.color, padding:'4px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>{tm.label}</span>
+                          {entityOf(customer)
+                            ? <span title={entityOf(customer)} style={{ display:'inline-block', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', verticalAlign:'bottom',
+                                background:CLASS_META.internal.bg, color:CLASS_META.internal.color, padding:'4px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>{entityOf(customer)}</span>
+                            : <span style={{ background:tm.bg, color:tm.color, padding:'4px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>{tm.label}</span>}
                           {customer.customer_class && (
                             <div style={{ marginTop:6 }}>
                               <ClassBadge cls={customer.customer_class} sub={customer.customer_subcategory} small />
@@ -993,7 +1033,13 @@ export default function Customers() {
                   <div style={{ marginTop:8, display:'flex', gap:8, flexWrap:'wrap' }}>
                     <StatusPill active={!!drawer.is_active} />
                     {drawer.customer_class && <ClassBadge cls={drawer.customer_class} sub={drawer.customer_subcategory} />}
-                    {drawer.type && (
+                    {entityOf(drawer) ? (
+                      <span title={t('customers.class.entity', 'Customer type: the entity')}
+                        style={{ background:CLASS_META.internal.bg, color:CLASS_META.internal.color,
+                          padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>
+                        {entityOf(drawer)}
+                      </span>
+                    ) : drawer.type && (
                       <span style={{ background:TYPE_META[drawer.type]?.bg, color:TYPE_META[drawer.type]?.color,
                         padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:700 }}>
                         {TYPE_META[drawer.type]?.label}
@@ -1128,6 +1174,40 @@ export default function Customers() {
                               )}
                             </div>
                           </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Their enquiries — the Enquiries tab, one module with this one (client point 12). */}
+                  {mayEnquiries && drawer.enquiries?.length > 0 && (
+                    <div style={{ background:'#fff', borderRadius:14, padding:18, marginTop:16,
+                      boxShadow:'0 1px 3px rgba(0,0,0,0.07)' }}>
+                      <div style={{ fontWeight:700, fontSize:13, marginBottom:13, color:'#374151',
+                        display:'flex', justifyContent:'space-between', alignItems:'center',
+                        textTransform:'uppercase', letterSpacing:'0.05em' }}>
+                        <span style={{ display:'flex', alignItems:'center', gap:7 }}>
+                          <Megaphone width={15} height={15} color="#f97316" /> {t('customers.drawer.enquiries', 'Enquiries')}
+                        </span>
+                        <span style={{ color:'#94a3b8', fontSize:12, fontWeight:400, textTransform:'none' }}>{drawer.enquiries.length}</span>
+                      </div>
+                      {drawer.enquiries.map(e => {
+                        const sm = ENQUIRY_STATUS[e.status] || ENQUIRY_STATUS.new;
+                        return (
+                          <Link key={e.id} to={`/enquiries?id=${e.id}`}
+                            title={t('customers.drawer.open_enquiry', 'Open the enquiry')}
+                            style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10,
+                              padding:'9px 0', borderBottom:'1px solid #f8fafc', textDecoration:'none' }}>
+                            <div style={{ minWidth:0 }}>
+                              <div style={{ fontWeight:700, fontSize:13, color:'#1e293b' }}>{e.enquiry_number}</div>
+                              <div style={{ fontSize:11, color:'#94a3b8', marginTop:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                                {[e.created_at && new Date(String(e.created_at).replace(' ', 'T')).toLocaleDateString(), e.vehicle_description].filter(Boolean).join(' · ')}
+                              </div>
+                            </div>
+                            <span style={{ background:sm.bg, color:sm.color, padding:'3px 9px', borderRadius:20, fontSize:11, fontWeight:700, flexShrink:0 }}>
+                              {t(`customers.enquiry_status.${e.status}`, sm.label)}
+                            </span>
+                          </Link>
                         );
                       })}
                     </div>
@@ -1283,8 +1363,8 @@ export default function Customers() {
                   <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
 
                     {/* Step 1 classification: Internal / External, then the subcategory.
-                        Subcategory options follow the class — Asset only for
-                        Internal, Walk-in only for External. */}
+                        Subcategory options follow the class — Asset and Staff
+                        only for Internal, Walk-in only for External. */}
                     <div style={{ gridColumn:'1/-1' }}>
                       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
                         <div style={{ width:3, height:18, borderRadius:4, background:'#3730a3' }} />
@@ -1341,7 +1421,7 @@ export default function Customers() {
                       </div>
                       <div style={{ fontSize:11.5, color:'#94a3b8', marginTop:6 }}>
                         {form.customer_class === 'internal'
-                          ? t('customers.class.internal_hint', 'Asset is for internal customers only.')
+                          ? t('customers.class.internal_only_hint', 'Asset and Staff are for internal customers only.')
                           : t('customers.class.external_hint', 'Walk-in is for external customers only. Tap a selected subcategory again to clear it.')}
                       </div>
                       {!manager && (
@@ -1359,6 +1439,13 @@ export default function Customers() {
                           Customer Type <span style={{ color:'#f97316' }}>*</span>
                         </span>
                       </div>
+                      {/* An internal account is listed under Customer Type as its entity (client point 12). */}
+                      {form.customer_class === 'internal' && (
+                        <div style={{ fontSize:12, color:CLASS_META.internal.color, background:CLASS_META.internal.bg, borderRadius:10, padding:'8px 12px', marginBottom:10 }}>
+                          {t('customers.class.entity_hint', 'Internal account: the customer list shows its entity as the Customer Type — {{entity}}.',
+                            { entity: String(form.company_name || form.full_name || '').trim() || '—' })}
+                        </div>
+                      )}
                       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
                         {Object.entries(TYPE_META).map(([typeKey, meta]) => {
                           const isSelected = form.type === typeKey;

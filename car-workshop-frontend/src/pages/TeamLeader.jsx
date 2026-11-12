@@ -718,7 +718,7 @@ const Plate = ({ value }) => (value ? <bdi className="tb-plate">{value}</bdi> : 
 function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashActions, onAssign, onAddTech, onRestart }) {
   const { t } = useTranslation();
   const labelId = `tb-r-${kind}-${row.id}`;
-  const woLink = (id) => <Link to={`/work-orders/${row.work_order_id ?? row.id}`} id={id} className="tb-wo"><bdi>{row.work_order_number}</bdi></Link>;
+  const woLink = (id) => <Link to={`/job-cards/${row.work_order_id ?? row.id}`} id={id} className="tb-wo"><bdi>{row.work_order_number}</bdi></Link>;
   const vehicle = vehicleOf(row);
   const vehicleLine = (
     <>
@@ -729,7 +729,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
     </>
   );
   const openLink = (
-    <Link to={`/work-orders/${row.work_order_id ?? row.id}`} className="tb-btn ghost icon"
+    <Link to={`/job-cards/${row.work_order_id ?? row.id}`} className="tb-btn ghost icon"
       aria-label={`${t('teamBoard.open_job_card', 'Open job card')} ${row.work_order_number}`}>
       <OpenNewWindow width={16} height={16} />
     </Link>
@@ -801,7 +801,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
       </>
     );
     actions = (
-      <Link to={`/work-orders/${row.work_order_id}`} className="tb-btn accent">
+      <Link to={`/job-cards/${row.work_order_id}`} className="tb-btn accent">
         <ShieldCheck width={15} height={15} /> {t('teamBoard.quality_check', 'Quality check')}
       </Link>
     );
@@ -835,7 +835,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
             <Play width={15} height={15} /> {t('teamBoard.restart_time', 'Restart time')}
           </button>
         )}
-        <Link to={`/work-orders/${row.work_order_id}`} className="tb-btn ghost">{t('teamBoard.open_job_card', 'Open job card')}</Link>
+        <Link to={`/job-cards/${row.work_order_id}`} className="tb-btn ghost">{t('teamBoard.open_job_card', 'Open job card')}</Link>
       </>
     );
   }
@@ -995,8 +995,8 @@ function PauseForm({ name, jc, busy, onSubmit, onCancel }) {
 function StateDetail({ tech, links = false }) {
   const { t } = useTranslation();
   const c = tech.current;
-  const jc = c && (links ? <Link to={`/work-orders/${c.work_order_id}`}><bdi>{c.job_card_number}</bdi></Link> : <bdi>{c.job_card_number}</bdi>);
-  const wo = c && (links ? <Link to={`/work-orders/${c.work_order_id}`}><bdi>{c.work_order_number}</bdi></Link> : <bdi>{c.work_order_number}</bdi>);
+  const jc = c && (links ? <Link to={`/job-cards/${c.work_order_id}`}><bdi>{c.job_card_number}</bdi></Link> : <bdi>{c.job_card_number}</bdi>);
+  const wo = c && (links ? <Link to={`/job-cards/${c.work_order_id}`}><bdi>{c.work_order_number}</bdi></Link> : <bdi>{c.work_order_number}</bdi>);
   const next = parseDT(tech.next_booking_at);
   if (tech.state === 'working' && c) {
     const since = parseDT(tech.running_since);
@@ -1175,7 +1175,7 @@ function AssignDialog({ row, mode, technicians, bookings, data, scope, canManage
               })}
             </div>
             <p className="tb-hint">
-              <Link to={`/work-orders/${woId}`}>{t('teamBoard.not_listed_hint', 'Someone not listed? Assign from the job card (Step 6).')}</Link>
+              <Link to={`/job-cards/${woId}`}>{t('teamBoard.not_listed_hint', 'Someone not listed? Assign from the job card (Step 6).')}</Link>
             </p>
           </fieldset>
 
@@ -1461,7 +1461,7 @@ function TechRow({ tech, data, range, now, allTeams, canTime, busyKeys, error, c
                   <Play width={14} height={14} /> {tech.state === 'paused' ? t('workflow.resume', 'Resume') : t('workflow.start', 'Start')}
                 </button>
               )}
-              <Link to={`/work-orders/${c.work_order_id}`} className="tb-smalllink">
+              <Link to={`/job-cards/${c.work_order_id}`} className="tb-smalllink">
                 {t('teamBoard.open_job_card', 'Open job card')} <NavArrowRight width={13} height={13} className="tb-flip" aria-hidden="true" />
               </Link>
             </div>
@@ -1497,7 +1497,7 @@ function Lane({ tech, data, range, now }) {
           const label = t('teamBoard.block_aria', '{{wo}}, booked {{start}} to {{end}}', { wo: b.work_order_number, start: fmtHM(new Date(b.s)), end: fmtHM(new Date(b.e)) }) + late;
           const p = range.pct(b.s);
           return (
-            <Link key={b.work_order_id} to={`/work-orders/${b.work_order_id}`} aria-label={label} title={label}
+            <Link key={b.work_order_id} to={`/job-cards/${b.work_order_id}`} aria-label={label} title={label}
               className={`tb-block${b.tone ? ` is-${b.tone}` : ''}${split ? ` row-${b.row}` : ''}${b.over ? ' is-over' : ''}`}
               style={{ insetInlineStart: `${p}%`, inlineSize: `max(6px, ${range.pct(b.e) - p}%)` }}>
               <span>{shortWo(b.work_order_number)}{b.plate_number ? ` · ${b.plate_number}` : ''}</span>
@@ -1519,7 +1519,7 @@ function Lane({ tech, data, range, now }) {
         <ul className="tb-bchips">
           {blocks.map(b => (
             <li key={b.work_order_id}>
-              <Link to={`/work-orders/${b.work_order_id}`} className={b.tone ? `is-${b.tone}` : ''}>
+              <Link to={`/job-cards/${b.work_order_id}`} className={b.tone ? `is-${b.tone}` : ''}>
                 <bdi>{fmtHM(new Date(b.s))}–{fmtHM(new Date(b.e))}</bdi>·<bdi>{shortWo(b.work_order_number)}</bdi>
               </Link>
             </li>
@@ -1599,7 +1599,7 @@ function CardsPanel({ data, panelRef, tech, onClearTech }) {
               return (
                 <tr key={c.id}>
                   <td className="c-job">
-                    <Link to={`/work-orders/${c.work_order_id}`} className="tb-mono b"><bdi>{c.job_card_number}</bdi></Link>
+                    <Link to={`/job-cards/${c.work_order_id}`} className="tb-mono b"><bdi>{c.job_card_number}</bdi></Link>
                     <span className="tb-sub">
                       {c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${c.title || ''}` : t('workflow.main', 'Main job card')}
                       {c.department && c.department !== 'mechanical' && <> · {deptLabel(t, c.department)}</>}

@@ -38,7 +38,7 @@ import { fileURLToPath } from 'url';
 import arabicReshaper from 'arabic-reshaper';
 import { query } from './database.js';
 import { customerStatusUrl } from './customer-link.js';
-import { markPointInFrame, DAMAGE_CODES } from './inspection-marks.js';
+import { markPointInFrame, DAMAGE_CODES, damageCodeOf } from './inspection-marks.js';
 import { JOB_TYPES, jobTypesOf } from './intake-rules.js';
 const { convertArabic } = arabicReshaper;
 
@@ -550,7 +550,9 @@ export async function generateServiceJobSheetPDF(res, { orders, tenant, template
 
 // ═══════════════════════════════════════════════════════════════
 // INSPECTION SHEET — dedicated A4 page: header + 5 car diagrams with
-// damage markers overlaid, plus a legend of the codes used.
+// damage markers overlaid. A marker is a plain red dot; only markers placed
+// before the form dropped the damage type (3 Nov 2026) carry a code, and
+// only those get a legend.
 // ═══════════════════════════════════════════════════════════════
 const INSPECTION_DIR = path.join(__dirname, '../../assets/inspection');
 const INSPECTION_VIEWS = [
@@ -560,8 +562,9 @@ const INSPECTION_VIEWS = [
   { key: 'front', label: 'FRONT',             file: 'front.png' },
   { key: 'rear',  label: 'REAR',              file: 'rear.png' },
 ];
-// Legend names: DAMAGE_CODES (lib/inspection-marks.js), the same table as
-// the inspection form on screen. Colours match components/CarDamageDiagram.jsx.
+// Legend names (older, coded markers): DAMAGE_CODES (lib/inspection-marks.js),
+// the same table as the diagram on screen. Colours match
+// components/CarDamageDiagram.jsx, and so does the plain marker's red.
 const DAMAGE_COLORS = {
   SH: '#6757e8', WS: '#4f87f7', OX: '#17b890', CF: '#ff8a4c',
   DS: '#ef476f', BD: '#8f62d6', RP: '#26b9d5', UD: '#f3b63f',
@@ -637,10 +640,15 @@ function renderInspectionPage(doc, order, tenant) {
     for (const m of viewMarks) {
       if (typeof m.x !== 'number' || typeof m.y !== 'number') continue;
       const { x: mx, y: my } = markPointInFrame(m, { x: x + 4, y: cy + 4, w: cellW - 8, h: cellH - 8 });
-      const color = DAMAGE_COLORS[m.code] || '#dc2626';
-      doc.circle(mx, my, 5).fill(color);
-      doc.fillColor('#ffffff').fontSize(6).font(FB)
-         .text(m.code || '?', mx - 6, my - 3, { width: 12, align: 'center', lineBreak: false });
+      const code = damageCodeOf(m);
+      if (code) {
+        doc.circle(mx, my, 5).fill(DAMAGE_COLORS[code] || '#dc2626');
+        doc.fillColor('#ffffff').fontSize(6).font(FB)
+           .text(code, mx - 6, my - 3, { width: 12, align: 'center', lineBreak: false });
+      } else {
+        // A plain marker: a red dot with a white ring, as on screen.
+        doc.circle(mx, my, 4).lineWidth(1.2).fillAndStroke('#dc2626', '#ffffff');
+      }
     }
     doc.fillColor('#6b7280').fontSize(7).font(FB)
        .text(view.label, x, cy + cellH + 4, { width: cellW, align: 'center' });
@@ -649,8 +657,9 @@ function renderInspectionPage(doc, order, tenant) {
   }
   y += Math.ceil(INSPECTION_VIEWS.length / cols) * (cellH + 32) + 8;
 
-  // Legend of codes actually used, so the printed page is self-contained.
-  const usedCodes = [...new Set(marks.map(m => m.code).filter(Boolean))];
+  // Legend of the codes actually used (older markers), so the printed page is
+  // self-contained. Plain markers need none: a dot is damage at that spot.
+  const usedCodes = [...new Set(marks.map(damageCodeOf).filter(Boolean))];
   if (usedCodes.length > 0) {
     doc.moveTo(M, y).lineTo(A4W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
     y += 8;
@@ -662,7 +671,7 @@ function renderInspectionPage(doc, order, tenant) {
       const cy = y + Math.floor(i / 4) * 18;
       doc.circle(cx + 6, cy + 5, 4).fill(DAMAGE_COLORS[code] || '#dc2626');
       doc.fillColor('#111827').fontSize(8.5).font(FB).text(code, cx + 14, cy + 1, { width: 22, lineBreak: false });
-      doc.fillColor('#4b5563').fontSize(8).font(FR).text(DAMAGE_CODES[code] || code, cx + 36, cy + 1, { width: chipW - 40, lineBreak: false });
+      doc.fillColor('#4b5563').fontSize(8).font(FR).text(DAMAGE_CODES[code], cx + 36, cy + 1, { width: chipW - 40, lineBreak: false });
     });
     y += Math.ceil(usedCodes.length / 4) * 18 + 4;
   }

@@ -105,15 +105,17 @@ export function prettyRole(r) {
  */
 export const DEFAULT_MODULES = {
   general_manager:  null, // everything
-  workshop_manager: ['dashboard', 'notifications', 'enquiries', 'work-orders', 'estimates', 'appointments', 'fleet-intake', 'invoices', 'customers', 'vehicles', 'mechanics',
+  // 'job-cards': the job after the physical inspection (client meeting, 3 Nov 2026);
+  // the Workshop Foreman works on job cards only, without Work Orders.
+  workshop_manager: ['dashboard', 'notifications', 'enquiries', 'work-orders', 'job-cards', 'estimates', 'appointments', 'fleet-intake', 'invoices', 'customers', 'vehicles', 'mechanics',
                      'service-bays', 'job-assignment', 'team-leader', 'store', 'parts', 'inventory', 'service-status', 'warranty-claims', 'complaints',
                      'customer-feedback', 'customer-experience', 'crm-customers', 'crm-reminders', 'crm-tasks', 'reports', 'performance', 'technician-kpi'],
-  service_advisor:  ['dashboard', 'notifications', 'enquiries', 'work-orders', 'estimates', 'appointments', 'fleet-intake', 'invoices', 'customers', 'vehicles', 'service-status',
+  service_advisor:  ['dashboard', 'notifications', 'enquiries', 'work-orders', 'job-cards', 'estimates', 'appointments', 'fleet-intake', 'invoices', 'customers', 'vehicles', 'service-status',
                      'complaints', 'customer-feedback', 'customer-experience', 'crm-customers', 'crm-reminders', 'crm-tasks'],
-  storekeeper:      ['dashboard', 'notifications', 'store', 'estimates', 'work-orders', 'parts', 'inventory'],
-  part_advisor:     ['dashboard', 'notifications', 'store', 'estimates', 'work-orders', 'parts', 'inventory'],
-  supervisor:       ['dashboard', 'notifications', 'work-orders', 'estimates', 'job-assignment', 'team-leader', 'mechanics', 'customers', 'vehicles',
+  storekeeper:      ['dashboard', 'notifications', 'store', 'estimates', 'work-orders', 'job-cards', 'parts', 'inventory'],
+  part_advisor:     ['dashboard', 'notifications', 'store', 'estimates', 'work-orders', 'job-cards', 'parts', 'inventory'],
+  supervisor:       ['dashboard', 'notifications', 'work-orders', 'job-cards', 'estimates', 'job-assignment', 'team-leader', 'mechanics', 'customers', 'vehicles',
                      'service-status', 'reports', 'performance', 'technician-kpi'],
-  workshop_foreman: ['dashboard', 'notifications', 'work-orders', 'job-assignment', 'team-leader', 'mechanics', 'service-bays', 'service-status'],
-  team_leader:      ['dashboard', 'notifications', 'work-orders', 'team-leader', 'job-assignment', 'mechanics', 'service-status'],
+  workshop_foreman: ['dashboard', 'notifications', 'job-cards', 'job-assignment', 'team-leader', 'mechanics', 'service-bays', 'service-status'],
+  team_leader:      ['dashboard', 'notifications', 'work-orders', 'job-cards', 'team-leader', 'job-assignment', 'mechanics', 'service-status'],
 };

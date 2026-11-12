@@ -3,12 +3,15 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Search, Plus, Xmark, WarningTriangle, CheckCircle, Phone, Clock,
-  StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar, Page,
+  StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
+import { hasModule } from '../lib/modules';
 import { PART_CATEGORIES, prefList } from '../lib/intakeOptions';
+import { MakeSelect, ModelSelect } from '../components/MakeModelSelect';
+import CustomersTabs from '../components/CustomersTabs';
 
 /**
  * Enquiries — journey stages 01-02.
@@ -19,8 +22,15 @@ import { PART_CATEGORIES, prefList } from '../lib/intakeOptions';
  * re-offer date, which is the nurture loop drawn back to stage 01.
  *
  * Each enquiry has its work order (the visit) from the moment it is saved:
- * Convert confirms the customer goes ahead on that work order, and "Not
- * converted" cancels it while nothing has happened on it yet.
+ * Convert confirms the customer goes ahead on that work order. The estimate
+ * is raised there, after its technical inspection — not from the enquiry.
+ *
+ * Client meeting (3 Nov 2026): "Not converted" is no longer offered here
+ * (enquiries already lost or in nurture still show as such); every enquiry
+ * records the emirate the customer is in, so it reaches that emirate's team;
+ * and the car is asked as make, model and year only — the work order's
+ * "Add a new vehicle" starts from them. Older enquiries keep showing the
+ * free-text vehicle and plate they were logged with.
  */
 
 const NAVY = '#1e3a6b';
@@ -56,6 +66,8 @@ const TIERS = {
 
 const PAYERS = { self_pay: 'Self-pay', insurance: 'Insurance', corporate: 'Corporate', fleet: 'Fleet' };
 const CONTACT_METHODS = { phone: 'Phone', whatsapp: 'WhatsApp', website_form: 'Website form', walk_in: 'Walk-in', partner_handoff: 'Partner hand-off', email: 'Email', reminder: 'Reply to a service reminder', referral: 'Referral' };
+const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
+// Still shown on enquiries recorded as not converted (and in the stats).
 const LOST_REASONS = { price: 'Price', timing: 'Timing / lead time', location: 'Location', went_elsewhere: 'Went elsewhere', no_response: 'No response', not_needed: 'No longer needed', other: 'Other' };
 
 const fmt = (n, cur = 'AED') => `${cur} ${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -63,6 +75,12 @@ const fmtDate = (d) => d ? new Date(String(d).replace(' ', 'T')).toLocaleDateStr
 // The customer complaint on one line, for the list (it may run to 5,000 characters over several lines).
 const oneLine = (s, max = 300) => { const v = String(s || '').replace(/\s+/g, ' ').trim(); return v.length > max ? `${v.slice(0, max - 1)}…` : v; };
 const COMPLAINT_MAX = 5000;
+// The car's model year: 4 digits, 1950 to next year (as the server checks).
+const YEAR_MIN = 1950;
+const yearMax = () => new Date().getFullYear() + 1;
+// Arabic-Indic digits from an Arabic keyboard, as ASCII; nothing but digits kept.
+const yearDigits = v => String(v).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))
+  .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06F0)).replace(/\D/g, '').slice(0, 4);
 
 function KPICard({ icon: Icon, label, value, sub, color }) {
   return (
@@ -98,36 +116,28 @@ export default function Enquiries() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [channelFilter, setChannelFilter] = useState('');
+  const [emirateFilter, setEmirateFilter] = useState('');
   const [dueOnly, setDueOnly] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [lostFor, setLostFor] = useState(null);
   const [convertFor, setConvertFor] = useState(null);
-  const [busyId, setBusyId] = useState(null);
   const navigate = useNavigate();
   const { t: tr } = useTranslation();
   const { user } = useContext(AuthContext) || {};
-  const mayQuote = canDo(user, 'estimate.raise');
   const mayBook = canDo(user, 'job.open');
-
-  // Quote (CRM stage 04): link or create the customer and vehicle from the
-  // enquiry, then open the estimate form already filled in.
-  const quote = async (r) => {
-    setBusyId(r.id);
-    try {
-      const res = await api.post(`/enquiries/${r.id}/prepare-quote`);
-      if (!res.success) { setError(res.message || 'Could not prepare the quote'); return; }
-      navigate(`/estimates?new=1&enquiry=${r.id}`);
-    } catch { setError('Network error — please try again'); }
-    finally { setBusyId(null); }
-  };
+  // An enquiry's customer opens on the Customers tab (client point 12), for a
+  // role that has that tab.
+  const mayCustomers = hasModule(user, 'customers');
+  // No "Quote" here any more (client point 9): the estimate is raised on the
+  // work order once its technical inspection is completed.
 
   const fetchRows = useCallback(async () => {
     try {
       const p = new URLSearchParams();
       if (statusFilter) p.set('status', statusFilter);
       if (channelFilter) p.set('source_channel', channelFilter);
+      if (emirateFilter) p.set('emirate', emirateFilter);
       if (search.trim()) p.set('search', search.trim());
       if (dueOnly) p.set('due', 'true');
       const qs = p.toString();
@@ -135,7 +145,7 @@ export default function Enquiries() {
       if (res.success) setRows(res.data || []);
       else setError(res.message || 'Failed to load enquiries');
     } catch { setError('Network error loading enquiries'); }
-  }, [statusFilter, channelFilter, search, dueOnly]);
+  }, [statusFilter, channelFilter, emirateFilter, search, dueOnly]);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -187,6 +197,7 @@ export default function Enquiries() {
 
   return (
     <div style={{ padding: '0 0 40px' }}>
+      <CustomersTabs />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: NAVY, margin: 0 }}>Enquiries</h1>
@@ -298,6 +309,11 @@ export default function Enquiries() {
           <option value="">All channels</option>
           {Object.entries(CHANNELS).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
         </select>
+        <select value={emirateFilter} onChange={e => setEmirateFilter(e.target.value)} style={st.filterSelect}
+          aria-label={tr('enquiries.filter_emirate', 'Emirate')}>
+          <option value="">{tr('enquiries.all_emirates', 'All emirates')}</option>
+          {EMIRATES.map(e => <option key={e} value={e}>{e}</option>)}
+        </select>
         <button onClick={() => setDueOnly(v => !v)}
           style={{ ...st.filterSelect, cursor: 'pointer', fontWeight: 700,
             background: dueOnly ? '#fff7ed' : '#fff', color: dueOnly ? ORANGE : '#334155',
@@ -311,15 +327,15 @@ export default function Enquiries() {
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 900 }}>
             <thead>
               <tr style={{ background: '#f8fafc', borderBottom: '1px solid #eef2f7' }}>
-                {['Enquiry', 'Contact', 'Channel', 'Tier / payer', 'Quoted', 'Status', 'Follow-up', ''].map(h => (
+                {['Enquiry', 'Contact', tr('enquiries.col_emirate', 'Emirate'), 'Channel', 'Tier / payer', 'Quoted', 'Status', 'Follow-up', ''].map(h => (
                   <th key={h} style={st.th}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={8} style={st.emptyCell}>Loading enquiries…</td></tr>}
+              {loading && <tr><td colSpan={9} style={st.emptyCell}>Loading enquiries…</td></tr>}
               {!loading && rows.length === 0 && (
-                <tr><td colSpan={8} style={st.emptyCell}>
+                <tr><td colSpan={9} style={st.emptyCell}>
                   <Phone width={32} height={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
                   <div>No enquiries yet. Log one to start measuring conversion by channel.</div>
                 </td></tr>
@@ -340,9 +356,17 @@ export default function Enquiries() {
                       </div>
                     </td>
                     <td style={st.td}>
-                      <div style={{ fontWeight: 600, color: '#1e293b' }}>{r.contact_name}</div>
+                      {r.customer_id && mayCustomers ? (
+                        <Link to={`/customers?highlight=${r.customer_id}`} style={{ fontWeight: 600, color: '#1d4ed8', textDecoration: 'none' }}
+                          title={tr('enquiries.open_customer', 'Open the customer: {{name}}', { name: r.customer_full_name || r.contact_name })}>
+                          {r.contact_name}
+                        </Link>
+                      ) : (
+                        <div style={{ fontWeight: 600, color: '#1e293b' }}>{r.contact_name}</div>
+                      )}
                       <div style={{ fontSize: 11.5, color: '#94a3b8' }}>{r.contact_phone}</div>
                     </td>
+                    <td style={{ ...st.td, whiteSpace: 'nowrap' }}>{r.emirate || '—'}</td>
                     <td style={st.td}>
                       <span style={{ ...st.pill, background: ch.bg, color: ch.color }}>{ch.label}</span>
                       {r.source_detail && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{r.source_detail}</div>}
@@ -377,11 +401,6 @@ export default function Enquiries() {
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                         {r.status !== 'converted' && (
                           <>
-                            {mayQuote && (
-                              <button onClick={() => quote(r)} disabled={busyId === r.id} style={{ ...st.smallBtn, background: '#fff7ed', color: '#c2410c', borderColor: '#fed7aa' }} title="Raise an estimate for this enquiry">
-                                <Page width={13} height={13} /> {busyId === r.id ? '…' : 'Quote'}
-                              </button>
-                            )}
                             {mayBook && (
                               <button onClick={() => navigate(`/appointments?new=1&enquiry=${r.id}`)} style={{ ...st.smallBtn, background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }} title="Book a visit">
                                 <Calendar width={13} height={13} /> Book
@@ -389,9 +408,6 @@ export default function Enquiries() {
                             )}
                             <button onClick={() => setConvertFor(r)} style={{ ...st.smallBtn, background: '#f0fdf4', color: '#16a34a', borderColor: '#bbf7d0' }} title="Convert to work order">
                               <ArrowRight width={13} height={13} /> Convert
-                            </button>
-                            <button onClick={() => setLostFor(r)} style={{ ...st.smallBtn }} title="Record why it didn't convert">
-                              Not converted
                             </button>
                           </>
                         )}
@@ -421,9 +437,6 @@ export default function Enquiries() {
           onSaved={() => { setShowForm(false); setEditing(null); refresh(); }}
         />
       )}
-      {lostFor && (
-        <NotConvertedModal enquiry={lostFor} onClose={() => setLostFor(null)} onSaved={() => { setLostFor(null); refresh(); }} />
-      )}
       {convertFor && (
         <ConvertModal enquiry={convertFor} onClose={() => setConvertFor(null)} onSaved={() => { setConvertFor(null); refresh(); }} />
       )}
@@ -434,6 +447,8 @@ export default function Enquiries() {
 /* ── Create / edit enquiry ── */
 // The enquiry type is no longer asked: the column keeps its value ('service'
 // on a new enquiry), and the job types are ticked later on the work order.
+// The car is make, model and year only (3 Nov 2026): the free-text vehicle
+// and plate are not sent, so an older enquiry keeps them (shown read-only).
 function EnquiryModal({ enquiry, onClose, onSaved }) {
   const { t } = useTranslation();
   const isEdit = !!enquiry;
@@ -441,8 +456,10 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
     contact_name: enquiry?.contact_name || '',
     contact_phone: enquiry?.contact_phone || '',
     contact_email: enquiry?.contact_email || '',
-    vehicle_description: enquiry?.vehicle_description || '',
-    vehicle_plate: enquiry?.vehicle_plate || '',
+    emirate: enquiry?.emirate || '',
+    vehicle_make: enquiry?.vehicle_make || '',
+    vehicle_model: enquiry?.vehicle_model || '',
+    vehicle_year: enquiry?.vehicle_year ? String(enquiry.vehicle_year) : '',
     service_tier: enquiry?.service_tier || '',
     description: enquiry?.description || '',
     // The parts the customer accepts — any of Genuine / After-Market / Used,
@@ -469,10 +486,19 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
     setF(p => ({ ...p, parts_preference: prefList(p.parts_preference.includes(c) ? p.parts_preference.filter(x => x !== c) : [...p.parts_preference, c]) }));
   };
 
+  // What an older enquiry was logged with, before make / model / year.
+  const loggedCar = enquiry && !enquiry.vehicle_make && !enquiry.vehicle_model && !enquiry.vehicle_year
+    ? String(enquiry.vehicle_description || '').trim() : '';
+  const loggedPlate = String(enquiry?.vehicle_plate || '').trim();
+
   const submit = async () => {
     setPrefTouched(true);
     if (!f.contact_name.trim()) { setErr('Contact name is required.'); return; }
     if (!String(f.contact_phone || '').trim() && !String(f.contact_email || '').trim()) { setErr('A phone number or an e-mail is required.'); return; }
+    if (!f.emirate) { setErr(t('enquiries.emirate_required', 'Select the emirate the customer is in — it decides which team the enquiry goes to.')); return; }
+    if (f.vehicle_year && (!/^\d{4}$/.test(f.vehicle_year) || Number(f.vehicle_year) < YEAR_MIN || Number(f.vehicle_year) > yearMax())) {
+      setErr(t('enquiries.year_invalid', 'The vehicle year must be 4 digits, {{min}} to {{max}}.', { min: YEAR_MIN, max: yearMax() })); return;
+    }
     if (!f.source_channel) { setErr('Select how this enquiry reached you — it is what makes conversion measurable.'); return; }
     if (f.description.trim().length > COMPLAINT_MAX) { setErr(t('enquiries.complaint_too_long', 'The customer complaint is longer than 5,000 characters — shorten it.')); return; }
     if (!f.parts_preference.length) {
@@ -488,6 +514,9 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
         ...f,
         quoted_amount: f.quoted_amount === '' ? null : Number(f.quoted_amount),
         service_tier: f.service_tier || null,
+        vehicle_make: f.vehicle_make.trim() || null,
+        vehicle_model: f.vehicle_model.trim() || null,
+        vehicle_year: f.vehicle_year ? Number(f.vehicle_year) : null,
         follow_up_at: f.follow_up_at ? f.follow_up_at.replace('T', ' ') + ':00' : null,
       };
       const res = isEdit ? await api.put(`/enquiries/${enquiry.id}`, payload) : await api.post('/enquiries', payload);
@@ -515,12 +544,33 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Field label="Email"><input style={st.input} value={f.contact_email} onChange={e => set('contact_email', e.target.value)} placeholder="Optional" /></Field>
-            <Field label="Vehicle"><input style={st.input} value={f.vehicle_description} onChange={e => set('vehicle_description', e.target.value)} placeholder="e.g. Toyota Camry 2021" /></Field>
+            <Field label={`${t('enquiries.emirate_label', 'Emirate')} *`} hint={t('enquiries.emirate_hint', 'Where the customer is — the enquiry goes to that team')}>
+              <select style={st.input} value={f.emirate} onChange={e => set('emirate', e.target.value)}>
+                <option value="">{t('enquiries.select_emirate', 'Select emirate…')}</option>
+                {EMIRATES.map(e => <option key={e} value={e}>{e}</option>)}
+              </select>
+            </Field>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Field label="Plate number" hint="Links the enquiry to the car on file, or adds it when you quote"><input style={st.input} value={f.vehicle_plate} onChange={e => set('vehicle_plate', e.target.value.toUpperCase())} placeholder="e.g. A 12345" /></Field>
-            <div />
+          {/* The car: make, model and year only — the rest is taken when it comes in. */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 110px', gap: 12 }}>
+            <Field label={t('vehicles.make', 'Make')}>
+              <MakeSelect value={f.vehicle_make} style={st.input}
+                onChange={(make, picked) => setF(p => ({ ...p, vehicle_make: make, ...(picked ? { vehicle_model: '' } : {}) }))} />
+            </Field>
+            <Field label={t('vehicles.model', 'Model')}>
+              <ModelSelect make={f.vehicle_make} value={f.vehicle_model} style={st.input} onChange={model => set('vehicle_model', model)} />
+            </Field>
+            <Field label={t('vehicles.year', 'Year')}>
+              <input style={st.input} inputMode="numeric" maxLength={4} value={f.vehicle_year}
+                onChange={e => set('vehicle_year', yearDigits(e.target.value))} placeholder="2022" />
+            </Field>
           </div>
+          {(loggedCar || loggedPlate) && (
+            <div style={st.infoBox}>
+              {t('enquiries.logged_vehicle', 'Logged with this enquiry')}:{' '}
+              {[loggedCar, loggedPlate && `${t('enquiries.plate', 'Plate')} ${loggedPlate}`].filter(Boolean).join(' · ')}
+            </div>
+          )}
 
           <div style={{ height: 1, background: '#f1f5f9', margin: '4px 0' }} />
 
@@ -605,7 +655,9 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
           {isEdit && (
             <Field label="Status">
               <select style={st.input} value={f.status} onChange={e => set('status', e.target.value)}>
-                {Object.entries(STATUS_META).map(([k, m]) => <option key={k} value={k} disabled={k === 'converted'}>{m.label}</option>)}
+                {/* "Lost" is not offered any more; an enquiry already lost still shows it. */}
+                {Object.entries(STATUS_META).filter(([k]) => k !== 'lost' || enquiry?.status === 'lost')
+                  .map(([k, m]) => <option key={k} value={k} disabled={k === 'converted' || k === 'lost'}>{m.label}</option>)}
               </select>
             </Field>
           )}
@@ -614,71 +666,6 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
           <button onClick={onClose} style={st.ghostBtn}>Cancel</button>
           <button onClick={submit} disabled={saving} style={{ ...st.primaryBtn, opacity: saving ? 0.7 : 1 }}>
             {saving ? 'Saving…' : isEdit ? 'Save Changes' : 'Submit Work Order'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Not converted — reason + optional re-offer ── */
-function NotConvertedModal({ enquiry, onClose, onSaved }) {
-  const { t } = useTranslation();
-  const [reason, setReason] = useState('');
-  const [notes, setNotes] = useState('');
-  const [followUp, setFollowUp] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-
-  const submit = async () => {
-    if (!reason) { setErr('Select a reason — this is what makes lost demand analysable.'); return; }
-    setSaving(true); setErr('');
-    try {
-      const res = await api.post(`/enquiries/${enquiry.id}/lost`, {
-        lost_reason: reason, lost_notes: notes || null,
-        follow_up_at: followUp ? followUp.replace('T', ' ') + ':00' : null,
-      });
-      if (res.success) onSaved();
-      else setErr(res.message || 'Could not save.');
-    } catch { setErr('Network error.'); }
-    finally { setSaving(false); }
-  };
-
-  return (
-    <div style={st.overlay} onClick={onClose}>
-      <div style={{ ...st.modal, maxWidth: 480 }} onClick={e => e.stopPropagation()}>
-        <div style={st.modalHeader}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: NAVY }}>Not converted</h2>
-          <button onClick={onClose} style={st.closeBtn}><Xmark width={18} height={18} /></button>
-        </div>
-        <div style={{ padding: '4px 24px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {err && <div style={st.errorBar}>{err}</div>}
-          <div style={{ fontSize: 13, color: '#64748b' }}>
-            {enquiry.enquiry_number} · {enquiry.contact_name}
-          </div>
-          <Field label="Reason *">
-            <select style={st.input} value={reason} onChange={e => setReason(e.target.value)}>
-              <option value="">Select a reason…</option>
-              {Object.entries(LOST_REASONS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </Field>
-          <Field label="Notes"><input style={st.input} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional detail" /></Field>
-          <Field label="Schedule a re-offer" hint="Set a date to keep this in nurture rather than closing it as lost">
-            <input style={st.input} type="datetime-local" value={followUp} onChange={e => setFollowUp(e.target.value)} />
-          </Field>
-          <div style={st.infoBox}>
-            {followUp
-              ? 'This enquiry will be kept in nurture and resurfaced on the follow-up date.'
-              : 'Without a re-offer date this enquiry will be closed as lost.'}
-            {enquiry.work_order_number && enquiry.work_order_status !== 'cancelled' && (
-              <> {t('enquiries.lost_cancels_wo', 'Its work order {{wo}} is cancelled — unless work has already started on it.', { wo: enquiry.work_order_number })}</>
-            )}
-          </div>
-        </div>
-        <div style={st.footer}>
-          <button onClick={onClose} style={st.ghostBtn}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={{ ...st.primaryBtn, opacity: saving ? 0.7 : 1 }}>
-            {saving ? 'Saving…' : 'Record outcome'}
           </button>
         </div>
       </div>

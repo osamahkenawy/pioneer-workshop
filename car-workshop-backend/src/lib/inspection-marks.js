@@ -15,6 +15,10 @@
  *                 in that box depended on the screen, so they can only be
  *                 placed approximately — against the whole frame, as before.
  *
+ * A marker is just a spot on the car (client review, 3 Nov 2026: no damage
+ * type on the form). Markers placed before that carry a damage `code` from
+ * DAMAGE_CODES; they keep it, and only they are named or put in a legend.
+ *
  * The front-end twin (the diagram on screen, in print and on the customer's
  * link) is car-workshop-frontend/src/lib/inspectionMarks.js. Change a size
  * in both.
@@ -23,7 +27,8 @@
 /** The `coord` value of a marker stored relative to the car picture. */
 export const IMAGE_COORD = 'img';
 
-/* Damage legend. Codes mirror the printed form; two deliberate corrections:
+/* Damage legend, for the markers that carry a code (placed before the form
+   dropped the damage type). Codes mirror the printed form; two deliberate corrections:
    the source sheet used "GC" for BOTH Glass Chip and Gouges/Crease (so a mark
    was ambiguous) — Gouges/Crease is "GO" here; and "Pant Chip" was a typo.
    The front end has the same table in components/CarDamageDiagram.jsx
@@ -63,6 +68,9 @@ export const VIEW_IMAGE_SIZE = Object.freeze({
 
 /** Is this marker stored relative to the car picture? */
 export const isImageMark = mark => mark?.coord === IMAGE_COORD;
+
+/** A marker's damage code when it has a known one, else null (a plain spot). */
+export const damageCodeOf = mark => (typeof mark?.code === 'string' && Object.hasOwn(DAMAGE_CODES, mark.code) ? mark.code : null);
 
 const clamp01 = v => Math.min(1, Math.max(0, Number.isFinite(Number(v)) ? Number(v) : 0));
 

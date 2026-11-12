@@ -24,6 +24,7 @@ const CustomerFeedback  = lazy(() => import('./pages/CustomerFeedback'));
 const CustomerSurveyPublic = lazy(() => import('./pages/CustomerSurveyPublic'));
 const EstimateApproval = lazy(() => import('./pages/EstimateApproval'));
 const InspectionLink = lazy(() => import('./pages/InspectionLink'));
+const TechnicalReportLink = lazy(() => import('./pages/TechnicalReportLink'));
 const Vehicles          = lazy(() => import('./pages/Vehicles'));
 const Parts             = lazy(() => import('./pages/Parts'));
 const Mechanics         = lazy(() => import('./pages/Mechanics'));
@@ -149,6 +150,8 @@ export default function App() {
         {/* The customer's copy of the vehicle inspection, and where they sign —
             link sent from POST /vehicle-inspections/:id/share */}
         <Route path="/inspection/:token" element={<InspectionLink />} />
+        {/* The customer's copy of the technical report — link sent from POST /technical-inspections/:id/share */}
+        <Route path="/technical-report/:token" element={<TechnicalReportLink />} />
         {/* Fleet coordinator intake — no login; the token names the fleet account */}
         <Route path="/fleet-intake/:token" element={<FleetIntake />} />
 
@@ -157,6 +160,9 @@ export default function App() {
         <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
         <Route path="/work-orders" element={<Protected><WorkOrders /></Protected>} />
         <Route path="/work-orders/:id" element={<Protected><WorkOrderDetail /></Protected>} />
+        {/* Job Cards module (client meeting, 3 Nov 2026): the jobs past the physical inspection, keyed by the work order's id. */}
+        <Route path="/job-cards" element={<Protected><WorkOrders mode="job-cards" /></Protected>} />
+        <Route path="/job-cards/:id" element={<Protected><WorkOrderDetail mode="job-card" /></Protected>} />
         <Route path="/work-orders/:id/inspection" element={<Protected><VehicleInspection /></Protected>} />
         {/* Step 4: the Supervisor / Foreman's technical inspection; printed, it is the technical report */}
         <Route path="/work-orders/:id/technical-inspection" element={<Protected><TechnicalInspection /></Protected>} />

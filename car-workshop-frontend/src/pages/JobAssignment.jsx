@@ -1942,7 +1942,7 @@ export default function JobAssignment() {
         const CL = {
           internal: t('customers.class.internal', 'Internal'), external: t('customers.class.external', 'External'),
           fleet: t('customers.class.fleet', 'Fleet'), insurance: t('customers.class.insurance', 'Insurance'),
-          asset: t('customers.class.asset', 'Asset'), walkin: t('customers.class.walkin', 'Walk-in'),
+          asset: t('customers.class.asset', 'Asset'), staff: t('customers.class.staff', 'Staff'), walkin: t('customers.class.walkin', 'Walk-in'),
         };
         const classification = [CL[jc.intake_customer_class], CL[jc.intake_customer_subcategory]].filter(Boolean).join(' · ');
         const lines = jc.items || [];

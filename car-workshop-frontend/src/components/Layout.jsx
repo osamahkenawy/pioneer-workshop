@@ -14,11 +14,13 @@ import {
 import NotificationBell from './NotificationBell';
 import PlanBadge from './dashboard/PlanBadge';
 import TrialBanner from './dashboard/TrialBanner';
+import { CUSTOMER_TABS } from './CustomersTabs';
 import './Layout.css';
 
 const iconMap = {
   'dashboard':        HomeSimple,
   'orders':           ClipboardCheck,
+  'job-cards':        Tools,
   'estimates':        PageEdit,
   'appointments':     Calendar,
   'vehicle-board':    Garage,
@@ -83,8 +85,14 @@ const navSections = [
   {
     titleKey: 'operations',
     items: [
-      { path: '/enquiries',          labelKey: 'enquiries',       iconKey: 'enquiries',        moduleKey: 'enquiries',         roles: ['admin', 'dispatcher'] },
+      // One module, two tabs (client point 12, 3 Nov 2026): Enquiries and
+      // Customers. Shown when the role has either tab's key; opens the first
+      // tab it has (getNavForRole). The keys stay separate, so a role with
+      // only one of them sees only that tab (CustomersTabs).
+      { path: '/customers',          labelKey: 'customers',       iconKey: 'customers',        moduleKey: 'customers',         roles: ['admin', 'dispatcher'], tabs: CUSTOMER_TABS },
       { path: '/work-orders',        labelKey: 'orders',          iconKey: 'orders',           moduleKey: 'work-orders',       roles: ['admin', 'dispatcher'] },
+      // The job after the physical inspection (client meeting, 3 Nov 2026): Steps 4–7.
+      { path: '/job-cards',          labelKey: 'job_cards',       labelDefault: 'Job Cards', iconKey: 'job-cards', moduleKey: 'job-cards', roles: ['admin', 'dispatcher'] },
       // Every car in the workshop by step (replaced Service Tracking; same module key).
       { path: '/vehicle-board',      labelKey: 'vehicle_status_board', labelDefault: 'Vehicle Status Board', iconKey: 'vehicle-board', moduleKey: 'service-status', roles: ['admin', 'dispatcher'] },
       // Shares the work-orders moduleKey: an estimate is the first half of a job card, and
@@ -94,7 +102,6 @@ const navSections = [
       // is not in the locale files yet.
       { path: '/appointments',       labelKey: 'bookings',        labelDefault: 'Bookings', iconKey: 'appointments', moduleKey: 'appointments', roles: ['admin', 'dispatcher'] },
       { path: '/invoices',           labelKey: 'invoices',        iconKey: 'invoices',         moduleKey: 'invoices',          roles: ['admin', 'dispatcher'] },
-      { path: '/customers',          labelKey: 'customers',       iconKey: 'customers',        moduleKey: 'customers',         roles: ['admin', 'dispatcher'] },
       { path: '/vehicles',           labelKey: 'vehicles',        iconKey: 'vehicles',         moduleKey: 'vehicles',          roles: ['admin', 'dispatcher'] },
       { path: '/mechanics',          labelKey: 'technicians',     labelDefault: 'Technicians', iconKey: 'mechanics', moduleKey: 'mechanics',         roles: ['admin', 'dispatcher'] },
       { path: '/service-bays',       labelKey: 'service_bays',    iconKey: 'service_bays',     moduleKey: 'service-bays',      roles: ['admin', 'dispatcher'] },
@@ -178,13 +185,25 @@ function getNavForRole(role, permittedModules, manager) {
         if (item.managersOnly && !manager) return false;
         // Dynamic: if user has permittedModules array, use it
         if (Array.isArray(permittedModules)) {
-          return permittedModules.includes(item.moduleKey);
+          return itemPages(item).some(([, key]) => permittedModules.includes(key));
         }
         // Legacy fallback: use hardcoded roles array
         return item.roles.includes(role);
-      }),
+      }).map(item => withTabsFor(item, permittedModules)),
     }))
     .filter(section => section.items.length > 0);
+}
+
+/** The pages a menu item opens, as [path, moduleKey]: its tabs' (Customers), or its own. */
+function itemPages(item) {
+  return (item.tabs || [item]).map(page => [page.path, page.moduleKey]);
+}
+
+/** A tabbed item opens the first tab the role has; `paths` (its tabs) keep it highlighted on either. */
+function withTabsFor(item, permittedModules) {
+  if (!item.tabs) return item;
+  const tabs = item.tabs.filter(tab => !Array.isArray(permittedModules) || permittedModules.includes(tab.moduleKey));
+  return { ...item, path: tabs[0].path, paths: tabs.map(tab => tab.path) };
 }
 
 const allNavItems = navSections.flatMap(s => s.items);
@@ -197,7 +216,7 @@ const allNavItems = navSections.flatMap(s => s.items);
 export const ROUTE_MODULES = Object.freeze(Object.fromEntries([
   ...allNavItems
     .filter(item => item.path !== '/dashboard' && !item.roles.includes('mechanic'))
-    .map(item => [item.path, item.moduleKey]),
+    .flatMap(itemPages),
   ['/crm/customers', 'crm-customers'],
 ]));
 
@@ -209,9 +228,11 @@ const isUnder = (pathname, path) => pathname === path || pathname.startsWith(`${
 
 /** The nav item for this page: the longest path that contains it (/mechanic/scan, not /mechanic). */
 function activeNavPath(pathname, items) {
-  let best = null;
+  let best = null, bestLen = 0;
   for (const item of items) {
-    if (isUnder(pathname, item.path) && (!best || item.path.length > best.length)) best = item.path;
+    for (const path of item.paths || [item.path]) {
+      if (isUnder(pathname, path) && path.length > bestLen) { best = item.path; bestLen = path.length; }
+    }
   }
   return best;
 }
@@ -275,7 +296,7 @@ export default function Layout({ children }) {
     if (exact) return t(exact[1], exact[2]);
     // The longest matching path, from the menu or the list above
     const candidates = [
-      ...allNavItems.map(item => [item.path, () => navLabel(t, item)]),
+      ...allNavItems.flatMap(item => itemPages(item).map(([path]) => [path, () => navLabel(t, item)])),
       ...ROUTE_TITLES.filter(([p]) => typeof p === 'string').map(([p, key, def]) => [p, () => t(key, def)]),
     ].filter(([p]) => isUnder(pathname, p));
     if (!candidates.length) return 'Pioneer Car Service Center';

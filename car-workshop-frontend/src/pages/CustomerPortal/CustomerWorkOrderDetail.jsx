@@ -7,6 +7,9 @@
  *     desk — the same one the workshop sends);
  *   - the vehicle inspections: the customer's copy, and the sign-off when
  *     they were not at the car (?sign=<inspection id> opens it);
+ *   - the technical report once the workshop has completed it: the work the
+ *     car needs — jobs, service types, labour, the parts' names; no hours,
+ *     quantities or prices (TechnicalReportLines, as on the report's link);
  *   - the estimates sent to them, with "Review & approve" while waiting;
  *   - invoices with paid / balance and the PDF.
  * ══════════════════════════════════════════════════════════════ */
@@ -18,6 +21,7 @@ import { CustomerAuthContext } from '../../context/CustomerAuthContext';
 import api from '../../lib/customerApi';
 import ServiceStatusCard, { fmtMoney, fmtWhen } from '../../components/service-status/ServiceStatusCard';
 import PortalInspection from './PortalInspection';
+import TechnicalReportLines from '../../components/TechnicalReportLines';
 import { PORTAL } from './portalPaths';
 import { invoiceStatusBadge, estimateStatusBadge, downloadInvoicePdf } from './portalShared';
 import './CustomerPages.css';
@@ -111,6 +115,19 @@ export default function CustomerWorkOrderDetail() {
             <PortalInspection key={insp.id} inspection={insp} autoFocusSign={insp.id === signId && insp.needs_signature}
               onSigned={() => { setNotice(t('portal.inspection.thanks', 'Thank you — your signature has been recorded.')); load(); }} />
           ))}
+        </section>
+      )}
+
+      {data.technical_report && (
+        <section className="cp-card" aria-labelledby="cp-job-tech-report">
+          <h2 className="cp-card-title" id="cp-job-tech-report">{t('portal.job.tech_report', 'Technical report')}</h2>
+          <p className="cp-row-sub" style={{ margin: '-6px 0 12px' }}>
+            {data.technical_report.completed_at
+              ? t('portal.job.tech_report_on', 'Inspected {{date}} — the work your vehicle needs, with the parts. The prices come with the estimate.',
+                { date: fmtWhen(data.technical_report.completed_at, lang, { time: false }) })
+              : t('portal.job.tech_report_intro', 'The work your vehicle needs, with the parts. The prices come with the estimate.')}
+          </p>
+          <TechnicalReportLines lines={data.technical_report.lines} />
         </section>
       )}
 

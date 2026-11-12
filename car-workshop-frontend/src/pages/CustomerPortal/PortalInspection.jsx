@@ -3,7 +3,8 @@
  * portal, and where they sign it.
  *
  * The same content as the public inspection link (InspectionLink.jsx): the
- * damage marked on the diagram (read-only CarDamageDiagram) and the vehicle
+ * damage marked on the diagram (read-only CarDamageDiagram: red dots, no
+ * legend; older markers with a damage type are listed by name) and the vehicle
  * photos, or the pages of the paper form, what was recommended, and the
  * signature. When the
  * walk-around was finished without the customer at the car, they sign here:
@@ -14,7 +15,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EditPencil, Check, WarningTriangle, Page } from 'iconoir-react';
-import CarDamageDiagram, { DAMAGE_COLORS, damageLabel, viewLabel } from '../../components/CarDamageDiagram';
+import CarDamageDiagram, { DAMAGE_COLORS, MARK_COLOR, damageCodeOf, damageLabel, viewLabel } from '../../components/CarDamageDiagram';
 import api from '../../lib/customerApi';
 import { fmtWhen } from '../../components/service-status/ServiceStatusCard';
 import './PortalInspection.css';
@@ -82,6 +83,8 @@ export default function PortalInspection({ inspection, autoFocusSign = false, on
   const docs = insp.documents || [];
   const photos = insp.entry_mode === 'document' ? [] : (insp.photos || []);
   const views = [...new Set(marks.map(m => m.view))];
+  // Older markers with a damage type or a note; a plain dot needs no words.
+  const described = marks.filter(m => damageCodeOf(m) || m.note);
   const v = insp.vehicle || {};
 
   return (
@@ -138,21 +141,26 @@ export default function PortalInspection({ inspection, autoFocusSign = false, on
                 <CarDamageDiagram compact marks={marks} views={views}
                   selectedMarkId={selected} onSelectMark={setSelected} />
               </div>
-              <ol className="cpi-marks">
-                {marks.map((m, i) => (
-                  <li key={m.id}>
-                    <button type="button" className={`cpi-mark${m.id === selected ? ' is-on' : ''}`} onClick={() => setSelected(m.id)}>
-                      <span className="cpi-mark-n">{i + 1}</span>
-                      <span className="cpi-mark-code" style={{ background: DAMAGE_COLORS[m.code] || '#dc2626' }}>{m.code}</span>
-                      <span className="cpi-mark-main">
-                        <span className="cpi-mark-label">{damageLabel(t, m.code, m.label)}</span>
-                        <span className="cpi-mark-view">{viewLabel(t, m.view)}</span>
-                        {m.note && <span className="cpi-mark-note">{m.note}</span>}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
+              {described.length > 0 && (
+                <ol className="cpi-marks">
+                  {described.map((m, i) => {
+                    const code = damageCodeOf(m);
+                    return (
+                      <li key={m.id}>
+                        <button type="button" className={`cpi-mark${m.id === selected ? ' is-on' : ''}`} onClick={() => setSelected(m.id)}>
+                          <span className="cpi-mark-n">{i + 1}</span>
+                          {code && <span className="cpi-mark-code" style={{ background: DAMAGE_COLORS[code] || MARK_COLOR }}>{code}</span>}
+                          <span className="cpi-mark-main">
+                            <span className="cpi-mark-label">{code ? damageLabel(t, code, m.label) : viewLabel(t, m.view)}</span>
+                            {code && <span className="cpi-mark-view">{viewLabel(t, m.view)}</span>}
+                            {m.note && <span className="cpi-mark-note">{m.note}</span>}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
             </>
           )}
         </section>

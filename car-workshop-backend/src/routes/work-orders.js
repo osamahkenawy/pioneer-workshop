@@ -49,6 +49,7 @@ import { getFinancialConfig, computeWorkOrderFinancials, recordMechanicEarning }
 import { syncJobCardBilling, getInvoiceForWorkOrder, isInvoiceLocked, computeJobCardTotals, resolveVatRate } from '../lib/job-card-billing.js';
 import { announceMainJobCard, fulfilReminders, departmentFor, JC_QC_PASSED, onTechnicianAssigned, onWorkApproved } from '../lib/workflow.js';
 import { openJobCardIfReady, jobCardGate, awaitingPhysicalInspection, AWAITING_PHYSICAL_SQL, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
+import { partsRequestMissing } from '../lib/parts-request.js';
 import { requireCapability, can, isManagerRole } from '../lib/roles.js';
 import { woLabel, woDisplayKey, WO_DISPLAY_KEYS } from '../lib/status-labels.js';
 import {
@@ -336,8 +337,24 @@ function genServiceStatusToken() {
 }
 
 // GET /api/work-orders/stats — aggregate KPIs for the workshop
+/* Two modules, one job (client meeting, 3 Nov 2026, point 6): a work order
+ * is completed at the physical inspection, when its main job card opens, and
+ * the job carries on in the Job Cards module. HAS_JOB_CARD picks those jobs;
+ * the work order rows themselves are not changed. */
+const HAS_JOB_CARD = `EXISTS (SELECT 1 FROM job_cards jcx
+  WHERE jcx.work_order_id = wo.id AND jcx.parent_job_card_id IS NULL AND jcx.status <> 'cancelled')`;
+/* The Work Orders module's stages: open (no job card yet), completed (the job
+ * card opened, or an imported job closed without one). */
+const WO_STAGE_SQL = {
+  open: `(NOT ${HAS_JOB_CARD} AND wo.status NOT IN ('completed','cancelled'))`,
+  completed: `((${HAS_JOB_CARD} OR wo.status = 'completed') AND wo.status <> 'cancelled')`,
+  cancelled: `wo.status = 'cancelled'`,
+};
+
 router.get('/stats', async (req, res) => {
   try {
+    // ?job_card=1: the Job Cards module counts only the jobs that have one.
+    const scope = req.query.job_card === '1' ? ` AND ${HAS_JOB_CARD}` : '';
     const [counts] = await query(
       `SELECT
          COUNT(*) as total,
@@ -361,8 +378,10 @@ router.get('/stats', async (req, res) => {
          COALESCE(SUM(net_payable), 0)    as total_net_payable,
          SUM(DATE(created_at) = CURDATE()) as today,
          SUM(YEARWEEK(created_at, 1) = YEARWEEK(CURDATE(), 1)) as this_week,
-         SUM(YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())) as this_month
-       FROM work_orders WHERE workshop_id = ?`,
+         SUM(YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())) as this_month,
+         SUM(${WO_STAGE_SQL.open}) as wo_open,
+         SUM(${WO_STAGE_SQL.completed}) as wo_completed
+       FROM work_orders wo WHERE wo.workshop_id = ?${scope}`,
       [req.workshopId]
     );
     const byType = await query(
@@ -399,7 +418,7 @@ router.get('/', async (req, res) => {
   try {
     const { status, mechanic_id, customer_id, service_bay_id, date_from, date_to,
             work_order_type, payment_method, search, page = 1, limit = 50,
-            sort_by, sort_dir } = req.query;
+            sort_by, sort_dir, job_card, stage } = req.query;
     const pg = parseInt(page, 10) || 1;
     const lim = parseInt(limit, 10) || 50;
     const offset = (pg - 1) * lim;
@@ -415,6 +434,10 @@ router.get('/', async (req, res) => {
       const list = [...new Set(String(status).split(',').map(s => s.trim()).filter(Boolean))];
       if (list.length) { where += ` AND wo.status IN (${list.map(() => '?').join(',')})`; params.push(...list); }
     }
+    // The Job Cards module lists the jobs whose job card is open; the Work
+    // Orders module filters by its own stages (WO_STAGE_SQL).
+    if (job_card === '1') where += ` AND ${HAS_JOB_CARD}`;
+    if (WO_STAGE_SQL[stage]) where += ` AND ${WO_STAGE_SQL[stage]}`;
     if (mechanic_id) { where += ' AND wo.mechanic_id = ?'; params.push(mechanic_id); }
     if (customer_id) { where += ' AND wo.customer_id = ?'; params.push(customer_id); }
     if (service_bay_id) { where += ' AND wo.service_bay_id = ?'; params.push(service_bay_id); }
@@ -750,6 +773,9 @@ router.get('/:id', async (req, res) => {
               v.plate_number as vehicle_plate_number, v.vin as vehicle_vin, v.color as vehicle_color,
               ua.full_name AS customer_approved_by_name,
               ${AWAITING_PHYSICAL_SQL} AS awaiting_physical_inspection,
+              (SELECT jc.job_card_number FROM job_cards jc
+                WHERE jc.work_order_id = wo.id AND jc.parent_job_card_id IS NULL AND jc.status <> 'cancelled'
+                ORDER BY jc.id LIMIT 1) AS main_job_card_number,
               wo.scheduled_at,
               COALESCE(wa.assigned_at, wsl_assign.created_at, wo.created_at) AS assigned_at
        FROM work_orders wo
@@ -1646,6 +1672,9 @@ router.patch('/:id/assign-mechanic', requireCapability('job.assign'), async (req
     if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
       return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
     }
+    // The parts are requested (MRN) before anyone is assigned (lib/parts-request.js).
+    const mrn = await partsRequestMissing({ workOrderId: workOrder.id, workshopId: req.workshopId });
+    if (mrn) return res.status(409).json({ success: false, ...mrn });
 
     const [mechanic] = await query(
       'SELECT id, full_name FROM mechanics WHERE id = ? AND workshop_id = ?',

@@ -14,10 +14,13 @@ import {
 const CUSTOMER_TYPES = ['individual', 'business', 'corporate', 'insurance', 'fleet', 'other'];
 
 // ── Step 1 classification ──
-// Internal: Fleet / Insurance / Asset. External: Fleet / Insurance / Walk-in,
-// or none yet — most of the imported book has none, and the job card wizard
-// asks for it the next time they come in (document Step 1, D5).
-const ALL_SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'walkin'];
+// Internal: Fleet / Insurance / Asset / Staff. External: Fleet / Insurance /
+// Walk-in, or none yet — most of the imported book has none, and the job card
+// wizard asks for it the next time they come in (document Step 1, D5). Staff
+// (client point 12, 3 Nov 2026) is internal-only, like Asset.
+const ALL_SUBCATEGORIES = ['fleet', 'insurance', 'asset', 'walkin', 'staff'];
+const INTERNAL_ONLY = { asset: 'Asset', staff: 'Staff' };
+const SUB_LIST_MSG = 'customer_subcategory must be fleet, insurance, asset, staff or walkin';
 
 /** A sent customer_class, lower-cased: undefined when not sent, false when not a class. */
 function parseClass(v) {
@@ -36,11 +39,11 @@ function parseSub(v) {
 
 /** Why a class + subcategory pair cannot be stored, or null. */
 function classificationProblem(cls, sub) {
-  if (cls === 'external' && sub === 'asset') return 'Asset is an internal-only subcategory';
+  if (cls === 'external' && INTERNAL_ONLY[sub]) return `${INTERNAL_ONLY[sub]} is an internal-only subcategory`;
   if (cls === 'internal' && sub === 'walkin') return 'Walk-in is an external-only subcategory';
   // An internal account with no subcategory is listed under none of
-  // Fleet / Insurance / Asset, so the wizard can never find it (#82).
-  if (cls === 'internal' && !sub) return 'Choose Fleet, Insurance or Asset for an internal customer.';
+  // Fleet / Insurance / Asset / Staff, so the wizard can never find it (#82).
+  if (cls === 'internal' && !sub) return 'Choose Fleet, Insurance, Asset or Staff for an internal customer.';
   return null;
 }
 
@@ -202,8 +205,8 @@ router.get('/', async (req, res) => {
       params.push(customer_class);
     }
     if (customer_subcategory) {
-      if (!['fleet', 'insurance', 'asset', 'walkin'].includes(customer_subcategory)) {
-        return res.status(400).json({ success: false, message: 'customer_subcategory must be fleet, insurance, asset or walkin' });
+      if (!ALL_SUBCATEGORIES.includes(customer_subcategory)) {
+        return res.status(400).json({ success: false, message: SUB_LIST_MSG });
       }
       where += ' AND c.customer_subcategory = ?';
       params.push(customer_subcategory);
@@ -529,7 +532,15 @@ router.get('/:id', async (req, res) => {
        FROM work_orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20`,
       [req.params.id]
     );
-    return res.json({ success: true, data: { ...withoutSecrets(customer), ...workOrderStats, work_orders: workOrders } });
+    // The customer's enquiries, for the drawer on the Customers tab (client
+    // point 12: enquiries and customers are one module). Never fails the
+    // customer itself.
+    const enquiries = await query(
+      `SELECT id, enquiry_number, status, contact_method, vehicle_description, created_at
+       FROM enquiries WHERE customer_id = ? AND workshop_id = ? ORDER BY created_at DESC LIMIT 10`,
+      [req.params.id, req.workshopId]
+    ).catch(() => []);
+    return res.json({ success: true, data: { ...withoutSecrets(customer), ...workOrderStats, work_orders: workOrders, enquiries } });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch customer' });
   }
@@ -567,7 +578,7 @@ router.post('/', canEditCustomers, async (req, res) => {
     }
     const subIn = parseSub(customer_subcategory);
     if (subIn === false) {
-      return res.status(400).json({ success: false, message: 'customer_subcategory must be fleet, insurance, asset or walkin' });
+      return res.status(400).json({ success: false, message: SUB_LIST_MSG });
     }
     const _class = classIn || 'external';
     const _sub = subIn !== undefined ? subIn : (classIn ? null : 'walkin');
@@ -576,7 +587,7 @@ router.post('/', canEditCustomers, async (req, res) => {
     if (_class === 'internal' && !isManagerRole(req.user)) {
       return roleNotAllowed(res, 'Only the Workshop Manager can add an internal account: its estimates skip the Supervisor / Workshop Manager approval.');
     }
-    // 'asset' is internal-only and 'walkin' external-only. Rejecting the
+    // 'asset' and 'staff' are internal-only, 'walkin' external-only. Rejecting the
     // combination rather than quietly rewriting it: a caller that sends
     // external+asset has a bug, and silently storing something else makes
     // that bug invisible until the fleet desk cannot find the account.
@@ -720,7 +731,7 @@ router.put('/:id', canEditCustomers, async (req, res) => {
     }
     const subIn = parseSub(body.customer_subcategory);
     if (subIn === false) {
-      return res.status(400).json({ success: false, message: 'customer_subcategory must be fleet, insurance, asset or walkin' });
+      return res.status(400).json({ success: false, message: SUB_LIST_MSG });
     }
     const _class = classIn || existing.customer_class;
     const _sub = subIn !== undefined ? subIn : (existing.customer_subcategory || null);

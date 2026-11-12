@@ -82,8 +82,9 @@
    Markers are stored relative to the car picture (CarDamageDiagram.jsx,
    lib/inspectionMarks.js), so they sit on the spot that was clicked whatever
    the width of this panel. Markers saved before that are relative to the
-   staff form's box and can sit a little off here; the list under the
-   diagram is the record either way: code, view and note. */
+   staff form's box and can sit a little off here. A marker is a plain red
+   dot; only those saved with a damage type (or a note) are listed under the
+   diagram: code, view and note. */
 .il-diagram { max-width: 300px; margin: 0 auto 14px; }
 
 .il-marks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }

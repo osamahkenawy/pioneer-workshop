@@ -122,7 +122,7 @@ const via = conn => (conn ? async (sql, params = []) => (await conn.query(sql, p
 export async function markEnquiryConverted({ workshopId, enquiryId, workOrderId, customerId = null, userId = null, conn = null }) {
   if (!enquiryId || !workOrderId) return;
   const q = via(conn);
-  const [enq] = await q('SELECT work_order_id FROM enquiries WHERE id = ? AND workshop_id = ?', [enquiryId, workshopId]);
+  const [enq] = await q('SELECT work_order_id, customer_id, emirate FROM enquiries WHERE id = ? AND workshop_id = ?', [enquiryId, workshopId]);
   let repoint = !enq?.work_order_id;
   if (enq?.work_order_id && Number(enq.work_order_id) !== Number(workOrderId)) {
     const [other] = await q('SELECT work_order_number FROM work_orders WHERE id = ?', [workOrderId]);
@@ -139,6 +139,8 @@ export async function markEnquiryConverted({ workshopId, enquiryId, workOrderId,
     [workOrderId, repoint ? 1 : 0, workOrderId, customerId, enquiryId, workshopId]);
   await q('UPDATE work_orders SET enquiry_id = COALESCE(enquiry_id, ?) WHERE id = ? AND workshop_id = ?',
     [enquiryId, workOrderId, workshopId]);
+  // The customer it was converted for gets the enquiry's emirate when it has none.
+  await fillCustomerEmirate({ workshopId, customerId: customerId || enq?.customer_id, emirate: enq?.emirate, conn });
   await closeTasks({ workshopId, relatedType: 'enquiry', relatedId: enquiryId, userId, outcome: 'Converted to a job' });
 }
 
@@ -335,6 +337,48 @@ const asciiDigits = s => String(s || '')
 const digits = s => asciiDigits(s).replace(/\D/g, '');
 
 /**
+ * The emirate an enquiry comes from (client meeting, 2026-11-03), so the lead
+ * reaches that emirate's team: one of the seven, as the vehicle's plate
+ * emirate (routes/vehicles.js). Case, spacing and hyphens are forgiven:
+ * 'ras al-khaimah' is stored as 'Ras Al Khaimah'.
+ * @returns {{value: string|null|undefined}|{error: string}} undefined: not sent; null: blank.
+ */
+export const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
+const emirateKey = v => String(v).toLowerCase().replace(/[^a-z]/g, '');
+export function parseEmirate(v) {
+  if (v === undefined) return { value: undefined };
+  if (v === null || String(v).trim() === '') return { value: null };
+  const hit = EMIRATES.find(e => emirateKey(e) === emirateKey(v));
+  return hit ? { value: hit } : { error: `Emirate "${String(v).trim().slice(0, 40)}" is not one of: ${EMIRATES.join(', ')}.` };
+}
+
+/**
+ * The car at the enquiry is its make, model and year only (client meeting,
+ * 2026-11-03). The year: 4 digits, 1950 to next year (the same shape as
+ * parseEmirate). vehicle_description is still written, as "Make Model Year",
+ * for the screens and reports that read it.
+ */
+export function parseVehicleYear(v) {
+  if (v === undefined) return { value: undefined };
+  if (v === null || String(v).trim() === '') return { value: null };
+  const s = asciiDigits(String(v).trim()); const max = new Date().getFullYear() + 1;
+  return /^\d{4}$/.test(s) && Number(s) >= 1950 && Number(s) <= max
+    ? { value: Number(s) } : { error: `The vehicle year must be 4 digits, 1950 to ${max}.` };
+}
+export const enquiryVehicleText = (make, model, year) =>
+  [make, model, year].map(x => String(x ?? '').trim()).filter(Boolean).join(' ') || null;
+
+/**
+ * The enquiry's emirate onto the customer record it created or linked, when
+ * that record has none. Never overwrites one already there.
+ */
+export async function fillCustomerEmirate({ workshopId, customerId, emirate, conn = null }) {
+  if (!customerId || !emirate) return;
+  await via(conn)("UPDATE customers SET emirate = ? WHERE id = ? AND workshop_id = ? AND (emirate IS NULL OR TRIM(emirate) = '')",
+    [emirate, customerId, workshopId]);
+}
+
+/**
  * The country code a number was written with, when it says: '+966 5…' and
  * '00966 5…' are Saudi, a local '05…' is the UAE, a bare 9 digits says
  * nothing. Used only to stop a last-9-digits match from joining a Saudi
@@ -390,13 +434,14 @@ export async function findCustomerByContact({ workshopId, phone, email, name }, 
 /**
  * The customer behind an enquiry: the one already linked (while it is still
  * active), else one on file with the same phone or e-mail, else a new record
- * from the enquiry's contact details. Links it on the enquiry.
+ * from the enquiry's contact details. Links it on the enquiry, and gives it
+ * the enquiry's emirate when it has none.
  */
 export async function customerForEnquiry(enq, { conn = null } = {}) {
   const q = via(conn);
   if (enq.customer_id) {
     const [linked] = await q('SELECT id FROM customers WHERE id = ? AND workshop_id = ? AND is_active = 1', [enq.customer_id, enq.workshop_id]);
-    if (linked) return linked.id;
+    if (linked) { await fillCustomerEmirate({ workshopId: enq.workshop_id, customerId: linked.id, emirate: enq.emirate, conn }); return linked.id; }
   }
   let id = await findCustomerByContact(
     { workshopId: enq.workshop_id, phone: enq.contact_phone, email: enq.contact_email, name: enq.contact_name }, { conn });
@@ -408,11 +453,13 @@ export async function customerForEnquiry(enq, { conn = null } = {}) {
     const company = ['corporate', 'fleet'].includes(enq.payer_type);
     const sub = company ? 'fleet' : 'walkin';
     const r = await q(
-      `INSERT INTO customers (workshop_id, full_name, phone, email, type, customer_class, customer_subcategory, notes)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [enq.workshop_id, enq.contact_name || 'Customer', enq.contact_phone || '', enq.contact_email || null,
+      `INSERT INTO customers (workshop_id, full_name, phone, email, emirate, type, customer_class, customer_subcategory, notes)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [enq.workshop_id, enq.contact_name || 'Customer', enq.contact_phone || '', enq.contact_email || null, enq.emirate || null,
        company ? enq.payer_type : 'individual', 'external', sub, `From enquiry ${enq.enquiry_number}`]);
     id = r.insertId;
+  } else {
+    await fillCustomerEmirate({ workshopId: enq.workshop_id, customerId: id, emirate: enq.emirate, conn });
   }
   await q('UPDATE enquiries SET customer_id = ? WHERE id = ?', [id, enq.id]);
   return id;
@@ -439,9 +486,13 @@ const PLATE_SQL = "UPPER(REPLACE(REPLACE(plate_number, ' ', ''), '-', ''))";
 
 /**
  * The vehicle behind an enquiry: the one linked (if it is this customer's),
- * else THIS customer's vehicle with the enquiry's plate, else a new one when
- * the enquiry names a plate or a vehicle ("Toyota Camry 2019"). Returns null
- * when there is nothing to go on.
+ * else THIS customer's vehicle with the enquiry's plate, else a new one with
+ * that plate and the enquiry's make, model and year (an older enquiry's
+ * "Toyota Camry 2019" text). Returns null when there is no plate to go on:
+ * the enquiry form asks only make, model and year now (client meeting,
+ * 2026-11-03), and a car made up without its plate would be one more record
+ * to complete — the work order gets the car when it comes in, its "Add a new
+ * vehicle" starting from the enquiry's make, model and year.
  *
  * A plate that is on file under a different customer is neither attached nor
  * duplicated: who owns the car is for the advisor to settle. The vehicle is
@@ -473,13 +524,20 @@ export async function vehicleForEnquiry(enq, customerId, { conn = null, info = {
       return null;
     }
   }
-  const desc = String(enq.vehicle_description || '').trim();
-  if (!plate && !desc) return null;
-  const year = (desc.match(/\b(19|20)\d{2}\b/) || [])[0] || null;
-  const words = desc.replace(/\b(19|20)\d{2}\b/, '').trim().split(/\s+/).filter(Boolean);
+  if (!plate) return null;
+  let make = String(enq.vehicle_make || '').trim();
+  let model = String(enq.vehicle_model || '').trim();
+  let year = enq.vehicle_year || null;
+  if (!make && !model && !year) {
+    // An enquiry from before the make / model / year fields: its free text.
+    const desc = String(enq.vehicle_description || '').trim();
+    year = (desc.match(/\b(19|20)\d{2}\b/) || [])[0] || null;
+    const words = desc.replace(/\b(19|20)\d{2}\b/, '').trim().split(/\s+/).filter(Boolean);
+    make = words[0] || ''; model = words.slice(1).join(' ');
+  }
   const r = await q(
     'INSERT INTO vehicles (workshop_id, customer_id, make, model, year, plate_number, notes) VALUES (?,?,?,?,?,?,?)',
-    [enq.workshop_id, customerId, words[0] || 'Unknown', words.slice(1).join(' ') || '—', year, plate || null,
+    [enq.workshop_id, customerId, make || 'Unknown', model || '—', year, plate,
      `From enquiry ${enq.enquiry_number}`]);
   await q('UPDATE enquiries SET vehicle_id = ? WHERE id = ?', [r.insertId, enq.id]);
   return r.insertId;
@@ -510,7 +568,7 @@ export function intakeChannelFor(contactMethod) {
 
 /**
  * Who pays, from the Step 1 classification: an internal account is billed on
- * account (fleet / asset as 'fleet', insurance as 'insurance'); an outside
+ * account (fleet / asset / staff as 'fleet', insurance as 'insurance'); an outside
  * fleet is on account, an outside insurer pays as 'insurance', a walk-in pays.
  */
 export function payerTypeForClass(customerClass, subcategory) {

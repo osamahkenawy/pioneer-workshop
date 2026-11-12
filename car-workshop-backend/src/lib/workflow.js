@@ -385,7 +385,8 @@ export async function buildWorkflow(workOrderId, workshopId) {
         WHERE sl.work_order_id = ? ORDER BY sl.id LIMIT 1`, [wo.id]),
     // Step 4: the technical inspection and its report (routes/technical-inspections.js).
     query(
-      `SELECT ti.id, ti.status, ti.completed_at, ti.service_lines, ui.full_name AS inspected_by_name, uc.full_name AS completed_by_name
+      `SELECT ti.id, ti.status, ti.completed_at, ti.service_lines, ti.shared_at, ti.shared_via,
+              ui.full_name AS inspected_by_name, uc.full_name AS completed_by_name
          FROM technical_inspections ti
          LEFT JOIN users ui ON ui.id = ti.inspected_by LEFT JOIN users uc ON uc.id = ti.completed_by
         WHERE ti.work_order_id = ? AND ti.workshop_id = ?`, [wo.id, workshopId]),
@@ -488,12 +489,18 @@ export async function buildWorkflow(workOrderId, workshopId) {
     job_card_open: !!main,
   };
   const partsWaiting = reqItems.filter(i => i.availability !== 'available' && Number(i.quantity_issued) < Number(i.quantity_requested));
+  // The parts are requested (MRN) before a technician is assigned (client
+  // meeting, 3 Nov 2026; lib/parts-request.js): needed when the approved work has parts.
+  const partsNeeded = items.some(i => i.item_type === 'parts');
+  const mrnMissing = !!main && partsNeeded && reqItems.length === 0;
   // Step 4: the Supervisor / Foreman's technical inspection, whose report the
   // estimate is raised from (client review, 2 Nov 2026). lines: how many service lines.
   const technical = techRow ? {
     id: techRow.id, status: techRow.status, completed_at: techRow.completed_at || null,
     completed_by_name: techRow.completed_by_name || null, inspected_by_name: techRow.inspected_by_name || null,
     lines: countLines(techRow.service_lines),
+    // The customer's copy (client meeting, 3 Nov 2026, point 8).
+    shared_at: techRow.shared_at || null, shared_via: techRow.shared_via || null,
   } : null;
   const techDone = technical?.status === 'completed';
 
@@ -633,6 +640,8 @@ export async function buildWorkflow(workOrderId, workshopId) {
           rejectedAll ? { key: 'val.rejected_all' } : estimate?.status === 'partially_approved' || (estimate?.status === 'converted' && pricing?.rejected > 0) ? { key: 'val.partial' } : approved ? { key: 'val.approved' } : null),
         C('jc_for_work', 'Job card(s) for the approved work', approved && !!main,
           cards.length ? `${cards.length} job card(s)` : null, cards.length ? { key: 'val.job_cards', params: { n: cards.length } } : null),
+        ...(partsNeeded ? [C('mrn', 'Parts requested from the Store (MRN)', !mrnMissing,
+          reqItems.length ? [...new Set(reqItems.map(i => i.req_number))].join(', ') : null)] : []),
         C('technician', 'Technician assigned by the Team Leader', !!wo.mechanic_id, wo.mechanic_name || null),
         C('time_booked', 'Time booked (Start / Pause / Stop)', cards.some(c => c.time.sessions > 0),
           cards.some(c => c.time.sessions > 0) ? `${fmtMinutes(cards.reduce((s, c) => s + c.time.minutes, 0))}${timeByCardRunning(cards) ? ' · running' : ''}` : null,
@@ -703,7 +712,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     },
     steps,
     current_step: steps.find(s => s.state === 'current')?.n || null,
-    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, customerClass, physical, techDone }),
+    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, mrnMissing, customerClass, physical, techDone }),
     // Step 3: where the physical inspection and the customer's acknowledgement stand.
     physical_inspection: physical,
     // Step 4: the technical inspection (null = not started).
@@ -943,7 +952,7 @@ function nextAction(c) {
   if (c.rejectedAll) return N('service_advisor', 'Service Advisor', 'rejected_all', 'The customer rejected the estimate. The regret email has gone out — record their reason and close the job.');
   if (!cur) return null;
   switch (cur.key) {
-    case 'classification': return N('service_advisor', 'Service Advisor', 'classify', 'Classify the customer: Internal or External, then Fleet, Insurance, Asset or Walk-in.', 'classify');
+    case 'classification': return N('service_advisor', 'Service Advisor', 'classify', 'Classify the customer: Internal or External, then Fleet, Insurance, Asset, Staff or Walk-in.', 'classify');
     case 'intake': {
       // Say what is missing, not just "the intake" (C7).
       const list = c.intakeMissing.length ? c.intakeMissing : ['the vehicle', 'the reported issue'];
@@ -973,7 +982,7 @@ function nextAction(c) {
           'Raise the estimate from the technical report: price the labour; the parts go to the Store.', 'create_estimate');
         if (c.physical.job_card_open || !c.physical.needed) return N('supervisor_foreman', 'Supervisor / Foreman', 'technical_inspection',
           'Carry out the technical inspection and write the technical report — each service line with its labour and parts.', 'tech_inspect');
-        return N('service_advisor', 'Service Advisor', 'create_estimate', 'Carry out the technical inspection and raise the estimate with the findings.', 'create_estimate');
+        return N('service_advisor', 'Service Advisor', 'create_estimate', 'Carry out the technical inspection, then raise the estimate from its report.', 'create_estimate');
       }
       if (c.pricing?.unpricedParts > 0) {
         const pref = prefText(partsPreference(c.estimate));
@@ -989,6 +998,7 @@ function nextAction(c) {
       return N('service_advisor', 'Service Advisor', 'send_estimate', 'Send the estimate to the customer by WhatsApp or Email.', 'open_estimate');
     case 'work':
       if (!c.approved) return N('customer', 'Customer', 'await_customer', 'Waiting for the customer to approve or reject the estimate lines.', c.counterPriced ? 'record_approval' : 'open_estimate');
+      if (!c.wo.mechanic_id && c.mrnMissing) return N('team_leader', 'Team Leader', 'request_parts', 'Request the parts from the Store with a material requisition (MRN), then assign the technician.', 'parts');
       if (!c.wo.mechanic_id) return N('team_leader', 'Team Leader', 'assign', 'Assign the job to a technician.', 'assign');
       if (c.partsWaiting.length) return N('storekeeper', 'Storekeeper', 'parts_waiting', `${c.partsWaiting.length} part(s) not issued yet — check the shelf or record the expected arrival date.`, 'parts', { n: c.partsWaiting.length });
       return N('technician', 'Technician', 'work', 'Work the job with time booking (Start / Pause / Stop), then mark it done.', 'time');

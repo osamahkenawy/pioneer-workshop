@@ -19,6 +19,13 @@
  * After-Market / Used) go with it. Until an estimate is raised on the work
  * order, editing them on the enquiry updates the work order too.
  *
+ * Client meeting (2026-11-03): every staff enquiry records the emirate the
+ * customer is in (so it reaches that emirate's team), and the car is asked
+ * as make, model and year only (vehicle_make / vehicle_model / vehicle_year;
+ * vehicle_description is still written as "Make Model Year"). The plate and
+ * free-text vehicle are still accepted from older callers. "Not converted"
+ * is off the Enquiries page; POST /:id/lost stays for the API.
+ *
  * Mounted at: /api/enquiries
  */
 import express from 'express';
@@ -32,7 +39,7 @@ import { clampText } from '../lib/sanitize.js';
 import {
   onEnquiryCreated, onEnquiryNurture, closeTasks, markEnquiryConverted, customerForEnquiry, vehicleForEnquiry,
   notePlateConflict, intakeChannelFor, payerTypeForClass, snapshotIntakeClass, enquiryContactMethods,
-  openEnquiryWorkOrder, closeEnquiryWorkOrder,
+  openEnquiryWorkOrder, closeEnquiryWorkOrder, parseEmirate, parseVehicleYear, enquiryVehicleText, fillCustomerEmirate,
 } from '../lib/crm-cycle.js';
 
 const router = express.Router();
@@ -84,11 +91,16 @@ const complaintOf = v => (v == null ? null : clampText(String(v).trim()) || null
 const COMPLAINT_TOO_LONG = { success: false, code: 'TEXT_TOO_LONG',
   message: `The customer complaint is too long (${COMPLAINT_MAX.toLocaleString('en-US')} characters at most).` };
 const prefInvalid = error => ({ success: false, code: 'PARTS_PREFERENCE_INVALID', message: error });
+const invalidValue = message => ({ success: false, code: 'INVALID_VALUE', message });
+const EMIRATE_REQUIRED = { success: false, code: 'EMIRATE_REQUIRED',
+  message: 'Select the emirate the customer is in — it decides which team the enquiry goes to.' };
+// A make or model as stored: trimmed, at most the vehicles table's 100 characters.
+const carName = v => (v == null ? null : String(v).trim().slice(0, 100) || null);
 
 // GET /api/enquiries — list with filters
 router.get('/', async (req, res) => {
   try {
-    const { status, source_channel, payer_type, service_tier, search, due, page = 1, limit = 50 } = req.query;
+    const { status, source_channel, payer_type, service_tier, emirate, search, due, page = 1, limit = 50 } = req.query;
     const pg = parseInt(page, 10) || 1;
     const lim = Math.min(parseInt(limit, 10) || 50, 200);
     const offset = (pg - 1) * lim;
@@ -99,6 +111,7 @@ router.get('/', async (req, res) => {
     if (source_channel) { where += ' AND e.source_channel = ?'; params.push(source_channel); }
     if (payer_type) { where += ' AND e.payer_type = ?'; params.push(payer_type); }
     if (service_tier) { where += ' AND e.service_tier = ?'; params.push(service_tier); }
+    if (emirate) { where += ' AND e.emirate = ?'; params.push(parseEmirate(emirate).value || emirate); }
     if (due === 'true') { where += ' AND e.follow_up_at IS NOT NULL AND e.follow_up_at <= NOW() AND e.status IN ("new","quoted","nurture")'; }
     if (search) {
       where += ' AND (e.enquiry_number LIKE ? OR e.contact_name LIKE ? OR e.contact_phone LIKE ? OR e.description LIKE ?)';
@@ -227,6 +240,12 @@ router.get('/:id', async (req, res) => {
  *   parts_preference  — the parts the customer accepts: ['genuine','used'] or
  *                       'genuine,used' (any of genuine / after_market / used);
  *                       none = not asked. Both are copied to the work order.
+ *   emirate           — required: one of the seven (lib/crm-cycle.js EMIRATES);
+ *                       400 EMIRATE_REQUIRED / INVALID_VALUE otherwise
+ *   vehicle_make, vehicle_model, vehicle_year — the car (all optional; the
+ *                       year 4 digits, 1950 to next year). vehicle_description
+ *                       is written from them; without them a sent
+ *                       vehicle_description / vehicle_plate is kept (older callers).
  * enquiry_type is no longer on the form; it stays 'service' unless sent.
  */
 router.post('/', async (req, res) => {
@@ -237,6 +256,9 @@ router.post('/', async (req, res) => {
       source_channel, source_detail, referred_by, contact_method,
       payer_type, status, follow_up_at, assigned_to, parts_preference,
     } = req.body;
+    const emirate = parseEmirate(req.body.emirate);
+    const year = parseVehicleYear(req.body.vehicle_year);
+    const make = carName(req.body.vehicle_make); const model = carName(req.body.vehicle_model);
 
     // Website leads can arrive with only an e-mail address; either way the
     // workshop needs one way to reach the person.
@@ -252,6 +274,10 @@ router.post('/', async (req, res) => {
     if (complaintTooLong(description)) return res.status(400).json(COMPLAINT_TOO_LONG);
     const pref = parsePartsPreference(parts_preference);
     if (pref.error) return res.status(400).json(prefInvalid(pref.error));
+    if (emirate.error) return res.status(400).json(invalidValue(emirate.error));
+    if (!emirate.value) return res.status(400).json(EMIRATE_REQUIRED);
+    if (year.error) return res.status(400).json(invalidValue(year.error));
+    const carText = enquiryVehicleText(make, model, year.value);
 
     // Enquiry numbers are a random draw per day; a collision draws again.
     let result;
@@ -259,13 +285,15 @@ router.post('/', async (req, res) => {
       try {
         result = await execute(
           `INSERT INTO enquiries
-             (workshop_id, enquiry_number, customer_id, vehicle_id, contact_name, contact_phone, contact_email,
-              vehicle_description, vehicle_plate, enquiry_type, service_tier, description, parts_preference,
+             (workshop_id, enquiry_number, customer_id, vehicle_id, contact_name, contact_phone, contact_email, emirate,
+              vehicle_description, vehicle_make, vehicle_model, vehicle_year, vehicle_plate,
+              enquiry_type, service_tier, description, parts_preference,
               quoted_amount, quoted_at, source_channel, source_detail, referred_by, contact_method, payer_type, status,
               follow_up_at, assigned_to, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [req.workshopId, genEnquiryNumber(), customer_id || null, vehicle_id || null,
-           contact_name.trim(), String(contact_phone || '').trim() || null, contact_email || null, vehicle_description || null,
+           contact_name.trim(), String(contact_phone || '').trim() || null, contact_email || null, emirate.value,
+           carText || vehicle_description || null, make, model, year.value ?? null,
            vehicle_plate ? String(vehicle_plate).trim().toUpperCase().slice(0, 30) : null,
            enquiry_type || 'service', service_tier || null, complaintOf(description), pref.value ?? null,
            quoted_amount != null && quoted_amount !== '' ? quoted_amount : null,
@@ -295,8 +323,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT /api/enquiries/:id — fields not sent keep their value. description and
-// parts_preference as on POST; parts_preference null / [] clears it.
+// PUT /api/enquiries/:id — fields not sent keep their value. description,
+// parts_preference, emirate and the car as on POST; parts_preference null / []
+// clears it. Sending any of vehicle_make / _model / _year rewrites
+// vehicle_description from them; an older enquiry's free text stays while
+// none of them is given.
 router.put('/:id', async (req, res) => {
   try {
     const [existing] = await query('SELECT * FROM enquiries WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
@@ -312,17 +343,30 @@ router.put('/:id', async (req, res) => {
     const pref = parsePartsPreference(req.body.parts_preference);
     if (pref.error) return res.status(400).json(prefInvalid(pref.error));
     f.parts_preference = pref.value !== undefined ? pref.value : (existing.parts_preference || null);
+    const emirate = parseEmirate(req.body.emirate);
+    if (emirate.error) return res.status(400).json(invalidValue(emirate.error));
+    f.emirate = emirate.value !== undefined ? emirate.value : (existing.emirate || null);
+    if (['vehicle_make', 'vehicle_model', 'vehicle_year'].some(k => req.body[k] !== undefined)) {
+      const year = parseVehicleYear(req.body.vehicle_year);
+      if (year.error) return res.status(400).json(invalidValue(year.error));
+      f.vehicle_make = carName(f.vehicle_make); f.vehicle_model = carName(f.vehicle_model);
+      f.vehicle_year = year.value !== undefined ? year.value : (existing.vehicle_year ?? null);
+      const carText = enquiryVehicleText(f.vehicle_make, f.vehicle_model, f.vehicle_year);
+      if (carText || existing.vehicle_make || existing.vehicle_model || existing.vehicle_year) f.vehicle_description = carText;
+    }
     const quotedChanged = req.body.quoted_amount != null && String(req.body.quoted_amount) !== String(existing.quoted_amount);
 
     await execute(
       `UPDATE enquiries SET
-         customer_id=?, vehicle_id=?, contact_name=?, contact_phone=?, contact_email=?, vehicle_description=?, vehicle_plate=?,
+         customer_id=?, vehicle_id=?, contact_name=?, contact_phone=?, contact_email=?, emirate=?,
+         vehicle_description=?, vehicle_make=?, vehicle_model=?, vehicle_year=?, vehicle_plate=?,
          enquiry_type=?, service_tier=?, description=?, parts_preference=?, quoted_amount=?, quoted_at=?,
          source_channel=?, source_detail=?, referred_by=?, contact_method=?, payer_type=?,
          status=?, lost_reason=?, lost_notes=?, follow_up_at=?, assigned_to=?
        WHERE id = ? AND workshop_id = ?`,
-      [f.customer_id || null, f.vehicle_id || null, f.contact_name, f.contact_phone || null, f.contact_email || null,
-       f.vehicle_description || null, f.vehicle_plate ? String(f.vehicle_plate).trim().toUpperCase().slice(0, 30) : null, f.enquiry_type, f.service_tier || null, f.description || null,
+      [f.customer_id || null, f.vehicle_id || null, f.contact_name, f.contact_phone || null, f.contact_email || null, f.emirate,
+       f.vehicle_description || null, f.vehicle_make || null, f.vehicle_model || null, f.vehicle_year || null,
+       f.vehicle_plate ? String(f.vehicle_plate).trim().toUpperCase().slice(0, 30) : null, f.enquiry_type, f.service_tier || null, f.description || null,
        f.parts_preference || null,
        f.quoted_amount != null && f.quoted_amount !== '' ? f.quoted_amount : null,
        quotedChanged ? new Date() : (existing.quoted_at || null),
@@ -349,6 +393,8 @@ router.put('/:id', async (req, res) => {
         [prefChanged ? 1 : 0, pref.value || null, complaintChanged ? 1 : 0, existing.description || '', f.description,
          woId, req.workshopId]);
     }
+    // An emirate given now goes onto its customer record if that has none.
+    await fillCustomerEmirate({ workshopId: req.workshopId, customerId: f.customer_id, emirate: f.emirate });
 
     // Marked lost here (rather than through /lost): its work order goes as there.
     let workOrder = null;
@@ -400,8 +446,9 @@ router.post('/:id/lost', async (req, res) => {
 
 // POST /api/enquiries/:id/prepare-quote — Quote stage: make sure the enquiry
 // has a customer (the one on file with the same phone/e-mail, else a new
-// record) and, when it names one, a vehicle, so the estimate form can open
-// already filled in. Returns what the form needs.
+// record) and, when it names a plate, a vehicle, so the estimate form can open
+// already filled in. Returns what the form needs; without a plate there is no
+// vehicle_id, and `vehicle` carries the make, model and year asked.
 router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (req, res) => {
   // The enquiry row is locked while its customer and car are found or
   // created, so two people pressing Quote at once get one of each.
@@ -431,6 +478,10 @@ router.post('/:id/prepare-quote', requireCapability('estimate.raise'), async (re
               // The parts the customer accepts (the work order's, else the enquiry's): ['genuine','used'], null = not asked.
               parts_preference: (enqWo?.parts_preference || enq.parts_preference)
                 ? String(enqWo?.parts_preference || enq.parts_preference).split(',') : null,
+              // The car as asked at the enquiry (make, model, year), for a form
+              // that adds it while vehicle_id is null (no plate was given).
+              vehicle: { make: enq.vehicle_make || null, model: enq.vehicle_model || null, year: enq.vehicle_year || null,
+                         description: enq.vehicle_description || null },
               vehicle_conflict: info.conflict || null },
     });
   } catch (err) {

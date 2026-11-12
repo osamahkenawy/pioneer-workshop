@@ -109,6 +109,12 @@ export default function Protected({ children, module, managersOnly = false }) {
     if (to) return <Navigate to={to} replace />;
   }
   const needs = module || moduleForPath(pathname);
+  // Job Cards without Work Orders (the Foreman, client meeting 3 Nov 2026):
+  // a link to a work order — boards, tasks, notifications — opens its job card.
+  if (needs === 'work-orders' && !hasModule(user, 'work-orders') && hasModule(user, 'job-cards')) {
+    const wo = pathname.match(WORK_ORDER_PAGE);
+    if (wo || pathname === '/work-orders') return <Navigate to={wo ? `/job-cards/${wo[1]}${search}` : '/job-cards'} replace />;
+  }
   if ((needs && !hasModule(user, needs)) || (managersOnly && !isManager(user))) {
     return <Layout><NotAvailable home={homeFor(user)} /></Layout>;
   }

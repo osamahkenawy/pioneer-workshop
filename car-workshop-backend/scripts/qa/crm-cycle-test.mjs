@@ -27,6 +27,16 @@ const mainOf = async woId => (await q('SELECT * FROM job_cards WHERE work_order_
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 /** The physical inspection with the customer at the car: signed, then completed (opens an external customer's job card). */
 const acknowledge = async (tok, woId, name) => {
+  // The physical inspection's header is the work order's and all required
+  // (client review, 2 Nov 2026): the advisor completes the car's record on
+  // the work order first, as its Vehicle page asks.
+  const [w] = await q('SELECT vehicle_id FROM work_orders WHERE id = ?', [woId]);
+  const [v] = w?.vehicle_id ? await q('SELECT * FROM vehicles WHERE id = ?', [w.vehicle_id]) : [null];
+  if (v) {
+    const car = { year: 2019, make: 'Honda', model: 'Civic', vin: 'JHMFC1F30KX000992', plate_number: 'QACRM2', plate_emirate: 'Dubai' };
+    const lacking = Object.fromEntries(Object.entries(car).filter(([k]) => !String(v[k] ?? '').trim()));
+    if (Object.keys(lacking).length) await call('PUT', `/vehicles/${v.id}`, tok, lacking);
+  }
   const insp = (await call('POST', '/vehicle-inspections', tok, { work_order_id: woId, inspection_type: 'intake' })).json?.data;
   await call('PATCH', `/vehicle-inspections/${insp?.id}/signature`, tok, { signature: PNG, name });
   return call('PATCH', `/vehicle-inspections/${insp?.id}/complete`, tok, {});
@@ -51,10 +61,17 @@ try {
   // ── 01–03 Lead arrives, know the car, follow up ────────────────────
   section = 'lead';
   const phone = `+97150${String(Date.now()).slice(-7)}`;
-  const e1 = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Lead', contact_phone: phone, contact_email: 'qa-crm-lead@example.invalid',
-    vehicle_description: 'Kia Sportage 2021', vehicle_plate: 'QACRM1', enquiry_type: 'service', description: 'Brake noise', source_channel: 'search_discovery', contact_method: 'phone' });
+  // The car is asked as make, model and year, and the emirate is required (client meeting, 3 Nov 2026);
+  // the plate is still accepted from API callers.
+  const e1 = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Lead', contact_phone: phone, contact_email: 'qa-crm-lead@example.invalid', emirate: 'Dubai',
+    vehicle_make: 'Kia', vehicle_model: 'Sportage', vehicle_year: 2021, vehicle_plate: 'QACRM1', enquiry_type: 'service', description: 'Brake noise', source_channel: 'search_discovery', contact_method: 'phone' });
   const enq = e1.json?.data;
-  expect('staff enquiry saved with the plate', e1.status === 201 && enq?.vehicle_plate === 'QACRM1', enq?.enquiry_number);
+  expect('staff enquiry saved with the plate, its emirate and the car as "Make Model Year"', e1.status === 201 && enq?.vehicle_plate === 'QACRM1' && enq.emirate === 'Dubai'
+    && enq.vehicle_make === 'Kia' && enq.vehicle_year === 2021 && enq.vehicle_description === 'Kia Sportage 2021', enq?.enquiry_number);
+  const noEmirate = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM No Emirate', contact_phone: '+971500000995', source_channel: 'passing_local' });
+  const badEmirate = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM No Emirate', contact_phone: '+971500000995', source_channel: 'passing_local', emirate: 'Doha' });
+  expect('an enquiry without its emirate, or with one that is not an emirate, is refused (400)', noEmirate.status === 400 && noEmirate.json?.code === 'EMIRATE_REQUIRED'
+    && badEmirate.status === 400 && badEmirate.json?.code === 'INVALID_VALUE', `${noEmirate.status} ${noEmirate.json?.code} · ${badEmirate.status} ${badEmirate.json?.code}`);
   // The client's change (2026-10-29): the work order — the visit — opens the moment the enquiry is submitted.
   const eWo = e1.json?.work_order;
   const [eWoRow] = await q('SELECT wo.id, wo.enquiry_id, wo.intake_channel, wo.status, e.work_order_id AS enq_wo FROM work_orders wo JOIN enquiries e ON e.id = wo.enquiry_id WHERE wo.id = ?', [eWo?.id || 0]);
@@ -63,23 +80,28 @@ try {
     eWoRow ? `${eWo.work_order_number} ${eWoRow.intake_channel} ${eWoRow.status}` : JSON.stringify(e1.json?.work_order));
   const cb = await task('call_back', 'enquiry', enq.id);
   expect('call-back task opened for the new lead', cb?.status === 'open', cb?.title);
-  const emailOnly = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Email', contact_email: 'qa-crm-email@example.invalid', source_channel: 'search_discovery', contact_method: 'website_form' });
+  const emailOnly = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Email', contact_email: 'qa-crm-email@example.invalid', emirate: 'Sharjah', source_channel: 'search_discovery', contact_method: 'website_form' });
   expect('an e-mail-only lead is accepted', emailOnly.status === 201, `HTTP ${emailOnly.status}`);
-  const web = await call('POST', '/public/enquiries', null, { customerName: 'QA CRM Web', phone: '+971500000991', email: 'qa-crm-web@example.invalid', service: 'Oil change', vehicle: { make: 'Nissan', model: 'Patrol', year: 2020 } });
+  const web = await call('POST', '/public/enquiries', null, { customerName: 'QA CRM Web', phone: '+971500000991', email: 'qa-crm-web@example.invalid', service: 'Oil change', emirate: 'sharjah', vehicle: { make: 'Nissan', model: 'Patrol', year: 2020 } });
   const webId = web.json?.data?.id;
   expect('website lead lands with a call-back task', web.status === 201 && (await task('call_back', 'enquiry', webId))?.status === 'open', `HTTP ${web.status}`);
   const [webWo] = await q(`SELECT wo.intake_channel, wo.status, c.full_name FROM enquiries e JOIN work_orders wo ON wo.id = e.work_order_id AND wo.enquiry_id = e.id
                               LEFT JOIN customers c ON c.id = wo.customer_id WHERE e.id = ?`, [webId || 0]);
   expect('…and as its work order, Received via the website, for the customer found or added from the form', webWo?.intake_channel === 'website' && webWo.status === 'pending' && webWo.full_name === 'QA CRM Web',
     webWo ? `${webWo.intake_channel} ${webWo.status} ${webWo.full_name}` : 'no work order');
+  const [webEnq] = await q('SELECT e.emirate, e.vehicle_make, e.vehicle_model, e.vehicle_year, e.vehicle_id, wo.vehicle_id AS wo_vehicle FROM enquiries e LEFT JOIN work_orders wo ON wo.id = e.work_order_id WHERE e.id = ?', [webId || 0]);
+  expect('…with its emirate and make / model / year; no plate, so no car is made up (it is added on the work order)',
+    webEnq?.emirate === 'Sharjah' && webEnq.vehicle_make === 'Nissan' && webEnq.vehicle_model === 'Patrol' && webEnq.vehicle_year === 2020 && !webEnq.vehicle_id && !webEnq.wo_vehicle,
+    webEnq ? `${webEnq.emirate} ${webEnq.vehicle_make} ${webEnq.vehicle_model} ${webEnq.vehicle_year} · vehicle ${webEnq.vehicle_id}/${webEnq.wo_vehicle}` : 'no enquiry');
 
   // ── 04 Quote ───────────────────────────────────────────────────────
   section = 'quote';
   const prep = await call('POST', `/enquiries/${enq.id}/prepare-quote`, advisor);
   const custId = prep.json?.data?.customer?.id; const vehId = prep.json?.data?.vehicle_id;
   const [veh] = vehId ? await q('SELECT make, model, year, plate_number, customer_id FROM vehicles WHERE id = ?', [vehId]) : [];
-  expect('prepare-quote creates the customer and the car from the enquiry', !!custId && veh?.plate_number === 'QACRM1' && veh.make === 'Kia' && veh.model === 'Sportage' && veh.year === 2021 && veh.customer_id === custId,
-    veh ? `${veh.make} ${veh.model} ${veh.year} ${veh.plate_number}` : JSON.stringify(prep.json));
+  const [cust1] = custId ? await q('SELECT emirate FROM customers WHERE id = ?', [custId]) : [];
+  expect('prepare-quote creates the customer (with the enquiry\'s emirate) and the car from the enquiry', !!custId && veh?.plate_number === 'QACRM1' && veh.make === 'Kia' && veh.model === 'Sportage' && veh.year === 2021 && veh.customer_id === custId
+    && cust1?.emirate === 'Dubai', veh ? `${veh.make} ${veh.model} ${veh.year} ${veh.plate_number} · ${cust1?.emirate}` : JSON.stringify(prep.json));
   const prep2 = await call('POST', `/enquiries/${enq.id}/prepare-quote`, advisor);
   expect('asking again reuses them (no duplicate customer or car)', prep2.json?.data?.customer?.id === custId && prep2.json?.data?.vehicle_id === vehId, '');
   const tl = await call('POST', `/enquiries/${enq.id}/prepare-quote`, leader);
@@ -121,7 +143,7 @@ try {
   const ci1 = await call('POST', `/appointments/${appt1.id}/check-in`, advisor, { odometer_in: 30500 });
   expect('check-in uses that work order; the physical inspection is next (no job card yet)', ci1.json?.work_order_id === wo?.id && ci1.json?.created === false
     && ci1.json?.physical_inspection_required === true && !(await mainOf(wo?.id)), `HTTP ${ci1.status} ${ci1.json?.message || ''}`);
-  const e2r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Booker', contact_phone: '+971500000992', vehicle_description: 'Honda Civic 2019', vehicle_plate: 'QACRM2', source_channel: 'passing_local', contact_method: 'walk_in', description: 'Routine service' });
+  const e2r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Booker', contact_phone: '+971500000992', emirate: 'Dubai', vehicle_make: 'Honda', vehicle_model: 'Civic', vehicle_year: 2019, vehicle_plate: 'QACRM2', source_channel: 'passing_local', contact_method: 'walk_in', description: 'Routine service' });
   const e2 = e2r.json?.data; const e2Wo = e2r.json?.work_order;
   const b2 = await call('POST', '/appointments', advisor, { enquiry_id: e2.id, appointment_date: tomorrow(), appointment_time: '11:00', service_category: 'oil_change' });
   const ci2 = await call('POST', `/appointments/${b2.json?.appointment?.id}/check-in`, advisor, { odometer_in: 88000 });
@@ -144,7 +166,7 @@ try {
   const [lostLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND status = 'cancelled' ORDER BY id DESC LIMIT 1", [emailOnly.json?.work_order?.id || 0]);
   expect('…and its work order, with nothing done on it, is cancelled: "Enquiry closed: timing"', lost.json?.work_order?.cancelled === true && lostWo?.status === 'cancelled' && /^Enquiry closed: timing/.test(lostLog?.note || ''),
     `${lostWo?.status} · ${lostLog?.note}`);
-  const e3r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Reject', contact_phone: '+971500000993', source_channel: 'owned_repeat', contact_method: 'phone' });
+  const e3r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Reject', contact_phone: '+971500000993', emirate: 'Ajman', source_channel: 'owned_repeat', contact_method: 'phone' });
   const e3 = e3r.json?.data;
   const p3 = (await call('POST', `/enquiries/${e3.id}/prepare-quote`, advisor)).json?.data;
   const est3 = (await call('POST', '/estimates', advisor, { enquiry_id: e3.id, customer_id: p3.customer.id, customer_type: 'retail_cash', lines: [{ line_type: 'labour', description: 'Detailing', quantity: 1, unit_price: 300 }] })).json?.estimateId;
@@ -161,7 +183,7 @@ try {
 
   // ── Convert: the lead is won on the work order it already has ──────
   section = 'convert';
-  const e5r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Convert', contact_phone: '+971500000994', vehicle_description: 'Mazda CX-5 2022', vehicle_plate: 'QACRM5',
+  const e5r = await call('POST', '/enquiries', advisor, { contact_name: 'QA CRM Convert', contact_phone: '+971500000994', emirate: 'Abu Dhabi', vehicle_make: 'Mazda', vehicle_model: 'CX-5', vehicle_year: 2022, vehicle_plate: 'QACRM5',
     source_channel: 'passing_local', contact_method: 'whatsapp', description: 'Squeaky brakes' });
   const cv = await call('POST', `/enquiries/${e5r.json?.data?.id}/convert`, advisor, {});
   const cv2 = await call('POST', `/enquiries/${e5r.json?.data?.id}/convert`, advisor, {});

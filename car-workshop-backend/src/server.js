@@ -82,6 +82,7 @@ import appointmentsRouter from './routes/appointments.js';
 import vehicleReceivingRouter from './routes/vehicle-receiving.js';
 import estimatesRouter, { publicEstimateRouter } from './routes/estimates.js';
 import publicInspectionsRouter from './routes/public-inspections.js';
+import publicTechnicalReportsRouter from './routes/public-technical-reports.js';
 import publicServiceStatusRouter from './routes/public-service-status.js';
 import jobCardsRouter from './routes/job-cards.js';
 import workflowRouter from './routes/workflow.js';
@@ -319,6 +320,8 @@ app.use('/api/public/estimates', publicEstimateRouter);
 // The customer's copy of a vehicle inspection, and their sign-off — link sent
 // from POST /vehicle-inspections/:id/share
 app.use('/api/public/inspections', publicInspectionsRouter);
+// The customer's copy of the technical report — link sent from POST /technical-inspections/:id/share
+app.use('/api/public/technical-reports', publicTechnicalReportsRouter);
 // B5: Job cards, technician time capture, QC, loaner vehicles
 app.use('/api/job-cards', jobCardsRouter);
 // Workshop workflow Steps 1–7 (lib/workflow.js)

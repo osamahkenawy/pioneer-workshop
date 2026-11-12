@@ -1,11 +1,14 @@
 /**
  * Car damage diagram — the clickable part of the Vehicle Inspection Form.
  *
- * Five photographic views (top, both sides, front, rear). Pick a damage type
- * (the staff form's drop-down), click anywhere on the car, and a coloured
- * marker with its code is dropped on the spot. There is no legend: the
- * selected marker shows its damage name beside it, and the pages list every
- * marker by name under the diagram.
+ * Five photographic views (top, both sides, front, rear). Tap the car where
+ * there is damage and a red marker is dropped on the spot; tap a marker again
+ * to remove it. There is no damage type (client review, 3 Nov 2026), so no
+ * legend either.
+ *
+ * Markers placed before that carry a damage code: they are drawn as before,
+ * a coloured dot with the code, and the selected one shows its damage name
+ * beside it; the pages list those by name under the diagram.
  *
  * Marker coordinates are stored NORMALISED (x/y between 0 and 1). New markers
  * carry coord: 'img' and are relative to the car picture itself, which is
@@ -26,7 +29,8 @@ import {
 } from '../lib/inspectionMarks';
 import './CarDamageDiagram.css';
 
-/* Damage types (code → name), from the printed walk-around sheet. Two deliberate fixes:
+/* Damage types (code → name) of the older, coded markers, from the printed
+   walk-around sheet; new markers have none. Two deliberate fixes:
    the paper form used "GC" for BOTH Glass Chip and Gouges/Crease, which makes
    a marker ambiguous once it's on the diagram — Gouges/Crease is "GO" here.
    "Pant Chip" on the sheet is a typo for Paint Chip. English defaults; the
@@ -67,6 +71,12 @@ export const VIEW_NAMES = {
   top: 'Top / roof', left: 'Driver side (left)', right: 'Passenger side (right)', front: 'Front', rear: 'Rear',
 };
 
+/** The red of a marker without a damage code (every new one). */
+export const MARK_COLOR = '#dc2626';
+
+/** A marker's damage code when it has a known one, else '' (a plain spot). */
+export const damageCodeOf = m => (m?.code && Object.prototype.hasOwnProperty.call(DAMAGE_CODES, m.code) ? m.code : '');
+
 /** A damage code's name, translated (inspection.code.*). */
 export const damageLabel = (t, code, fallback) =>
   (t ? t(`inspection.code.${code}`, fallback || DAMAGE_CODES[code] || code) : (fallback || DAMAGE_CODES[code] || code));
@@ -89,24 +99,24 @@ const VIEWS = [
 ];
 
 /**
- * @param {Array}   marks          [{id, view, code, x, y, coord?, note}]
- * @param {string}  activeCode     the damage type being placed ('' = none)
- * @param {string}  selectedMarkId highlighted marker; it shows its damage name
+ * @param {Array}   marks          [{id, view, code?, x, y, coord?, note}]
+ * @param {string}  selectedMarkId highlighted coded marker; it shows its damage name
  * @param {Func}    onAddMark      (view, x, y, coord) — x/y relative to the car
- *                                 picture, coord is 'img'. Omit to make the
- *                                 diagram read-only.
- * @param {Func}    onSelectMark   (markId)
+ *                                 picture, coord is 'img'. With onRemoveMark;
+ *                                 omit both to make the diagram read-only.
+ * @param {Func}    onRemoveMark   (markId) — a tap on a marker removes it
+ * @param {Func}    onSelectMark   (markId) — read-only: a tap on a coded marker
  * @param {boolean} compact        stack views in a single column (mobile / preview)
  * @param {Array}   views          only these view keys (default: all five)
  * @param {Object}  labels         panel titles by view key (default: viewLabel())
  */
 export default function CarDamageDiagram({
-  marks = [], activeCode = '', selectedMarkId = '',
-  onAddMark, onSelectMark, compact = false, views, labels,
+  marks = [], selectedMarkId = '',
+  onAddMark, onRemoveMark, onSelectMark, compact = false, views, labels,
 }) {
   const { t } = useTranslation();
-  const readOnly = typeof onAddMark !== 'function';
-  const placing = !readOnly && !!activeCode;
+  const placing = typeof onAddMark === 'function';
+  const removing = typeof onRemoveMark === 'function';
 
   // Clicks land on the car picture only, and are kept relative to it. Clicks
   // on an existing marker stop there (their own handler), so they never add one.
@@ -121,22 +131,32 @@ export default function CarDamageDiagram({
   // marker near the top, so the panel does not cut it off.
   const tagClass = (m) => `cdd-tag${m.x < 0.3 ? ' cdd-tag-near-left' : m.x > 0.7 ? ' cdd-tag-near-right' : ''}${m.y < 0.2 ? ' cdd-tag-below' : ''}`;
 
+  // Editing, a tap on a marker removes it. Read-only, a coded marker can be
+  // selected to show its name; a plain one has nothing more to tell.
   const renderMark = (m) => {
-    const on = m.id === selectedMarkId;
-    const name = damageLabel(t, m.code);
+    const code = damageCodeOf(m);
+    const name = code ? damageLabel(t, code) : t('inspection.mark_plain', 'Damage');
+    const selectable = !removing && !!code && !!onSelectMark;
+    const clickable = removing || selectable;
+    const on = !!code && m.id === selectedMarkId;
+    const tip = removing ? t('inspection.mark_remove', '{{name}} — tap to remove', { name }) : name;
     return (
       <button
         key={m.id}
         type="button"
-        title={name}
-        aria-label={name}
-        aria-pressed={onSelectMark ? on : undefined}
-        tabIndex={onSelectMark ? 0 : -1}
-        className={`cdd-mark${on ? ' cdd-mark-on' : ''}${onSelectMark ? ' cdd-mark-clickable' : ''}`}
-        onClick={(e) => { e.stopPropagation(); onSelectMark && onSelectMark(m.id); }}
-        style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: DAMAGE_COLORS[m.code] || '#dc2626' }}
+        title={tip}
+        aria-label={tip}
+        aria-pressed={selectable ? on : undefined}
+        tabIndex={clickable ? 0 : -1}
+        className={`cdd-mark${code ? '' : ' cdd-mark-plain'}${on ? ' cdd-mark-on' : ''}${clickable ? ' cdd-mark-clickable' : ''}${removing ? ' cdd-mark-removable' : ''}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (removing) onRemoveMark(m.id);
+          else if (selectable) onSelectMark(m.id);
+        }}
+        style={{ left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: (code && DAMAGE_COLORS[code]) || MARK_COLOR }}
       >
-        {m.code}
+        {code}
         {on && <span className={tagClass(m)} aria-hidden="true">{name}</span>}
       </button>
     );

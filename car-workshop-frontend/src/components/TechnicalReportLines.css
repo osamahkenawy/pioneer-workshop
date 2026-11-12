@@ -1,0 +1,28 @@
+/* TechnicalReportLines — the technical report's lines as the customer sees
+ * them (the public link and the customer portal). Phone first; logical
+ * properties so it reads right to left as well. */
+.trl-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.trl-line {
+  border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 12px 14px; background: #fff;
+  min-inline-size: 0; break-inside: avoid;
+}
+.trl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.trl-no {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  inline-size: 24px; block-size: 24px; border-radius: 50%;
+  background: #1e3a6b; color: #fff; font-size: 12px; font-weight: 800;
+}
+.trl-job { font-size: 15.5px; font-weight: 800; color: #0f172a; overflow-wrap: anywhere; min-inline-size: 0; }
+.trl-type {
+  padding: 2px 10px; border-radius: 999px; background: #fff7ed; color: #c2410c;
+  font-size: 12px; font-weight: 700; white-space: nowrap;
+}
+.trl-label {
+  display: block; font-size: 11.5px; font-weight: 700; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.04em; margin-block-end: 2px;
+}
+.trl-labour { margin: 10px 0 0; font-size: 14.5px; line-height: 1.5; color: #1e293b; white-space: pre-wrap; overflow-wrap: anywhere; }
+.trl-parts { margin-block-start: 10px; }
+.trl-parts ul { margin: 0; padding-inline-start: 20px; font-size: 14.5px; line-height: 1.55; color: #1e293b; }
+.trl-parts li { overflow-wrap: anywhere; }
+.trl-muted { margin: 0; font-size: 14px; color: #64748b; }

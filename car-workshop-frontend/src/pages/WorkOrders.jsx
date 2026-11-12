@@ -223,14 +223,20 @@ function KPICard({ icon: Icon, label, value, sub, color }) {
 /* The work order's status in the workshop's words (lib/statusLabels.js).
    Pass the work order, not just its status: a job the customer has approved
    reads "Approved — to assign" while it is still pending or confirmed. */
-function StatusPill({ wo }) {
+/* Two modules, one job (client meeting, 3 Nov 2026, point 6): on the Work
+ * Orders side a job whose main job card is open reads "Completed" — the work
+ * goes on in Job Cards. The work order row itself is unchanged. */
+const woSideCompleted = o => !!o?.main_job_card_number && o.status !== 'cancelled';
+
+function StatusPill({ wo, woSide = false }) {
   const { t } = useTranslation();
-  const tone = woTone(wo);
+  const done = woSide && woSideCompleted(wo);
+  const tone = woTone(done ? 'completed' : wo);
   const Icon = tone.icon;
   return (
     <span style={{ display:'inline-flex', alignItems:'center', gap:5, padding:'4px 12px', whiteSpace:'nowrap',
       borderRadius:20, fontSize:12, fontWeight:700, background:tone.bg, color:tone.color }}>
-      <Icon width={12} height={12} />{woLabel(t, wo)}
+      <Icon width={12} height={12} />{done ? t('orders.wo_completed', 'Completed') : woLabel(t, wo)}
     </span>
   );
 }
@@ -333,8 +339,15 @@ function StatusMenu({ wo, user, onChange, dark = false }) {
 /* ══════════════════════════════════════════════════════════════
    MAIN COMPONENT
    ══════════════════════════════════════════════════════════════ */
-export default function WorkOrders() {
+/*
+ * mode — 'work-orders' (Steps 1–3: open until the physical inspection opens
+ * the job card, then completed) or 'job-cards' (the Job Cards module: the
+ * jobs whose job card is open, by workshop status). Same list, same rows.
+ */
+export default function WorkOrders({ mode = 'work-orders' }) {
   const { t, i18n } = useTranslation();
+  const jobCardMode = mode === 'job-cards';
+  const base = jobCardMode ? '/job-cards' : '/work-orders';
   const isRTL = i18n.language === 'ar';
   const { user, workshop } = useContext(AuthContext);
   const cur = workshop?.currency || 'AED';
@@ -365,6 +378,7 @@ export default function WorkOrders() {
      ('waiting', 'in_work', …) or, from a link, a comma list of statuses. */
   const [filters,    setFilters]    = useState(() => ({
     status:          normaliseStatusFilter(searchParams.get('status')),
+    stage:           '',   // Work Orders: 'open' | 'completed' (backend WO_STAGE_SQL)
     search:          '',
     date_from:       searchParams.get('date_from') || '',
     date_to:         searchParams.get('date_to')   || '',
@@ -452,7 +466,7 @@ export default function WorkOrders() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* data fetching */
-  useEffect(() => { fetchWorkOrders(); }, [page, filters.status, filters.date_from, filters.date_to, filters.work_order_type, filters.customer_id, sortBy, sortDir]);
+  useEffect(() => { fetchWorkOrders(); }, [page, filters.status, filters.stage, filters.date_from, filters.date_to, filters.work_order_type, filters.customer_id, sortBy, sortDir]);
   useEffect(() => { fetchDropdowns(); fetchStats(); }, []);
   useEffect(() => {
     clearTimeout(debounceRef.current);
@@ -465,6 +479,8 @@ export default function WorkOrders() {
     const p = new URLSearchParams(extra);
     const statuses = filterStatuses(filters.status);
     if (statuses.length)    p.append('status', statuses.join(','));
+    if (jobCardMode)        p.append('job_card', '1');
+    else if (filters.stage) p.append('stage', filters.stage);
     if (filters.search)     p.append('search', filters.search);
     if (filters.date_from)  p.append('date_from', filters.date_from);
     if (filters.date_to)    p.append('date_to', filters.date_to);
@@ -492,7 +508,7 @@ export default function WorkOrders() {
   const fetchStats = async () => {
     if (isTechnician) return;
     try {
-      const res = await api.get('/work-orders/stats');
+      const res = await api.get(`/work-orders/stats${jobCardMode ? '?job_card=1' : ''}`);
       if (res.success) setStats(res.data || {});
     } catch {}
   };
@@ -663,7 +679,7 @@ export default function WorkOrders() {
   };
 
   const clearFilters = () => setFilters({ status:'', search:'', date_from:'', date_to:'', work_order_type:'', customer_id:'' });
-  const hasFilters = filters.status || filters.search || filters.date_from || filters.date_to || filters.work_order_type || filters.customer_id;
+  const hasFilters = filters.status || filters.stage || filters.search || filters.date_from || filters.date_to || filters.work_order_type || filters.customer_id;
   const totalPages = Math.ceil(total / LIMIT);
 
   /* ── Job sheets: the printed A6 job card with its QR (GET /:id/label, POST /labels) ── */
@@ -733,9 +749,11 @@ export default function WorkOrders() {
       {/* Header */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems: _mob ? 'stretch' : 'flex-start', marginBottom: _mob ? 16 : 24, flexDirection: _mob ? 'column' : 'row', gap: _mob ? 12 : 0 }}>
         <div>
-          <h2 style={{ margin:0, fontSize: _mob ? 20 : 26, fontWeight:900, color:'#1e293b' }}>{t('orders.title')}</h2>
+          <h2 style={{ margin:0, fontSize: _mob ? 20 : 26, fontWeight:900, color:'#1e293b' }}>{jobCardMode ? t('jobCards.title', 'Job Cards') : t('orders.title')}</h2>
           <p style={{ margin:'4px 0 0', color:'#94a3b8', fontSize:14 }}>
-            {total > 0 ? t('orders.subtitle_count', { count: total }) : t('orders.subtitle_empty')}
+            {jobCardMode
+              ? t('jobCards.subtitle', '{{count}} job cards — the jobs past the physical inspection: technical inspection, estimate, work, quality check and handover.', { count: total })
+              : total > 0 ? t('orders.subtitle_count', { count: total }) : t('orders.subtitle_empty')}
           </p>
         </div>
         <div style={{ display:'flex', gap: _mob ? 8 : 10, flexWrap:'wrap' }}>
@@ -779,13 +797,13 @@ export default function WorkOrders() {
               alongside New Job Card rather than replacing it — a walk-in
               whose car is already on the ramp cannot wait on an email
               round-trip, so immediate creation stays available too. */}
-          {canDo(user, 'estimate.raise') && <button onClick={() => setShowNewEstimate(true)}
+          {jobCardMode && canDo(user, 'estimate.raise') && <button onClick={() => setShowNewEstimate(true)}
             style={{ padding:'10px 20px', borderRadius:10, border:'1.5px solid #e2e8f0',
               background:'#fff', color:'#1e3a6b', cursor:'pointer', fontWeight:700, fontSize:14,
               display:'flex', alignItems:'center', gap:7 }}>
             <SendMail width={16} height={16} /> {t('dashboard.new_estimate', 'New Estimate')}
           </button>}
-          {canDo(user, 'job.open') && <button onClick={() => openNew()}
+          {!jobCardMode && canDo(user, 'job.open') && <button onClick={() => openNew()}
             style={{ padding:'10px 22px', borderRadius:10, border:'none',
               background: isAtOrderLimit ? '#9ca3af' : 'linear-gradient(135deg,#f97316,#ea580c)', color:'#fff',
               cursor: isAtOrderLimit ? 'not-allowed' : 'pointer', fontWeight:700, fontSize:14, display:'flex', alignItems:'center', gap:7,
@@ -818,7 +836,16 @@ export default function WorkOrders() {
       {/* KPI Cards — Waiting covers Steps 1–6 up to the Team Leader's
           assignment (checked in, inspected, approved); "approved, to assign"
           is the part the Team Leader can act on now. */}
-      {(() => {
+      {!jobCardMode && (
+        // The Work Orders side: open until the job card opens, then completed.
+        <div style={{ display: _mob ? 'grid' : 'flex', gridTemplateColumns: _mob ? '1fr 1fr' : undefined, gap: _mob ? 10 : 16, marginBottom: _mob ? 16 : 24, flexWrap:'wrap' }}>
+          <KPICard icon={ClipboardCheck} label={t('orders.stats.total_orders')} value={stats.total || 0} sub={t('orders.stats.today_count', { count: stats.today||0 })} color="#1e3a6b" />
+          <KPICard icon={Clock} label={t('orders.stage_open', 'Open')} value={Number(stats.wo_open || 0)} sub={t('orders.stage_open_sub', 'Before the job card opens')} color="#4338ca" />
+          <KPICard icon={CheckCircle} label={t('orders.wo_completed', 'Completed')} value={Number(stats.wo_completed || 0)} sub={t('orders.stage_completed_sub', 'Job card open, or closed')} color="#15803d" />
+          <KPICard icon={Xmark} label={woLabel(t, 'cancelled')} value={Number(stats.cancelled || 0)} sub="" color="#64748b" />
+        </div>
+      )}
+      {jobCardMode && (() => {
         const n = k => Number(stats[k] || 0);
         const count = key => (WO_FILTERS.find(f => f.key === key)?.statuses || []).reduce((sum, s) => sum + n(s), 0);
         return (
@@ -835,9 +862,9 @@ export default function WorkOrders() {
 
       {/* Status filter chips */}
       <div style={{ display:'flex', gap:8, flexWrap: _mob ? 'nowrap' : 'wrap', marginBottom:16, overflowX: _mob ? 'auto' : 'visible', paddingBottom: _mob ? 4 : 0, WebkitOverflowScrolling: 'touch' }}>
-        <button onClick={() => { setPage(1); setFilters(f=>({...f, status:''})); }}
-          style={{ minHeight:36, padding:'6px 16px', borderRadius:20, border: !filters.status ? '2px solid #1e3a6b' : '1px solid #e2e8f0',
-            background: !filters.status ? '#eff6ff' : '#fff', color: !filters.status ? '#1e3a6b' :'#64748b',
+        <button onClick={() => { setPage(1); setFilters(f=>({...f, status:'', stage:''})); }}
+          style={{ minHeight:36, padding:'6px 16px', borderRadius:20, border: !filters.status && !filters.stage ? '2px solid #1e3a6b' : '1px solid #e2e8f0',
+            background: !filters.status && !filters.stage ? '#eff6ff' : '#fff', color: !filters.status && !filters.stage ? '#1e3a6b' :'#64748b',
             cursor:'pointer', fontWeight:700, fontSize:13, whiteSpace:'nowrap', flexShrink:0 }}>
           {t('orders.filters.all_with_count', { count: stats.total||0 })}
         </button>
@@ -854,7 +881,23 @@ export default function WorkOrders() {
             </button>
           );
         })()}
-        {WO_FILTERS.map(f => {
+        {!jobCardMode && [['open', t('orders.stage_open', 'Open'), stats.wo_open, 'pending'],
+          ['completed', t('orders.wo_completed', 'Completed'), stats.wo_completed, 'completed'],
+          ['cancelled', woLabel(t, 'cancelled'), stats.cancelled, 'cancelled']].map(([key, label, n, toneOf]) => {
+          const tone = woTone(toneOf);
+          const on = filters.stage === key;
+          return (
+            <button key={key} onClick={() => { setPage(1); setFilters(x=>({...x, status:'', stage: x.stage===key ? '' : key})); }}
+              style={{ minHeight:36, padding:'6px 14px', borderRadius:20,
+                border: on ? `2px solid ${tone.color}` : '1px solid #e2e8f0',
+                background: on ? tone.bg : '#fff', color: on ? tone.color : '#64748b',
+                cursor:'pointer', fontWeight:600, fontSize:12, display:'flex', alignItems:'center', gap:5, whiteSpace:'nowrap', flexShrink:0 }}>
+              <span style={{ width:7, height:7, borderRadius:'50%', background:tone.color }} />
+              {label} ({Number(n || 0)})
+            </button>
+          );
+        })}
+        {jobCardMode && WO_FILTERS.map(f => {
           const tone = woTone(f.statuses[0]);
           const on = filters.status === f.key;
           const count = f.statuses.reduce((sum, s) => sum + Number(stats[s] || 0), 0);
@@ -925,7 +968,8 @@ export default function WorkOrders() {
               /* ── Mobile card view ── */
               <div style={{ padding:'8px' }}>
                 {orders.map(o => {
-                  const tone = woTone(o);
+                  const woDone = !jobCardMode && woSideCompleted(o);
+                  const tone = woTone(woDone ? 'completed' : o);
                   const StIcon = tone.icon;
                   return (
                     <div key={o.id} onClick={() => openDrawer(o)}
@@ -937,13 +981,16 @@ export default function WorkOrders() {
                             onClick={e => toggleLabelSelect(o.id, e)}
                             style={{ cursor:'pointer', width:15, height:15, accentColor:'#f97316' }} />
                           <div>
-                            <div style={{ fontWeight:700, color:'#1e293b', fontSize:13 }}>{o.work_order_number}</div>
+                            <div style={{ fontWeight:700, color:'#1e293b', fontSize:13 }}>{jobCardMode ? (o.main_job_card_number || o.work_order_number) : o.work_order_number}</div>
+                            {(jobCardMode ? o.main_job_card_number : woSideCompleted(o)) && (
+                              <div style={{ fontSize:11, color:'#64748b' }}>{jobCardMode ? o.work_order_number : o.main_job_card_number}</div>
+                            )}
                             <div style={{ fontSize:11, color:'#94a3b8' }}>{fmtDate(o.created_at)} · {fmtTime(o.created_at)}</div>
                           </div>
                         </div>
                         <span style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'3px 10px', whiteSpace:'nowrap',
                           borderRadius:20, fontSize:11, fontWeight:700, background:tone.bg, color:tone.color }}>
-                          <StIcon width={12} height={12} /> {woLabel(t, o, 'short')}
+                          <StIcon width={12} height={12} /> {woDone ? t('orders.wo_completed', 'Completed') : woLabel(t, o, 'short')}
                         </span>
                       </div>
                       <div style={{ display:'flex', gap:12, fontSize:12, color:'#475569', marginBottom:6 }}>
@@ -979,7 +1026,7 @@ export default function WorkOrders() {
                             <Wrench width={11} height={11} color="#94a3b8" /> {o.mechanic_name}
                           </span>
                         )}
-                        <Link to={`/work-orders/${o.id}`} onClick={e => e.stopPropagation()}
+                        <Link to={`${base}/${o.id}`} onClick={e => e.stopPropagation()}
                           title={t('orders.open_job_card', 'Open the job card')}
                           style={{ marginInlineStart:'auto', minHeight:36, padding:'0 12px', borderRadius:8, background:'#1e3a6b', color:'#fff',
                             textDecoration:'none', fontSize:12.5, fontWeight:700, display:'inline-flex', alignItems:'center', gap:4 }}>
@@ -1036,9 +1083,12 @@ export default function WorkOrders() {
                           style={{ cursor:'pointer', width:15, height:15, accentColor:'#f97316' }} />
                       </td>
                       <td style={{ padding:'13px 16px' }}>
-                        <OrderNumCell orderNumber={o.work_order_number} />
+                        <OrderNumCell orderNumber={jobCardMode ? (o.main_job_card_number || o.work_order_number) : o.work_order_number} />
+                        {(jobCardMode ? o.main_job_card_number : woSideCompleted(o)) && (
+                          <div style={{ fontSize:11, color:'#64748b', marginTop:2 }}>{jobCardMode ? o.work_order_number : o.main_job_card_number}</div>
+                        )}
                       </td>
-                      <td style={{ padding:'13px 16px' }}><StatusPill wo={o} /></td>
+                      <td style={{ padding:'13px 16px' }}><StatusPill wo={o} woSide={!jobCardMode} /></td>
                       <td style={{ padding:'13px 16px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                           <Avatar name={o.customer_name || t('orders.walk_in')} size={34} />
@@ -1106,7 +1156,7 @@ export default function WorkOrders() {
                       <td style={{ padding:'13px 16px' }} onClick={e => e.stopPropagation()}>
                         <div style={{ display:'flex', gap:6 }}>
                           {/* The job card page (Steps 1–7). A link, so Ctrl/Cmd-click opens a new tab. */}
-                          <Link to={`/work-orders/${o.id}`} title={t('orders.open_job_card', 'Open the job card')}
+                          <Link to={`${base}/${o.id}`} title={t('orders.open_job_card', 'Open the job card')}
                             style={{ padding:'6px 11px', borderRadius:8, border:'1px solid #1e3a6b', background:'#1e3a6b',
                               color:'#fff', textDecoration:'none', fontSize:13, fontWeight:700, display:'flex', alignItems:'center', gap:4, whiteSpace:'nowrap' }}>
                             {t('orders.actions.details', 'Details')} <NavArrowRight width={13} height={13} />
@@ -1275,7 +1325,7 @@ export default function WorkOrders() {
                   ...(mayOpenJob && !isClosedStatus(drawerFull?.status || drawer.status) ? [{ label: t('orders.actions.edit'), icon: EditPencil, bg:'#3b82f6', onClick:() => { setDrawer(null); setDrawerFull(null); openEdit(drawerFull || drawer); }}] : []),
                   { label: t('orders.print_job_sheet', 'Print job sheet'), icon: Printer, bg:'#8b5cf6', onClick:() => printSingleLabel(drawer.id) },
                   ...(customerStatusUrl(drawer) && (drawerFull?.status || drawer.status) !== 'cancelled' ? [{ label: t('orders.open_customer_page', 'Open the customer\'s status page'), icon: OpenNewWindow, bg:'#0369a1', onClick:() => openCustomerPage(drawer) }] : []),
-                  ...(drawerFull ? [{ label: t('orders.drawer.details'), icon: ArrowRight, bg:'#1e3a6b', onClick:() => { setDrawer(null); setDrawerFull(null); navigate(`/work-orders/${drawerFull.id}`); }}] : []),
+                  ...(drawerFull ? [{ label: t('orders.drawer.details'), icon: ArrowRight, bg:'#1e3a6b', onClick:() => { setDrawer(null); setDrawerFull(null); navigate(`${base}/${drawerFull.id}`); }}] : []),
                   ...(canSetStatus(user, 'cancelled') && !isClosedStatus(drawerFull?.status || drawer.status) ? [{ label: t('orders.actions.cancel_order'), icon: Prohibition, bg:'transparent', border:true, onClick:() => { setDrawer(null); setCancelConfirm(drawer); }}] : []),
                   // WhatsApp to the customer: the stage and their status link
                   ...(() => {

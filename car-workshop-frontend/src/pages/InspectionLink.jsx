@@ -7,8 +7,10 @@
  *
  * It is the customer's copy of what was recorded at the car — the damage
  * marked on the diagram (drawn read-only with the staff form's
- * CarDamageDiagram; each marker is listed under it by its damage name, so no
- * legend is needed) and the vehicle photos, or the uploaded paper form — and,
+ * CarDamageDiagram: a red dot where there is damage, no damage type and no
+ * legend; markers saved before the form dropped the damage type are listed
+ * under it by their damage name, with their note) and the vehicle photos, or
+ * the uploaded paper form — and,
  * when they did not sign at the car, where they sign. Signing is once only;
  * the server refuses a second, and a cancelled job's link closes (410).
  *
@@ -19,7 +21,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import CarDamageDiagram, { DAMAGE_COLORS, damageLabel, viewLabel } from '../components/CarDamageDiagram';
+import CarDamageDiagram, { DAMAGE_COLORS, MARK_COLOR, damageCodeOf, damageLabel, viewLabel } from '../components/CarDamageDiagram';
 import { woLabel } from '../lib/statusLabels';
 import { logoSrc } from '../components/service-status/workshopLogo';
 import './InspectionLink.css';
@@ -88,6 +90,8 @@ export default function InspectionLink() {
   const marks = insp.marks || [];
   const docs = insp.documents || [];
   const markedViews = [...new Set(marks.map(m => m.view))];
+  // Older markers with a damage type or a note; a plain dot needs no words.
+  const described = marks.filter(m => damageCodeOf(m) || m.note);
   const docUrl = d => `${API_BASE}/public/inspections/${token}/documents/${d.id}`;
   const photos = insp.photos || [];
   const photoUrl = p => `${API_BASE}/public/inspections/${token}/photos/${p.id}`;
@@ -163,21 +167,26 @@ export default function InspectionLink() {
                   <CarDamageDiagram compact marks={marks} views={markedViews}
                     selectedMarkId={selectedMarkId} onSelectMark={setSelectedMarkId} />
                 </div>
-                <ol className="il-marks">
-                  {marks.map((m, i) => (
-                    <li key={m.id} className={m.id === selectedMarkId ? 'il-mark il-mark-on' : 'il-mark'}>
-                      <button type="button" onClick={() => setSelectedMarkId(m.id)}>
-                        <span className="il-mark-n">{i + 1}</span>
-                        <span className="il-mark-code" style={{ background: DAMAGE_COLORS[m.code] || '#dc2626' }}>{m.code}</span>
-                        <span className="il-mark-main">
-                          <span className="il-mark-label">{damageLabel(t, m.code, m.label)}</span>
-                          <span className="il-mark-view">{viewLabel(t, m.view)}</span>
-                          {m.note && <span className="il-mark-note">{m.note}</span>}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ol>
+                {described.length > 0 && (
+                  <ol className="il-marks">
+                    {described.map((m, i) => {
+                      const code = damageCodeOf(m);
+                      return (
+                        <li key={m.id} className={m.id === selectedMarkId ? 'il-mark il-mark-on' : 'il-mark'}>
+                          <button type="button" onClick={() => setSelectedMarkId(m.id)}>
+                            <span className="il-mark-n">{i + 1}</span>
+                            {code && <span className="il-mark-code" style={{ background: DAMAGE_COLORS[code] || MARK_COLOR }}>{code}</span>}
+                            <span className="il-mark-main">
+                              <span className="il-mark-label">{code ? damageLabel(t, code, m.label) : viewLabel(t, m.view)}</span>
+                              {code && <span className="il-mark-view">{viewLabel(t, m.view)}</span>}
+                              {m.note && <span className="il-mark-note">{m.note}</span>}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
               </>
             )}
           </section>

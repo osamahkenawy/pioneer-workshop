@@ -3,11 +3,12 @@
  * customer standing at the car: the physical inspection at drop-off (Step 3,
  * type 'intake') and the joint walk-around at handover (Step 7).
  *
- * Pick the damage type in the drop-down above the car diagram, click the spot
- * on the car, and a marker lands there (the list under the diagram names each
- * one — there is no separate legend); add photos of the vehicle (camera or
- * files). Completing the form stamps the matching Customer Journey checkpoint
- * on the work order.
+ * Tap the car diagram where there is damage and a marker lands there; tap a
+ * marker again to remove it. There is no damage type (client review, 3 Nov
+ * 2026) — what the damage is goes in the notes and the photos. Markers saved
+ * before that keep their damage type and note, listed read-only under the
+ * diagram. Add photos of the vehicle (camera or files). Completing the form
+ * stamps the matching Customer Journey checkpoint on the work order.
  *
  * The odometer is required on the physical inspection and never below the
  * car's previous reading (client review, 2026-11-02): the server refuses a
@@ -43,11 +44,32 @@ import api from '../lib/api';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import { woLabel, woTone } from '../lib/statusLabels';
-import CarDamageDiagram, { DAMAGE_CODES, DAMAGE_COLORS, damageLabel, viewLabel } from '../components/CarDamageDiagram';
+import CarDamageDiagram, { DAMAGE_COLORS, MARK_COLOR, damageCodeOf, damageLabel, viewLabel } from '../components/CarDamageDiagram';
 
-const CODE_LIST = Object.keys(DAMAGE_CODES);
 // The server's refusals about the odometer: shown under the field, not in the banner.
 const ODOMETER_CODES = ['ODOMETER_REQUIRED', 'ODOMETER_BELOW_LAST', 'INVALID_ODOMETER'];
+// The header — who the customer is and which car — is the work order's:
+// shown, never edited here (client review, 2 Nov 2026; the server reads it
+// again from the work order on every load). On the physical inspection it is
+// all required (the server's REQUIRED_DETAILS); the e-mail and the estimate
+// fields stay optional. "-" and "N/A" are not a value.
+const REQUIRED_DETAILS = ['customer_name', 'customer_phone', 'vehicle_year', 'vehicle_make', 'vehicle_model', 'vin', 'plate_number'];
+const DETAIL_LABELS = { customer_name: 'name', customer_phone: 'phone number', vehicle_year: 'year', vehicle_make: 'make', vehicle_model: 'model', vin: 'VIN', plate_number: 'plate' };
+const DETAIL_CODES = ['INSPECTION_DETAILS_REQUIRED', 'PHONE_INVALID'];
+const blankish = v => { const s = String(v ?? '').trim(); return !s || /^[-–—.\s]*$/.test(s) || s.toUpperCase() === 'N/A'; };
+const headerFrom = row => ({
+  estimate_date: (row.estimate_date || '').toString().slice(0, 10),
+  original_estimate: row.original_estimate ?? '',
+  customer_name: row.customer_name || '',
+  customer_phone: row.customer_phone || '',
+  customer_email: row.customer_email || '',
+  vehicle_year: row.vehicle_year || '',
+  vehicle_make: row.vehicle_make || '',
+  vehicle_model: row.vehicle_model || '',
+  vin: row.vin || '',
+  plate_number: row.plate_number || '',
+  odometer: row.odometer ?? '',
+});
 
 const LBL = { display: 'block', fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.3 };
 const INPUT = { width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, background: '#fff', boxSizing: 'border-box' };
@@ -58,29 +80,22 @@ const BTN = { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9p
 // page; what has to change with the width lives here.
 const PAGE_CSS = `
   .vi-page { padding: 20px; max-width: 1300px; margin: 0 auto; box-sizing: border-box; }
-  /* The damage type to place, above the car diagram; it stays in reach (sticky,
-     under the top bar) while the views scroll past on a phone. */
-  .vi-type-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 12px; padding: 4px 0 10px; background: #fff; border-block-end: 1px solid #eef2f7; }
-  .vi-type-select { flex: 0 1 280px; min-width: 200px; }
-  .vi-type-hint { flex: 1 1 220px; min-width: 0; margin: 0; font-size: 12px; }
+  /* Above the car diagram: the count, and how to mark. */
+  .vi-mark-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
   .vi-mark-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   .vi-mark-code { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .vi-mark-name { min-width: 130px; }
   .vi-mark-view { min-width: 100px; }
-  .vi-mark-note { flex: 1 1 180px; min-width: 0; }
+  .vi-mark-note { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
   .vi-status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; margin-inline-end: 6px; vertical-align: 1px; }
   .vi-photos { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
   .vi-photo { position: relative; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; background: #f8fafc; break-inside: avoid; }
   .vi-photo img, .vi-photo-wait { display: block; inline-size: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
   .vi-photo-del { position: absolute; inset-block-start: 6px; inset-inline-end: 6px; }
-  @media screen {
-    .vi-type-bar { position: sticky; top: var(--topbar-height, 70px); z-index: 6; }
-  }
   @media screen and (max-width: 600px) {
     .vi-page { padding: 16px; }
     .vi-mark-name, .vi-mark-view { min-width: 0; }
     .vi-mode-btn { min-width: 0 !important; flex: 1 1 100%; }
-    .vi-type-select { flex: 1 1 160px; min-width: 0; }
   }
   /* Fingers need 44px targets; the markers on the car keep their own size. */
   @media screen and (max-width: 900px), (pointer: coarse) {
@@ -150,8 +165,7 @@ export default function VehicleInspection() {
   const [inspection, setInspection] = useState(null);
   const [form, setForm] = useState({});
   const [marks, setMarks] = useState([]);
-  const [activeCode, setActiveCode] = useState('');
-  const [selectedMarkId, setSelectedMarkId] = useState('');
+  const [selectedMarkId, setSelectedMarkId] = useState('');   // an older, coded marker named on the diagram
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setErrorMsg] = useState('');
@@ -174,6 +188,7 @@ export default function VehicleInspection() {
   const fileRef = useRef(null);
   const [odoMsg, setOdoMsg] = useState(null);       // the server's refusal of the odometer reading
   const odoRef = useRef(null);
+  const [badDetails, setBadDetails] = useState([]); // header fields outlined: missing, or not a phone number
 
   // The cards at the bottom are a long scroll from the banner, so their errors show beside them.
   const setError = useCallback((msg, at = '') => { setErrorMsg(msg); setErrorAt(at); }, []);
@@ -186,6 +201,19 @@ export default function VehicleInspection() {
     setOdoMsg(res.message);
     const el = odoRef.current;
     if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); }
+    return true;
+  };
+  // A header detail missing (or a phone number that isn't one): the fields
+  // are outlined, the first brought into view, the message in the banner.
+  const showBadDetails = (fields, msg) => {
+    setBadDetails(fields);
+    setError(msg);
+    const el = document.getElementById(`vi-f-${fields[0]}`);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); }
+  };
+  const detailsRefused = (res) => {
+    if (!DETAIL_CODES.includes(res?.code)) return false;
+    showBadDetails(res.fields || [], res.message);
     return true;
   };
 
@@ -258,17 +286,7 @@ export default function VehicleInspection() {
   function applyRow(row) {
     setInspection(row);
     setForm({
-      estimate_date: (row.estimate_date || '').toString().slice(0, 10),
-      original_estimate: row.original_estimate ?? '',
-      customer_name: row.customer_name || '',
-      customer_phone: row.customer_phone || '',
-      customer_email: row.customer_email || '',
-      vehicle_year: row.vehicle_year || '',
-      vehicle_make: row.vehicle_make || '',
-      vehicle_model: row.vehicle_model || '',
-      vin: row.vin || '',
-      plate_number: row.plate_number || '',
-      odometer: row.odometer ?? '',
+      ...headerFrom(row),
       service_recommended: row.service_recommended || '',
       service_accepted: row.service_accepted || '',
       notes: row.notes || '',
@@ -289,6 +307,11 @@ export default function VehicleInspection() {
   const locked = isCompleted || !mayRecord;
   // The odometer is required on the physical inspection; at handover it is optional.
   const odoRequired = inspectionType === 'intake';
+  // So are the customer's and the car's details (REQUIRED_DETAILS).
+  const detailsRequired = inspectionType === 'intake' && !locked;
+  // The reading is the work order's too; it is typed here only while the
+  // work order has none (an older job) — completing puts it on the work order.
+  const odoEditable = !locked && inspectionType === 'intake' && inspection?.work_order_odometer == null;
   const mode = inspection?.entry_mode === 'document' ? 'document' : 'form';
   const docs = Array.isArray(inspection?.documents) ? inspection.documents : [];
   const photos = Array.isArray(inspection?.photos) ? inspection.photos : [];
@@ -316,17 +339,17 @@ export default function VehicleInspection() {
     return () => { live = false; made.forEach(u => URL.revokeObjectURL(u)); };
   }, [inspection?.id, photoKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Marker editing ── */
+  /* ── Marker editing: a tap on the car adds one, a tap on a marker removes it ── */
   // x / y come relative to the car picture (coord 'img'), so the marker stays
   // on that spot at any width — here, in print and on the customer's page.
+  // No damage type and no note: what the damage is goes in the notes.
   const addMark = (view, x, y, coord) => {
-    if (locked || !activeCode) return;
-    const mark = { id: `m${Date.now()}${markSeq.current++}`, view, code: activeCode, x, y, ...(coord ? { coord } : {}), note: '' };
+    if (locked) return;
+    const mark = { id: `m${Date.now()}${markSeq.current++}`, view, x, y, ...(coord ? { coord } : {}), note: '' };
     setMarks(prev => [...prev, mark]);
-    setSelectedMarkId(mark.id);
   };
-  const updateMark = (markId, patch) =>
-    setMarks(prev => prev.map(m => (m.id === markId ? { ...m, ...patch } : m)));
+  // Older markers that carry a damage type or a note, listed under the diagram.
+  const described = marks.filter(m => damageCodeOf(m) || m.note);
   const removeMark = (markId) => {
     setMarks(prev => prev.filter(m => m.id !== markId));
     setSelectedMarkId(s => (s === markId ? '' : s));
@@ -337,18 +360,20 @@ export default function VehicleInspection() {
     if (locked) return true;
     setSaving(true); setError('');
     try {
+      // Not the header: it is the work order's.
       const res = await api.put(`/vehicle-inspections/${inspection.id}`, {
-        ...form,
+        service_recommended: form.service_recommended, service_accepted: form.service_accepted, notes: form.notes,
+        signed_by_name: form.signed_by_name, customer_present: form.customer_present,
         entry_mode: mode,
-        original_estimate: form.original_estimate === '' ? null : form.original_estimate,
-        odometer: form.odometer === '' ? null : form.odometer,
+        ...(odoEditable ? { odometer: form.odometer === '' ? null : form.odometer } : {}),
         marks,
       });
       if (!res.success) {
-        if (!odometerRefused(res)) setError(res.message || t('inspection.err_save', 'Save failed'), at);
+        if (!odometerRefused(res) && !detailsRefused(res)) setError(res.message || t('inspection.err_save', 'Save failed'), at);
         return false;
       }
       setInspection(res.data);
+      setForm(f => ({ ...f, ...headerFrom(res.data) }));
       setSavedAt(new Date());
       return true;
     } catch (e) {
@@ -360,6 +385,15 @@ export default function VehicleInspection() {
   };
 
   const complete = async (at = '') => {
+    // Same rule as the server: the physical inspection's header is complete.
+    if (inspectionType === 'intake') {
+      const missing = REQUIRED_DETAILS.filter(k => blankish(form[k]));
+      if (missing.length) {
+        showBadDetails(missing, t('inspection.details_missing_wo', 'Missing on the work order: {{list}}. Add them to the work order (its customer and car), then complete the inspection.',
+          { list: missing.map(k => DETAIL_LABELS[k]).join(', ') }));
+        return;
+      }
+    }
     // Same rule as the server: on screen, the walk-around ends with the
     // customer's signature — unless they are not at the car.
     const present = form.customer_present !== false;
@@ -378,7 +412,7 @@ export default function VehicleInspection() {
         // A blank odometer was filled from the work order's reading.
         set('odometer', res.data?.odometer ?? '');
         setResign(false); noteJobCard(res.job_card); loadNext();
-      } else if (!odometerRefused(res)) setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
+      } else if (!odometerRefused(res) && !detailsRefused(res)) setError(res.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } catch (e) {
       setError(e.message || t('inspection.err_complete', 'Could not complete the inspection'), at);
     } finally { setSaving(false); }
@@ -625,10 +659,20 @@ export default function VehicleInspection() {
     email: t('inspection.shared_via.email', 'e-mail'),
     link: t('inspection.shared_via.link', 'copied link'),
   }[v] || v);
-  const field = (key, label, extra = {}) => (
-    <div><label style={LBL} htmlFor={`vi-f-${key}`}>{label}</label>
-      <input id={`vi-f-${key}`} style={INPUT} disabled={locked} value={form[key] ?? ''} onChange={e => set(key, e.target.value)} {...extra} /></div>
-  );
+  // The header is the work order's: shown, not edited. A required detail it
+  // lacks is outlined (amber; red once Complete was refused for it).
+  const field = (key, label, extra = {}) => {
+    const missing = detailsRequired && REQUIRED_DETAILS.includes(key) && blankish(form[key]);
+    const bad = missing && badDetails.includes(key);
+    return (
+      <div><label style={LBL} htmlFor={`vi-f-${key}`}>{label}</label>
+        <input id={`vi-f-${key}`} disabled value={form[key] ?? ''} {...extra} aria-invalid={bad || undefined}
+          placeholder={missing ? t('inspection.missing_on_wo', 'Missing on the work order') : undefined}
+          style={{ ...INPUT, background: '#f8fafc', color: '#334155', cursor: 'default',
+            ...(missing ? { border: `1px solid ${bad ? '#dc2626' : '#f59e0b'}`, background: bad ? '#fef2f2' : '#fffbeb' } : {}) }} />
+      </div>
+    );
+  };
 
   return (
     <div className="vi-page">
@@ -641,7 +685,9 @@ export default function VehicleInspection() {
         </button>
         <div style={{ flex: 1 }} />
         {savedAt && !locked && (
-          <span style={{ fontSize: 12, color: '#16a34a' }}>{t('inspection.saved_at', 'Saved {{time}}', { time: savedAt.toLocaleTimeString() })}</span>
+          <span style={{ fontSize: 12, color: '#16a34a' }}>
+            {t('inspection.saved_at', 'Saved {{time}}', { time: savedAt.toLocaleTimeString() })}
+          </span>
         )}
         <button style={{ ...BTN, background: '#f1f5f9', color: '#334155' }} onClick={() => window.print()}>
           <Printer width={14} height={14} /> {t('inspection.print', 'Print')}
@@ -785,18 +831,20 @@ export default function VehicleInspection() {
           {field('vehicle_model', t('inspection.field.model', 'Model'))}
           {field('vin', t('inspection.field.vin', 'VIN'), { dir: 'ltr' })}
           {field('plate_number', t('inspection.field.plate', 'Plate'))}
-          {/* Required on the physical inspection (the server checks it on save and completion). */}
+          {/* Required on the physical inspection (the server checks it on save and
+              completion): the work order's reading, typed here only while it has none. */}
           <div>
             <label style={LBL} htmlFor="vi-f-odometer">
               {t('inspection.field.odometer', 'Odometer (km)')}
-              {odoRequired && !locked && <span aria-hidden="true" style={{ color: '#dc2626' }}> *</span>}
+              {odoRequired && odoEditable && <span aria-hidden="true" style={{ color: '#dc2626' }}> *</span>}
             </label>
             <input id="vi-f-odometer" ref={odoRef} type="number" min={0} step={1} inputMode="numeric"
-              required={odoRequired} aria-required={odoRequired || undefined}
+              required={odoRequired && odoEditable} aria-required={(odoRequired && odoEditable) || undefined}
               aria-invalid={odoMsg ? true : undefined}
               aria-describedby={odoMsg ? 'vi-f-odometer-msg' : undefined}
-              style={{ ...INPUT, ...(odoMsg ? { borderColor: '#dc2626', background: '#fef2f2' } : {}) }}
-              disabled={locked} value={form.odometer ?? ''}
+              style={{ ...INPUT, ...(odoEditable ? {} : { background: '#f8fafc', color: '#334155', cursor: 'default' }),
+                ...(odoMsg ? { border: '1px solid #dc2626', background: '#fef2f2' } : {}) }}
+              disabled={!odoEditable} value={form.odometer ?? ''}
               onChange={e => { set('odometer', e.target.value); setOdoMsg(null); }} />
           </div>
           {/* Right under the field, across the row: the server's message is a sentence or two. */}
@@ -807,6 +855,17 @@ export default function VehicleInspection() {
             </p>
           )}
         </div>
+        {!locked && (
+          <p className="vi-no-print" style={{ margin: '10px 0 0', fontSize: 12.5, color: '#64748b', lineHeight: 1.45 }}>
+            {t('inspection.header_from_wo', "These details come from the work order — the customer's contact and the car's record — and can't be changed here.")}
+            {canDo(user, 'job.open') && (
+              <> <button type="button" onClick={() => navigate(`/work-orders?edit=${id}`)}
+                style={{ font: 'inherit', fontWeight: 700, background: 'none', border: 'none', padding: 0, color: '#1d4ed8', cursor: 'pointer' }}>
+                {t('inspection.edit_wo', 'Edit the work order')}
+              </button></>
+            )}
+          </p>
+        )}
         <p style={{ margin: '14px 0 0', fontSize: 12.5, color: '#1e3a6b', fontWeight: 600 }}>
           {mode === 'document'
             ? t('inspection.document_intro_wo', 'The inspection was done on the paper form — upload it above. The details here come from the work order.')
@@ -814,78 +873,56 @@ export default function VehicleInspection() {
         </p>
       </div>
 
-      {/* ── Diagram (filled in on screen): pick the damage type, then click the car ── */}
+      {/* ── Diagram (filled in on screen): tap the car to mark damage, tap a marker to remove it ── */}
       {mode === 'form' && (<>
       <div style={CARD}>
-        {!locked && (
-          <div className="vi-type-bar vi-no-print">
-            <label htmlFor="vi-damage-type" style={{ ...LBL, marginBottom: 0 }}>{t('inspection.damage_type', 'Damage type')}</label>
-            <select id="vi-damage-type" className="vi-type-select" style={{ ...INPUT, width: 'auto' }}
-              value={activeCode} onChange={e => setActiveCode(e.target.value)}>
-              <option value="">{t('inspection.damage_type_pick', 'Choose a damage type…')}</option>
-              {CODE_LIST.map(code => <option key={code} value={code}>{damageLabel(t, code)} ({code})</option>)}
-            </select>
-            <p className="vi-type-hint" role="status" style={{ color: activeCode ? '#0e7490' : '#64748b' }}>
-              {activeCode
-                ? t('inspection.hint_active', 'Click the spot on the car to mark “{{label}}”.', { label: damageLabel(t, activeCode) })
-                : t('inspection.hint_pick_type', 'Choose the damage type in the drop-down, then click the spot on the car.')}
+        <div className="vi-mark-head">
+          <span aria-live="polite" style={{ fontSize: 13, fontWeight: 700, color: '#1e3a6b' }}>
+            {t('inspection.marked_n', 'Marked damage ({{n}})', { n: marks.length })}
+          </span>
+          {!locked ? (
+            <p className="vi-no-print" style={{ margin: 0, fontSize: 12.5, color: '#0e7490' }}>
+              {t('inspection.hint_tap', 'Tap the car where there is damage; tap a mark again to remove it.')}
             </p>
-          </div>
-        )}
+          ) : marks.length === 0 && (
+            <p style={{ margin: 0, fontSize: 12.5, color: '#64748b' }}>{t('inspection.no_marks', 'No damage marked yet.')}</p>
+          )}
+        </div>
         <CarDamageDiagram
           marks={marks}
-          activeCode={locked ? '' : activeCode}
           selectedMarkId={selectedMarkId}
           onAddMark={locked ? undefined : addMark}
+          onRemoveMark={locked ? undefined : removeMark}
           onSelectMark={setSelectedMarkId}
         />
-      </div>
-
-      {/* ── Marked damage list ── */}
-      <div style={CARD}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: '#1e3a6b', marginBottom: 10 }}>
-          {t('inspection.marked_n', 'Marked damage ({{n}})', { n: marks.length })}
-        </div>
-        {marks.length === 0 ? (
-          <p style={{ fontSize: 12.5, color: '#64748b', margin: 0 }}>{t('inspection.no_marks', 'No damage marked yet.')}</p>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {marks.map((m, i) => (
-              <div key={m.id}
-                className="vi-mark-row"
-                onClick={() => setSelectedMarkId(m.id)}
-                style={{
-                  padding: '7px 10px', borderRadius: 8,
-                  border: `1px solid ${m.id === selectedMarkId ? '#0e7490' : '#f1f5f9'}`,
-                  background: m.id === selectedMarkId ? '#f0fdfa' : '#f8fafc', cursor: 'pointer',
-                }}>
-                <span style={{ fontSize: 11, color: '#64748b', minWidth: 16 }}>{i + 1}</span>
-                {/* The code in the marker's colour, so each row reads against its dot on the car. */}
-                <span className="vi-mark-code" style={{ fontSize: 11, fontWeight: 800, color: '#fff', background: DAMAGE_COLORS[m.code] || '#dc2626', borderRadius: 4, padding: '2px 6px', minWidth: 28, textAlign: 'center' }}>
-                  {m.code}
-                </span>
-                <span className="vi-mark-name" style={{ fontSize: 12.5, fontWeight: 600, color: '#334155' }}>{damageLabel(t, m.code)}</span>
-                <span className="vi-mark-view" style={{ fontSize: 11.5, color: '#64748b' }}>{viewLabel(t, m.view)}</span>
-                <input
-                  className="vi-mark-note"
-                  style={{ ...INPUT, padding: '5px 8px', fontSize: 12 }}
-                  placeholder={t('inspection.note_ph', 'Note (optional)')}
-                  aria-label={t('inspection.note_for', 'Note for mark {{n}}', { n: i + 1 })}
-                  disabled={locked}
-                  value={m.note || ''}
-                  onClick={e => e.stopPropagation()}
-                  onChange={e => updateMark(m.id, { note: e.target.value })}
-                />
-                {!locked && (
-                  <button className="vi-no-print" type="button"
-                    aria-label={t('inspection.remove_mark', 'Remove mark {{n}}', { n: i + 1 })}
-                    onClick={e => { e.stopPropagation(); removeMark(m.id); }}
-                    style={{ ...BTN, padding: '5px 8px', background: '#fff', color: '#dc2626', borderColor: '#fecaca' }}>
-                    <Trash width={13} height={13} />
-                  </button>
-                )}
-              </div>
-            ))}
+        {/* Markers saved before the damage type was dropped keep it and their
+            note: named here, read-only (a tap on one on the car still removes it). */}
+        {described.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 14 }}>
+            {described.map((m, i) => {
+              const code = damageCodeOf(m);
+              return (
+                <div key={m.id}
+                  className="vi-mark-row"
+                  onClick={() => code && setSelectedMarkId(m.id)}
+                  style={{
+                    padding: '7px 10px', borderRadius: 8,
+                    border: `1px solid ${m.id === selectedMarkId ? '#0e7490' : '#f1f5f9'}`,
+                    background: m.id === selectedMarkId ? '#f0fdfa' : '#f8fafc', cursor: code ? 'pointer' : 'default',
+                  }}>
+                  <span style={{ fontSize: 11, color: '#64748b', minWidth: 16 }}>{i + 1}</span>
+                  {/* The code in the marker's colour, so each row reads against its dot on the car. */}
+                  {code && (
+                    <span className="vi-mark-code" style={{ fontSize: 11, fontWeight: 800, color: '#fff', background: DAMAGE_COLORS[code] || MARK_COLOR, borderRadius: 4, padding: '2px 6px', minWidth: 28, textAlign: 'center' }}>
+                      {code}
+                    </span>
+                  )}
+                  {code && <span className="vi-mark-name" style={{ fontSize: 12.5, fontWeight: 600, color: '#334155' }}>{damageLabel(t, code)}</span>}
+                  <span className="vi-mark-view" style={{ fontSize: 11.5, color: '#64748b' }}>{viewLabel(t, m.view)}</span>
+                  {m.note && <span className="vi-mark-note" style={{ fontSize: 12, color: '#334155' }}>{m.note}</span>}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1131,7 +1168,7 @@ export default function VehicleInspection() {
           ) : (
             <><b style={{ color: '#15803d' }}>{t('inspection.bar_done', 'Inspection completed.')}</b>
               {jobCard?.number && !jobCardNote ? ` ${t('inspection.bar_jc_open', 'Job card {{n}} is open.', { n: jobCard.number })}` : ''}
-              {' '}{t('inspection.bar_done_pricing', 'Next (process step 4): pricing — the Service Advisor raises the estimate with the findings; the Storekeeper prices the parts.')}</>
+              {' '}{t('inspection.bar_done_report', "Next (process step 4): the Supervisor / Foreman's technical inspection; the Service Advisor raises the estimate from its report and the Storekeeper prices the parts.")}</>
           )}
           {jobCardNote && <div role="status" style={{ marginTop: 4, fontSize: 12.5, fontWeight: 600, color: waitingAck ? '#b45309' : '#15803d' }}>{jobCardNote}</div>}
         </div>

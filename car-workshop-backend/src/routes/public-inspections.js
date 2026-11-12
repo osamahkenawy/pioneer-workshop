@@ -25,7 +25,7 @@ import { notifyGroups } from '../lib/workflow.js';
 import { openJobCardIfReady } from '../lib/physical-inspection.js';
 import { saveBase64Signature } from './uploads.js';
 import { DAMAGE_CODES, readDocs, readPhotos, sendDocument, signatureError, cleanName } from './vehicle-inspections.js';
-import { IMAGE_COORD } from '../lib/inspection-marks.js';
+import { IMAGE_COORD, damageCodeOf } from '../lib/inspection-marks.js';
 
 const router = express.Router();
 router.use(inspectionLinkLimiter);
@@ -93,8 +93,12 @@ export function publicView(row) {
       },
       odometer: row.odometer,
       // coord 'img': x/y on the car picture; none: an older marker, on the staff form's box.
+      // A marker is a plain spot on the car; only an older one has a damage
+      // code and its name (label) — the page lists those, never a legend.
       marks: (Array.isArray(marks) ? marks : []).map(m => ({
-        id: m.id, view: m.view, code: m.code, label: DAMAGE_CODES[m.code] || m.code, x: m.x, y: m.y,
+        id: m.id, view: m.view,
+        ...(damageCodeOf(m) ? { code: m.code, label: DAMAGE_CODES[m.code] } : {}),
+        x: m.x, y: m.y,
         ...(m.coord === IMAGE_COORD ? { coord: IMAGE_COORD } : {}),
         note: m.note || '',
       })),

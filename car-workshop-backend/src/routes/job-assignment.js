@@ -51,6 +51,7 @@ import { requireCapability } from '../lib/roles.js';
 import { onTechnicianAssigned } from '../lib/workflow.js';
 import { woLabel } from '../lib/status-labels.js';
 import { awaitingPhysicalInspection, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
+import { partsRequestMissing } from '../lib/parts-request.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -201,6 +202,9 @@ router.post('/assign', canAssign, async (req, res) => {
     if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
       return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
     }
+    // The parts are requested (MRN) before anyone is assigned (lib/parts-request.js).
+    const mrn = await partsRequestMissing({ workOrderId: workOrder.id, workshopId: req.workshopId });
+    if (mrn) return res.status(409).json({ success: false, ...mrn });
 
     const [mechanic] = await query('SELECT * FROM mechanics WHERE id = ? AND workshop_id = ?', [mechanic_id, req.workshopId]);
     if (!mechanic) return res.status(404).json({ success: false, message: 'Mechanic not found' });
@@ -378,6 +382,9 @@ router.post('/auto-assign', canAssign, async (req, res) => {
     if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
       return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
     }
+    // The parts are requested (MRN) before anyone is assigned (lib/parts-request.js).
+    const mrn = await partsRequestMissing({ workOrderId: workOrder.id, workshopId: req.workshopId });
+    if (mrn) return res.status(409).json({ success: false, ...mrn });
 
     const cfg = await loadAssignmentConfig(req.workshopId);
     const requiredSpecialties = cfg.enforceSpecialtyMatch ? allowedSpecialties(workOrder) : null;
@@ -559,6 +566,10 @@ router.post('/auto-assign-all', canAssign, async (req, res) => {
       // An external customer's job waits for the physical inspection: no job card to work on yet.
       if (await awaitingPhysicalInspection({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
         skipped.push({ work_order_id: workOrder.id, work_order_number: workOrder.work_order_number, reason: 'physical_inspection' });
+        continue;
+      }
+      if (await partsRequestMissing({ workOrderId: workOrder.id, workshopId: req.workshopId })) {
+        skipped.push({ work_order_id: workOrder.id, work_order_number: workOrder.work_order_number, reason: 'mrn_required' });
         continue;
       }
       const requiredSpecialties = cfg.enforceSpecialtyMatch ? allowedSpecialties(workOrder) : null;
