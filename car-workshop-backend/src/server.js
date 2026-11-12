@@ -47,6 +47,7 @@ import serviceStatusRouter from './routes/service-status.js';
 import cashPaymentRouter from './routes/cash-payment.js';
 import warrantyClaimsRouter from './routes/warranty-claims.js';
 import mechanicEarningsRouter from './routes/mechanic-earnings.js';
+import mechanicDocumentsRouter from './routes/mechanic-documents.js';
 import customerAuthRouter from './routes/customer-auth.js';
 import customerPortalRouter from './routes/customer-portal.js';
 import walletRouter from './routes/wallet.js';
@@ -74,6 +75,7 @@ import crmRemindersRouter from './routes/crm-reminders.js';
 import { startReminderCron } from './lib/reminder-cron.js';
 import superAdminRouter, { verifySuperAdmin } from './routes/super-admin.js';
 import { authMiddleware } from './middleware/auth.js';
+import { requireManager } from './lib/access.js';
 import { query } from './lib/database.js';
 import superAdminEnhancedRouter from './routes/super-admin-enhanced.js';
 
@@ -251,10 +253,9 @@ app.use('/api/warranty-claims', warrantyClaimsRouter);
 
 // ── Mechanic-facing ──────────────────────────────────────────────────────
 app.use('/api/mechanic-earnings', mechanicEarningsRouter);
-// /api/mechanic-documents is not mounted: no screen uses it, and the router
-// has no login check of its own. To bring it back, fix its expires_at /
-// document_url columns and mount it as
-// app.use('/api/mechanic-documents', authMiddleware, requireManager, router).
+// Technicians' certificates (mechanic_documents). The router has no login
+// check of its own, so it is mounted behind auth, managers only.
+app.use('/api/mechanic-documents', authMiddleware, requireManager, mechanicDocumentsRouter);
 // /api/mechanic-app (the courier driver app's API) is no longer mounted: the
 // technician app uses /api/job-cards/mine. lib/access.js still refuses the
 // prefix for every role (RETIRED_PREFIXES).

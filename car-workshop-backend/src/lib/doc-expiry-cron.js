@@ -23,14 +23,13 @@ function stageFor(daysLeft) {
 async function runOnce() {
   try {
     const docs = await query(`
-      SELECT dd.id, dd.workshop_id, dd.mechanic_id, dd.doc_type, dd.expiry_date, dd.notes,
+      SELECT dd.id, dd.workshop_id, dd.mechanic_id, dd.doc_type, dd.expires_at AS expiry_date, dd.notes,
              m.full_name AS mechanic_name, m.phone AS mechanic_phone, t.name AS workshop_name
         FROM mechanic_documents dd
         JOIN mechanics m  ON m.id = dd.mechanic_id
         JOIN workshops t  ON t.id = dd.workshop_id
-       WHERE dd.expiry_date IS NOT NULL
-         AND dd.status != 'rejected'
-         AND dd.expiry_date <= DATE_ADD(CURDATE(), INTERVAL 60 DAY)
+       WHERE dd.expires_at IS NOT NULL
+         AND dd.expires_at <= DATE_ADD(CURDATE(), INTERVAL 60 DAY)
        LIMIT 5000
     `);
     if (!docs.length) return;

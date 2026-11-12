@@ -7,9 +7,12 @@
  * expiry-check structure is unchanged — only the vocabulary and table name
  * (driver_documents -> mechanic_documents) were renamed.
  *
- * Mounted from index.js:
- *   app.use('/api/mechanic-documents',  …  mechanicDocsRoutes);
- *   app.use('/api/mechanic-app/config', …  mechanicAppConfigRoutes);
+ * Mounted in server.js, managers only:
+ *   app.use('/api/mechanic-documents', authMiddleware, requireManager, mechanicDocumentsRouter);
+ *
+ * The columns are the mechanic_documents table's: document_url, issued_at,
+ * expires_at, status (valid / expiring_soon / expired, from the expiry date),
+ * notes. The body may still send expiry_date for expires_at.
  *
  * Storage: uses the same /uploads/mechanic-docs folder as other media.
  */
@@ -51,10 +54,25 @@ const docUpload = multer({
 });
 
 /* ── Helpers ───────────────────────────────────────────────── */
-// Renamed from delivery driver doc types (national_id/license/insurance/registration)
-// to workshop mechanic credential types: trade license, safety cert, insurance, ID, other.
-const VALID_DOC_TYPES   = ['national_id', 'trade_license', 'safety_certification', 'insurance', 'other'];
-const VALID_DOC_STATUS  = ['pending', 'approved', 'rejected'];
+// The table's doc_type and status values.
+const VALID_DOC_TYPES   = ['trade_certificate', 'safety_certificate', 'id_card', 'other'];
+const VALID_DOC_STATUS  = ['valid', 'expiring_soon', 'expired'];
+const EXPIRING_DAYS = 30;
+
+/** A date from the body: undefined = not sent, null = cleared, 'YYYY-MM-DD', or { error }. */
+function parseDate(v) {
+  if (v === undefined) return undefined;
+  if (v === null || String(v).trim() === '') return null;
+  const s = String(v).trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s)) ? s : { error: true };
+}
+
+/** The status the expiry date gives: expired, expiring within 30 days, or valid. */
+function statusFor(expiresAt) {
+  if (!expiresAt) return 'valid';
+  const days = Math.floor((Date.parse(expiresAt) - Date.parse(new Date().toISOString().slice(0, 10))) / 86400000);
+  return days < 0 ? 'expired' : days <= EXPIRING_DAYS ? 'expiring_soon' : 'valid';
+}
 
 async function assertMechanicInWorkshop(mechanicId, workshopId) {
   const [m] = await query(
@@ -76,7 +94,7 @@ router.get('/', async (req, res) => {
     if (doc_type && VALID_DOC_TYPES.includes(doc_type)) { where += ' AND md.doc_type = ?'; params.push(doc_type); }
     if (expiring_in_days) {
       const days = Math.min(365, Math.max(0, parseInt(expiring_in_days, 10) || 0));
-      where += ' AND md.expiry_date IS NOT NULL AND md.expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL ? DAY)';
+      where += ' AND md.expires_at IS NOT NULL AND md.expires_at BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL ? DAY)';
       params.push(days);
     }
     const rows = await query(
@@ -84,7 +102,7 @@ router.get('/', async (req, res) => {
          FROM mechanic_documents md
          JOIN mechanics m ON m.id = md.mechanic_id
         WHERE ${where}
-        ORDER BY md.expiry_date ASC, md.created_at DESC
+        ORDER BY md.expires_at IS NULL, md.expires_at ASC, md.created_at DESC
         LIMIT 500`,
       params
     );
@@ -96,11 +114,17 @@ router.get('/', async (req, res) => {
 });
 
 /* ────────────────────────────────────────────────────────────
-   POST /api/mechanic-documents  (multipart: file, mechanic_id, doc_type, expiry_date?)
+   POST /api/mechanic-documents  (multipart: file, mechanic_id, doc_type, issued_at?, expires_at? (or expiry_date), notes?)
    ──────────────────────────────────────────────────────────── */
 router.post('/', docUpload.single('file'), validateUpload(DOC_KINDS), async (req, res) => {
   try {
-    const { mechanic_id, doc_type, expiry_date, notes } = req.body;
+    const { mechanic_id, doc_type, notes } = req.body;
+    const expiresAt = parseDate(req.body.expires_at ?? req.body.expiry_date);
+    const issuedAt = parseDate(req.body.issued_at);
+    if (expiresAt?.error || issuedAt?.error) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ success: false, message: 'Dates must be YYYY-MM-DD' });
+    }
     if (!mechanic_id || !doc_type) {
       if (req.file) fs.unlink(req.file.path, () => {});
       return res.status(400).json({ success: false, message: 'mechanic_id and doc_type required' });
@@ -117,10 +141,10 @@ router.post('/', docUpload.single('file'), validateUpload(DOC_KINDS), async (req
     const fileUrl = `/uploads/mechanic-docs/${req.file.filename}`;
     const result = await execute(
       `INSERT INTO mechanic_documents
-        (workshop_id, mechanic_id, doc_type, file_url, file_name, expiry_date, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.workshopId, mechanic_id, doc_type, fileUrl, req.file.originalname,
-       expiry_date || null, notes || null]
+        (workshop_id, mechanic_id, doc_type, document_url, issued_at, expires_at, status, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [req.workshopId, mechanic_id, doc_type, fileUrl, issuedAt ?? null, expiresAt ?? null,
+       statusFor(expiresAt), notes ? String(notes).slice(0, 5000) : null]
     );
     const [doc] = await query('SELECT * FROM mechanic_documents WHERE id = ?', [result.insertId]);
     res.status(201).json({ success: true, data: doc });
@@ -132,18 +156,24 @@ router.post('/', docUpload.single('file'), validateUpload(DOC_KINDS), async (req
 });
 
 /* ────────────────────────────────────────────────────────────
-   PATCH /api/mechanic-documents/:id   (admin review: approve/reject + notes)
+   PATCH /api/mechanic-documents/:id   { status?, notes?, issued_at?, expires_at? (or expiry_date) }
    ──────────────────────────────────────────────────────────── */
 router.patch('/:id', async (req, res) => {
   try {
-    const { status, notes, expiry_date } = req.body;
+    const { status, notes } = req.body;
     if (status && !VALID_DOC_STATUS.includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status' });
     }
+    const expiresAt = parseDate(req.body.expires_at ?? req.body.expiry_date);
+    const issuedAt = parseDate(req.body.issued_at);
+    if (expiresAt?.error || issuedAt?.error) return res.status(400).json({ success: false, message: 'Dates must be YYYY-MM-DD' });
     const sets = []; const params = [];
-    if (status) { sets.push('status = ?', 'reviewed_by = ?', 'reviewed_at = NOW()'); params.push(status, req.user?.id || null); }
-    if (notes !== undefined)       { sets.push('notes = ?');       params.push(notes); }
-    if (expiry_date !== undefined) { sets.push('expiry_date = ?'); params.push(expiry_date || null); }
+    if (notes !== undefined)     { sets.push('notes = ?');      params.push(notes == null ? null : String(notes).slice(0, 5000)); }
+    if (issuedAt !== undefined)  { sets.push('issued_at = ?');  params.push(issuedAt); }
+    if (expiresAt !== undefined) { sets.push('expires_at = ?'); params.push(expiresAt); }
+    // A new expiry date sets the status, unless one is given.
+    if (status)                       { sets.push('status = ?'); params.push(status); }
+    else if (expiresAt !== undefined) { sets.push('status = ?'); params.push(statusFor(expiresAt)); }
     if (!sets.length) return res.status(400).json({ success: false, message: 'No fields to update' });
     params.push(req.params.id, req.workshopId);
     const result = await execute(
@@ -165,13 +195,13 @@ router.patch('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const [doc] = await query(
-      'SELECT file_url FROM mechanic_documents WHERE id = ? AND workshop_id = ? LIMIT 1',
+      'SELECT document_url FROM mechanic_documents WHERE id = ? AND workshop_id = ? LIMIT 1',
       [req.params.id, req.workshopId]
     );
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found' });
     await execute('DELETE FROM mechanic_documents WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
-    if (doc.file_url?.startsWith('/uploads/mechanic-docs/')) {
-      const local = path.resolve('.' + doc.file_url);
+    if (doc.document_url?.startsWith('/uploads/mechanic-docs/')) {
+      const local = path.resolve('.' + doc.document_url);
       fs.unlink(local, () => {});
     }
     res.json({ success: true });

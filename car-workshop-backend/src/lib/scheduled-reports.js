@@ -22,7 +22,8 @@ async function generateReportData(workshopId, days = 1) {
        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as failed,
        COALESCE(SUM(CASE WHEN status = 'completed' THEN service_fee - discount ELSE 0 END), 0) as revenue,
        COALESCE(SUM(CASE WHEN payment_method = 'cash' AND status = 'completed' THEN cash_amount ELSE 0 END), 0) as cash_collected,
-       COALESCE(SUM(CASE WHEN payment_method = 'cash' AND (cash_settled = 0 OR cash_settled IS NULL) AND status = 'completed' THEN cash_amount ELSE 0 END), 0) as cash_pending
+       -- work_orders has no cash_settled: cash not collected yet has no cash_collected_at.
+       COALESCE(SUM(CASE WHEN payment_method = 'cash' AND cash_collected_at IS NULL AND status = 'completed' THEN cash_amount ELSE 0 END), 0) as cash_pending
      FROM work_orders
      WHERE workshop_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
     [workshopId, days]

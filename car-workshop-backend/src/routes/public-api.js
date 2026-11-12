@@ -903,7 +903,7 @@ router.post('/enquiries', publicEnquiryLimiter, async (req, res) => {
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'api', ?, 'new', NULL)`,
           [
             workshopId, enquiryNumber, extRef, known ? known.id : null,
-            stripMarkup(String(name).trim()), cleanPhone, cleanEmail, emirate.value ?? null,
+            stripMarkup(String(name).trim(), 200), cleanPhone, cleanEmail, emirate.value ?? null, // contact_name is VARCHAR(200)
             stripMarkup(vehicleDescription, 255), carMake, carModel, carYear.value ?? null,
             blank(vehicle.plateNumber) ? null : stripMarkup(String(vehicle.plateNumber).trim(), 30),
             mapEnquiryType(service),
