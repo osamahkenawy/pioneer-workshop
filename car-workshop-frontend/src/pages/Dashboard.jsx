@@ -17,6 +17,7 @@ import { AuthContext } from '../context/AuthContext';
 import api from '../lib/api';
 import { fmtCurrency } from '../utils/currency';
 import './Dashboard.css';
+import './DashboardHome.css';
 import MyTasks from '../components/workflow/MyTasks';
 import { canDo, hasModule } from '../lib/permissions';
 import { woDisplayKey, woLabel, WO_DISPLAY_KEYS, WO_STATUSES } from '../lib/statusLabels';
@@ -25,6 +26,27 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement,
   BarElement, ArcElement, Title, Tooltip, Legend, Filler);
 
 const AUTO_REFRESH_MS = 30000; // 30 seconds
+
+/* Charts use the app's typeface and the page's muted ink (DashboardHome.css). */
+const FONT = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+const INK_MUTED = '#64748b';
+const GRID = '#eef2f6';
+const TOOLTIP = { backgroundColor: '#0f172a', cornerRadius: 8, padding: 10, titleFont: { family: FONT, size: 12, weight: '600' }, bodyFont: { family: FONT, size: 12 } };
+
+/** One KPI tile: icon + label, the figure, then a line or two of context. */
+function Kpi({ icon: Icon, tone, label, value, unit, delta, children }) {
+  return (
+    <div className={`dsh-kpi tone-${tone}`}>
+      <div className="dsh-kpi-top">
+        <span className="dsh-kpi-icon" aria-hidden="true"><Icon width={16} height={16} strokeWidth={1.8} /></span>
+        <span className="dsh-kpi-label">{label}</span>
+      </div>
+      <div className="dsh-kpi-value">{value}{unit && <small>{unit}</small>}</div>
+      {delta}
+      {children && <div className="dsh-kpi-meta">{children}</div>}
+    </div>
+  );
+}
 
 /* Chart colours per workshop stage (lib/statusLabels.js display keys); the
    words come from woLabel. Brighter than the chip tones so slices read on
@@ -174,9 +196,9 @@ export default function Dashboard() {
     if (delta === undefined || delta === null || period === 'all' || !(stats.orders_period > 0)) return null;
     const isUp = delta >= 0;
     return (
-      <span className={`delta-badge ${isUp ? 'up' : 'down'}`}>
-        {isUp ? <StatUp width={11} height={11} /> : <StatDown width={11} height={11} />}
-        {Math.abs(delta)}% {vsLabel}
+      <span className={`dsh-delta ${isUp ? 'up' : 'down'}`}>
+        <b>{isUp ? <StatUp width={12} height={12} /> : <StatDown width={12} height={12} />}{isUp ? '+' : '−'}{Math.abs(delta)}%</b>
+        <span>{vsLabel}</span>
       </span>
     );
   };
@@ -192,28 +214,32 @@ export default function Dashboard() {
         label: t('dashboard.chart_orders'),
         data: chart.map(d => d.orders || 0),
         borderColor: '#1e3a6b',
-        backgroundColor: 'rgba(36,64,102,0.08)',
-        fill: true, tension: 0.4, pointRadius: 4,
-        pointBackgroundColor: '#1e3a6b',
+        backgroundColor: 'rgba(30,58,107,0.07)',
+        borderWidth: 2, fill: true, tension: 0.35, cubicInterpolationMode: 'monotone',
+        pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: '#1e3a6b',
       },
       {
         label: t('dashboard.chart_delivered'),
         data: chart.map(d => d.delivered || 0),
-        borderColor: '#22c55e',
-        backgroundColor: 'rgba(34,197,94,0.08)',
-        fill: true, tension: 0.4, pointRadius: 3,
-        pointBackgroundColor: '#22c55e',
-        borderDash: [5, 3],
+        borderColor: '#16a34a',
+        backgroundColor: 'rgba(22,163,74,0.05)',
+        borderWidth: 2, fill: true, tension: 0.35, cubicInterpolationMode: 'monotone',
+        pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: '#16a34a',
+        borderDash: [5, 4],
       },
     ]
   };
   const lineOptions = {
     responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 16, font: { size: 11 } } }, tooltip: { backgroundColor: '#1e3a6b', cornerRadius: 8, padding: 12 } },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, position: 'top', align: 'end', labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 6, boxHeight: 6, padding: 14, color: INK_MUTED, font: { family: FONT, size: 12 } } },
+      tooltip: TOOLTIP,
+    },
     scales: {
-      y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' } },
-      x: { grid: { display: false } }
-    }
+      y: { beginAtZero: true, border: { display: false }, grid: { color: GRID }, ticks: { color: INK_MUTED, font: { family: FONT, size: 11 }, precision: 0, padding: 6 } },
+      x: { border: { display: false }, grid: { display: false }, ticks: { color: INK_MUTED, font: { family: FONT, size: 11 }, maxRotation: 0, autoSkipPadding: 12 } },
+    },
   };
 
   const stageColor = (woOrStatus) => STAGE_COLORS[woDisplayKey(woOrStatus)] || '#64748b';
@@ -237,7 +263,7 @@ export default function Dashboard() {
     datasets: [{
       data: statusSlices.map(s => s.count),
       backgroundColor: statusSlices.map(s => STAGE_COLORS[s.key]),
-      borderWidth: 0,
+      borderWidth: 2, borderColor: '#fff', hoverOffset: 4,
     }]
   };
 
@@ -251,7 +277,7 @@ export default function Dashboard() {
   };
 
   const doughnutOptions = {
-    responsive: true, maintainAspectRatio: false, cutout: '70%',
+    responsive: true, maintainAspectRatio: false, cutout: '72%',
     // Click a slice (or its legend entry) to open the work-order list already
     // filtered to that status.
     onClick: (_evt, elements) => {
@@ -271,7 +297,10 @@ export default function Dashboard() {
         },
         labels: {
           usePointStyle: true,
-          padding: 12,
+          boxWidth: 7, boxHeight: 7,
+          padding: 10,
+          color: '#334155',
+          font: { family: FONT, size: 12 },
           // Show the count next to each status so the breakdown is readable
           // without hovering
           generateLabels: (chart) => {
@@ -288,7 +317,7 @@ export default function Dashboard() {
         },
       },
       tooltip: {
-        backgroundColor: '#1e3a6b', cornerRadius: 8, padding: 12,
+        ...TOOLTIP,
         callbacks: {
           label: (ctx) => {
             const pct = statusTotal ? Math.round((ctx.parsed / statusTotal) * 100) : 0;
@@ -304,87 +333,76 @@ export default function Dashboard() {
     return <DashboardSkeleton />;
   }
 
+  const periodOptions = [
+    { k: 'week', label: t('dashboard.this_week', 'This Week') },
+    { k: 'month', label: t('dashboard.this_month', 'This Month') },
+    { k: 'all', label: t('dashboard.all_time', 'All time') },
+  ];
+  const isAll = period === 'all';
+  const cancelledVal = isAll ? (stats.cancelled_all_time || 0) : (stats.cancelled_period || 0);
+  const allTime = (txt) => !isAll && <span>{txt}</span>;
+  const quickActions = [
+    { to: '/work-orders?new=1', icon: Plus, label: t('dashboard.new_order'), tone: 'orange', cap: 'job.open' },
+    { to: '/estimates?new=1', icon: Page, label: t('dashboard.new_estimate', 'New Estimate'), tone: 'indigo', cap: 'estimate.raise' },
+    { to: '/estimates', icon: ClipboardCheck, label: t('common.estimates', 'Estimates'), tone: 'sky', mod: 'estimates' },
+    { to: '/store', icon: Page, label: t('common.store', 'Store'), tone: 'violet', mod: 'store' },
+    { to: '/job-assignment', icon: Group, label: t('dashboard.job-assignment'), tone: 'navy', mod: 'job-assignment' },
+    { to: '/team-leader', icon: Group, label: t('common.team_board', 'Team Board'), tone: 'navy', mod: 'team-leader' },
+    { to: '/fleet-intake', icon: Truck, label: t('common.fleet_intake', 'Fleet Intake'), tone: 'teal', mod: 'fleet-intake' },
+    { to: '/customers', icon: User, label: t('dashboard.customers'), tone: 'slate', mod: 'customers' },
+    { to: '/reports', icon: StatUp, label: t('dashboard.reports'), tone: 'green', mod: 'reports' },
+  ].filter(a => (!a.cap || canDo(user, a.cap)) && (!a.mod || hasModule(user, a.mod)));
+  const showLists = widgetVis.service_bays || widgetVis.mechanics || widgetVis.recent;
+  const listCols = [widgetVis.service_bays, widgetVis.mechanics, widgetVis.recent].filter(Boolean).length;
+
   return (
-    <div className="dashboard">
-      {/* Welcome Header */}
-      <div className="dashboard-header">
-        {/* The glow shapes live in their own clipped layer. They used to sit
-            on the header itself, whose overflow:hidden then also clipped the
-            "Customize widgets" panel opening out of it. */}
-        <div className="dashboard-header-deco" aria-hidden="true" />
-        <div className="welcome-section">
-          <div className="greeting-time">
-            <Clock width={16} height={16} />
-            <span>{formatTime()}</span>
-            <span className="date-divider">&bull;</span>
-            <span>{formatDate()}</span>
-          </div>
+    <div className="dashboard dsh">
+      {/* Page header: greeting, the period every figure below follows, live
+          refresh, widgets and the main action. */}
+      <header className="dsh-head">
+        <div className="dsh-head-text">
           <h1>{getGreeting()}, {user?.full_name || user?.username}</h1>
-          <p className="welcome-subtitle">{t('dashboard.subtitle')}</p>
-          {/* Period switcher — drives the KPI tiles, the trend chart and the
-              status breakdown below. */}
-          <div style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 999, background: 'rgba(255,255,255,0.14)', marginTop: 10 }}>
-            {[{ k: 'week', label: t('dashboard.this_week', 'This Week') },
-              { k: 'month', label: t('dashboard.this_month', 'This Month') },
-              { k: 'all', label: t('dashboard.all_time', 'All time') }].map(opt => (
-              <button
-                key={opt.k}
-                onClick={() => changePeriod(opt.k)}
-                style={{
-                  padding: '5px 16px', borderRadius: 999, border: 'none', cursor: 'pointer',
-                  fontSize: 12.5, fontWeight: 700,
-                  background: period === opt.k ? '#fff' : 'transparent',
-                  color: period === opt.k ? '#1e3a6b' : 'rgba(255,255,255,0.85)',
-                }}
-              >
+          <p>
+            <span>{formatDate()}</span>
+            {periodRange && (
+              <>
+                <span className="dsh-sep" aria-hidden="true">·</span>
+                <span>{periodLabel}: {fmtDay(periodRange.start_date)} – {fmtDay(periodRange.end_date)}</span>
+              </>
+            )}
+          </p>
+        </div>
+        <div className="dsh-head-actions">
+          <div className="dsh-seg" role="group" aria-label={t('dashboard.period', 'Period')}>
+            {periodOptions.map(opt => (
+              <button key={opt.k} type="button" className={period === opt.k ? 'on' : ''} aria-pressed={period === opt.k} onClick={() => changePeriod(opt.k)}>
                 {opt.label}
               </button>
             ))}
           </div>
-          {periodRange && (
-            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.7)', marginTop: 6 }}>
-              {fmtDay(periodRange.start_date)} → {fmtDay(periodRange.end_date)}
-            </div>
-          )}
-          {period !== 'all' && !loading && (stats.orders_period || 0) === 0 && (
-            <div className="period-empty-hint">
-              {t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}
-              <button onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
-            </div>
-          )}
-        </div>
-        <div className="header-actions">
           <button
-            className={`btn-auto-refresh ${autoRefresh ? 'active' : ''}`}
+            type="button"
+            className={`dsh-live ${autoRefresh ? 'on' : ''}`}
             onClick={() => setAutoRefresh(prev => !prev)}
-            title={autoRefresh ? t('dashboard.auto_refresh_on') : t('dashboard.auto_refresh_off')}
+            title={`${autoRefresh ? t('dashboard.auto_refresh_on') : t('dashboard.auto_refresh_off')}${lastRefreshed ? ` · ${t('dashboard.updated')} ${lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}` : ''}`}
           >
-            <Refresh width={15} height={15} className={autoRefresh ? 'spin-slow' : ''} />
+            <span className="dsh-live-dot" aria-hidden="true" />
             {autoRefresh ? t('dashboard.live_label') : t('dashboard.paused_label')}
+            {lastRefreshed && <span className="dsh-live-time">{lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true })}</span>}
           </button>
-          {lastRefreshed && (
-            <span className="last-refreshed">
-              {t('dashboard.updated')} {lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-            </span>
-          )}
-          {canDo(user, 'job.open') && (
-            <Link to="/work-orders?new=1" className="btn-primary">
-              <Plus width={18} height={18} />
-              {t('dashboard.new_order')}
-            </Link>
-          )}
-          <div style={{ position: 'relative' }}>
-            <button className="btn-auto-refresh" onClick={() => setShowWidgetPanel(v => !v)} title={t('dashboard.settings.customize_widgets')}>
-              <Settings width={15} height={15} /> {t('dashboard.settings.customize_widgets')}
+          <div className="dsh-widgets">
+            <button type="button" className="dsh-icon-btn" onClick={() => setShowWidgetPanel(v => !v)}
+              title={t('dashboard.settings.customize_widgets')} aria-label={t('dashboard.settings.customize_widgets')} aria-expanded={showWidgetPanel}>
+              <Settings width={16} height={16} />
             </button>
             {showWidgetPanel && (
-              <div className="widget-panel">
-                <div className="widget-panel-header">
-                  <strong>{t('dashboard.toggle_widgets')}</strong>
-                  <button className="widget-panel-close" onClick={() => setShowWidgetPanel(false)}>&times;</button>
+              <div className="dsh-widget-panel">
+                <div className="dsh-widget-panel-head">
+                  <strong>{t('dashboard.settings.customize_widgets')}</strong>
+                  <button type="button" onClick={() => setShowWidgetPanel(false)} aria-label={t('common.close', 'Close')}>&times;</button>
                 </div>
                 {WIDGET_DEFS.map(w => (
-                  <label key={w.key} className="widget-panel-item">
+                  <label key={w.key} className="dsh-widget-item">
                     <input type="checkbox" checked={!!widgetVis[w.key]} onChange={() => toggleWidget(w.key)} />
                     <span>{t(w.label)}</span>
                   </label>
@@ -392,346 +410,238 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+          {canDo(user, 'job.open') && (
+            <Link to="/work-orders?new=1" className="dsh-btn-primary">
+              <Plus width={16} height={16} strokeWidth={2} />
+              {t('dashboard.new_order')}
+            </Link>
+          )}
         </div>
-      </div>
+      </header>
+
+      {period !== 'all' && (stats.orders_period || 0) === 0 && (
+        <div className="dsh-hint">
+          <span>{t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}</span>
+          <button type="button" onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
+        </div>
+      )}
+
+      {/* Key figures — every tile but Technicians follows the period above. */}
+      {widgetVis.metrics && (
+        <section className="dsh-kpis" aria-label={t('dashboard.widgets.metrics')}>
+          <Kpi icon={Package} tone="navy" label={t('dashboard.kpiCards.orders_period', 'Work Orders')}
+            value={fmtNum(stats.orders_period)} delta={<DeltaBadge delta={stats.delta_orders_period} />}>
+            {allTime(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.total_orders_all_time) }))}
+            <span>{t('dashboard.active_now', 'In the workshop now')}: <b>{fmtNum(stats.active_orders_all_time || stats.active_orders)}</b> · {t('dashboard.waiting', 'Waiting')}: <b>{fmtNum(stats.waiting_orders ?? stats.pending_orders)}</b></span>
+          </Kpi>
+          <Kpi icon={Check} tone="green" label={t('dashboard.kpiCards.completed_orders')}
+            value={fmtNum(stats.completed_period)} delta={<DeltaBadge delta={stats.delta_completed_period} />}>
+            {allTime(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.completed_orders_all_time) }))}
+            {stats.success_rate_period != null && <span>{t('dashboard.completion_rate', 'Completion rate')}: <b>{stats.success_rate_period}%</b></span>}
+          </Kpi>
+          <Kpi icon={Wrench} tone="blue" label={t('dashboard.kpiCards.active_mechanics')}
+            value={fmtNum(stats.available_mechanics)} unit={` / ${fmtNum(stats.total_mechanics)}`}>
+            <span>{t('dashboard.on_a_job', 'On a job')}: <b>{fmtNum(stats.busy_mechanics)}</b> · {t('dashboard.off_duty', 'Off')}: <b>{fmtNum(stats.offline_mechanics)}</b></span>
+          </Kpi>
+          <Kpi icon={Timer} tone="indigo" label={t('dashboard.kpiCards.delivery_time')} value={fmtMins(stats.avg_minutes_period)}>
+            {!stats.avg_minutes_period && <span>{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: isAll ? '' : periodPhrase })}</span>}
+          </Kpi>
+          <Kpi icon={DollarCircle} tone="violet" label={t('dashboard.kpiCards.revenue', 'Revenue')}
+            value={fmtAED(stats.revenue_period)} delta={<DeltaBadge delta={stats.delta_revenue_period} />}>
+            {allTime(t('dashboard.amount_all_time', '{{amount}} all time', { amount: fmtAED(stats.revenue_all_time) }))}
+          </Kpi>
+          <Kpi icon={WarningTriangle} tone="slate" label={woLabel(t, 'cancelled')} value={fmtNum(cancelledVal)}>
+            {allTime(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.cancelled_all_time) }))}
+          </Kpi>
+        </section>
+      )}
 
       {/* Steps 1–7: what is waiting on this person's role */}
       <MyTasks />
 
-      {/* Key Metrics Row — every tile follows the period switcher. When a
-          period is empty the tiles say so and the header offers "Show all
-          time"; they no longer swap to all-time figures behind a label that
-          still reads "This Month". */}
-      {widgetVis.metrics && (() => {
-        const isAll = period === 'all';
-        const cancelledVal = isAll ? (stats.cancelled_all_time || 0) : (stats.cancelled_period || 0);
-        const allTimeNote = (txt) => !isAll && <span className="metric-sub">{txt}</span>;
-        return (
-        <div className="metrics-row">
-        <div className="metric-card primary">
-          <div className="metric-icon" style={{ background: 'rgba(242,66,27,0.1)', color: '#159fd9' }}>
-            <Package width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value">{fmtNum(stats.orders_period)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.orders_period', 'Work Orders')} · {periodLabel}</span>
-            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.total_orders_all_time) }))}
-          </div>
-          <DeltaBadge delta={stats.delta_orders_period} />
-          <div className="metric-trend neutral">
-            <Activity width={14} height={14} />
-            <span>{t('dashboard.active_now', 'In the workshop now')}: {fmtNum(stats.active_orders_all_time || stats.active_orders)} · {t('dashboard.waiting', 'Waiting')}: {fmtNum(stats.waiting_orders ?? stats.pending_orders)}</span>
-          </div>
-        </div>
-
-        <div className="metric-card success">
-          <div className="metric-icon" style={{ background: 'rgba(34,197,94,0.1)', color: '#22c55e' }}>
-            <Check width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value">{fmtNum(stats.completed_period)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.completed_orders')} · {periodLabel}</span>
-            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.completed_orders_all_time) }))}
-          </div>
-          <DeltaBadge delta={stats.delta_completed_period} />
-          {stats.success_rate_period != null && (
-            <div className="metric-trend positive">
-              <StatUp width={14} height={14} />
-              <span>{t('dashboard.completion_rate', 'Completion rate')}: {stats.success_rate_period}%</span>
+      {widgetVis.charts && (
+        <div className="dsh-grid dsh-grid-charts">
+          <section className="dsh-card">
+            <div className="dsh-card-head">
+              <div>
+                <h2>{t('dashboard.work_order_volume', 'Work Order Volume')}</h2>
+                <p>{period === 'all' ? t('dashboard.monthly_volume_trend', 'Work orders and completions per month') : t('dashboard.daily_volume_trend')}</p>
+              </div>
             </div>
-          )}
-        </div>
-
-        <div className="metric-card tertiary">
-          <div className="metric-icon" style={{ background: 'rgba(59,130,246,0.1)', color: '#3b82f6' }}>
-            <Wrench width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value">{fmtNum(stats.available_mechanics)}<span style={{ fontSize: 13, fontWeight: 500, color: '#94a3b8' }}> / {fmtNum(stats.total_mechanics)}</span></span>
-            <span className="metric-label">{t('dashboard.kpiCards.active_mechanics')}</span>
-          </div>
-          <div className="metric-trend neutral">
-            <Activity width={14} height={14} />
-            <span>{t('dashboard.on_a_job', 'On a job')}: {fmtNum(stats.busy_mechanics)} · {t('dashboard.off_duty', 'Off')}: {fmtNum(stats.offline_mechanics)}</span>
-          </div>
-        </div>
-
-        <div className="metric-card info">
-          <div className="metric-icon" style={{ background: 'rgba(102,126,234,0.1)', color: '#667eea' }}>
-            <Timer width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value">{fmtMins(stats.avg_minutes_period)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.delivery_time')} · {periodLabel}</span>
-            {!stats.avg_minutes_period && <span className="metric-sub">{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: isAll ? '' : periodPhrase })}</span>}
-          </div>
-        </div>
-
-        <div className="metric-card secondary">
-          <div className="metric-icon" style={{ background: 'rgba(124,58,237,0.1)', color: '#7c3aed' }}>
-            <DollarCircle width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value" style={{ fontSize: 20 }}>{fmtAED(stats.revenue_period)}</span>
-            <span className="metric-label">{t('dashboard.kpiCards.revenue', 'Revenue')} · {periodLabel}</span>
-            {allTimeNote(t('dashboard.amount_all_time', '{{amount}} all time', { amount: fmtAED(stats.revenue_all_time) }))}
-          </div>
-          <DeltaBadge delta={stats.delta_revenue_period} />
-        </div>
-
-        <div className="metric-card accent">
-          <div className="metric-icon" style={{ background: 'rgba(148,163,184,0.15)', color: '#64748b' }}>
-            <WarningTriangle width={24} height={24} />
-          </div>
-          <div className="metric-content">
-            <span className="metric-value">{fmtNum(cancelledVal)}</span>
-            <span className="metric-label">{woLabel(t, 'cancelled')} · {periodLabel}</span>
-            {allTimeNote(t('dashboard.n_all_time', '{{n}} all time', { n: fmtNum(stats.cancelled_all_time) }))}
-          </div>
-        </div>
-      </div>
-      );
-      })()}
-
-      {/* Cash Collection card removed — cash reconciliation lives on its own
-          page (/cash-payments); it was duplicating that here. */}
-
-      {/* Charts Row */}
-      {widgetVis.charts && <div className="charts-row">
-        <div className="chart-card sales-chart">
-          <div className="chart-header">
-            <div>
-              <h3>{t('dashboard.work_order_volume', 'Work Order Volume')} · {periodLabel}</h3>
-              <p>{period === 'all' ? t('dashboard.monthly_volume_trend', 'Work orders and completions per month') : t('dashboard.daily_volume_trend')}</p>
+            <div className="dsh-chart">
+              {chart.some(d => d.orders > 0 || d.delivered > 0)
+                ? <Line data={lineData} options={lineOptions} />
+                : <div className="dsh-empty">
+                    <span>{t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}</span>
+                    <button type="button" onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
+                  </div>}
             </div>
-          </div>
-          <div className="chart-body">
-            {chart.some(d => d.orders > 0 || d.delivered > 0)
-              ? <Line data={lineData} options={lineOptions} />
-              : <div className="chart-empty">
-                  <span>{t('dashboard.no_orders_in_period', 'No new work orders {{period}} yet.', { period: periodPhrase })}</span>
-                  <button onClick={() => changePeriod('all')}>{t('dashboard.show_all_time', 'Show all time')}</button>
-                </div>}
-          </div>
-        </div>
+          </section>
 
-        <div className="chart-card pipeline-chart">
-          <div className="chart-header">
-            <div>
-              <h3>{t('dashboard.order_status_breakdown')}</h3>
-              <p>{t('dashboard.click_slice_hint', 'Click a slice to view those work orders')}</p>
+          <section className="dsh-card">
+            <div className="dsh-card-head">
+              <div>
+                <h2>{t('dashboard.order_status_breakdown')}</h2>
+                <p>{t('dashboard.click_slice_hint', 'Click a slice to view those work orders')}</p>
+              </div>
+              {/* Total of the breakdown — not a "today" figure, so the ring and
+                  the number always agree. */}
+              <div className="dsh-card-stat">
+                <b>{fmtNum(statusTotal)}</b>
+                <span>{t('dashboard.total_work_orders', 'Total Work Orders')}</span>
+              </div>
             </div>
-          </div>
-          <div className="chart-body">
-            {statusSlices.length > 0
-              ? <Doughnut data={statusData} options={doughnutOptions} />
-              : <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%', color:'#94a3b8', fontSize:13 }}>
-                  {t('dashboard.no_work_orders', 'No work orders yet')}
-                </div>}
-          </div>
-          {/* Total of the breakdown above — not a "today" figure, so the ring
-              and the number underneath always agree. */}
-          <div className="pipeline-total">
-            <span className="total-label">{t('dashboard.total_work_orders', 'Total Work Orders')}</span>
-            <span className="total-value">{fmtNum(statusTotal)}</span>
-          </div>
+            <div className="dsh-chart">
+              {statusSlices.length > 0
+                ? <Doughnut data={statusData} options={doughnutOptions} />
+                : <div className="dsh-empty"><span>{t('dashboard.no_work_orders', 'No work orders yet')}</span></div>}
+            </div>
+          </section>
         </div>
-      </div>}
+      )}
 
-      {/* WorkOrders by Hour (#56) */}
+      {/* Work orders by hour (#56) */}
       {widgetVis.hourly && ordersByHour.some(h => h.orders > 0) && (
-        <div className="chart-card" style={{ marginBottom: 24 }}>
-          <div className="chart-header">
+        <section className="dsh-card dsh-card-wide">
+          <div className="dsh-card-head">
             <div>
-              <h3><Activity width={20} height={20} /> {t('dashboard.todays_activity')}</h3>
+              <h2>{t('dashboard.todays_activity')}</h2>
               <p>{t('dashboard.order_distribution')}</p>
             </div>
           </div>
-          <div className="chart-body">
+          <div className="dsh-chart dsh-chart-short">
             <Bar
               data={{
                 labels: ordersByHour.map(h => h.label),
                 datasets: [
-                  {
-                    label: t('dashboard.chart_orders'),
-                    data: ordersByHour.map(h => h.orders),
-                    backgroundColor: 'rgba(36, 64, 102, 0.75)',
-                    borderRadius: 4,
-                    borderSkipped: false,
-                  },
-                  {
-                    label: t('dashboard.chart_delivered'),
-                    data: ordersByHour.map(h => h.delivered),
-                    backgroundColor: 'rgba(34, 197, 94, 0.75)',
-                    borderRadius: 4,
-                    borderSkipped: false,
-                  },
+                  { label: t('dashboard.chart_orders'), data: ordersByHour.map(h => h.orders), backgroundColor: '#1e3a6b', borderRadius: 3, borderSkipped: false, maxBarThickness: 14 },
+                  { label: t('dashboard.chart_delivered'), data: ordersByHour.map(h => h.delivered), backgroundColor: '#22c55e', borderRadius: 3, borderSkipped: false, maxBarThickness: 14 },
                 ],
               }}
               options={{
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                  legend: { position: 'top', labels: { usePointStyle: true, boxWidth: 8 } },
-                  tooltip: {
-                    callbacks: {
-                      title: (ctx) => `${ctx[0].label}`,
-                    },
-                  },
+                  legend: { position: 'top', align: 'end', labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 6, boxHeight: 6, padding: 14, color: INK_MUTED, font: { family: FONT, size: 12 } } },
+                  tooltip: { ...TOOLTIP, callbacks: { title: (ctx) => `${ctx[0].label}` } },
                 },
                 scales: {
-                  x: { grid: { display: false } },
-                  y: { beginAtZero: true, ticks: { stepSize: 1 } },
+                  x: { border: { display: false }, grid: { display: false }, ticks: { color: INK_MUTED, font: { family: FONT, size: 11 }, maxRotation: 0, autoSkipPadding: 8 } },
+                  y: { beginAtZero: true, border: { display: false }, grid: { color: GRID }, ticks: { stepSize: 1, precision: 0, color: INK_MUTED, font: { family: FONT, size: 11 } } },
                 },
               }}
-              height={220}
             />
           </div>
+        </section>
+      )}
+
+      {/* Top service bays, top technicians, recent work orders */}
+      {showLists && (
+        <div className={`dsh-grid dsh-grid-lists cols-${listCols}`}>
+          {widgetVis.service_bays && (
+            <section className="dsh-card">
+              <div className="dsh-card-head">
+                <h2><MapPin width={16} height={16} /> {t('dashboard.top_zones')}</h2>
+                {hasModule(user, 'service-bays') && <Link to="/service-bays" className="dsh-link">{t('dashboard.view_all')} <ArrowRight width={14} height={14} /></Link>}
+              </div>
+              {topServiceBays.length === 0 ? (
+                <div className="dsh-empty dsh-empty-list"><MapPin width={22} height={22} /><span>{t('dashboard.no_zone_data')}</span></div>
+              ) : (
+                <ul className="dsh-list">
+                  {topServiceBays.slice(0, 5).map((bay, i) => (
+                    <li key={i}>
+                      <span className="dsh-rank">{i + 1}</span>
+                      <div className="dsh-list-text">
+                        <strong>{bay.name}</strong>
+                        <span>{bay.bay_type ? bay.bay_type.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()) : bay.bay_number}</span>
+                      </div>
+                      <span className="dsh-pill tone-orange">{fmtNum(bay.orders_count)} {t('dashboard.orders_short', 'orders')}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {widgetVis.mechanics && (
+            <section className="dsh-card">
+              <div className="dsh-card-head">
+                <h2><Wrench width={16} height={16} /> {t('dashboard.top_mechanics')}</h2>
+                {hasModule(user, 'mechanics') && <Link to="/mechanics" className="dsh-link">{t('dashboard.view_all')} <ArrowRight width={14} height={14} /></Link>}
+              </div>
+              {topMechanics.length === 0 ? (
+                <div className="dsh-empty dsh-empty-list"><Wrench width={22} height={22} /><span>{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: isAll ? '' : periodPhrase })}</span></div>
+              ) : (
+                <ul className="dsh-list">
+                  {topMechanics.slice(0, 5).map((mechanic, i) => (
+                    <li key={i}>
+                      <span className="dsh-avatar">{mechanic.full_name?.charAt(0)}</span>
+                      <div className="dsh-list-text">
+                        <strong>{mechanic.full_name}</strong>
+                        <span>{mechanic.specialty ? mechanic.specialty.replace(/_/g, ' ') : t('dashboard.technician', 'Technician')}</span>
+                      </div>
+                      <span className="dsh-pill tone-green">{mechanic.jobs_completed || 0} {t('dashboard.jobs_short', 'jobs')}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {/* Recent work orders feed (#53) */}
+          {widgetVis.recent && (
+            <section className="dsh-card">
+              <div className="dsh-card-head">
+                <h2><Package width={16} height={16} /> {t('dashboard.recent_orders')}</h2>
+                <Link to="/work-orders" className="dsh-link">{t('dashboard.view_all')} <ArrowRight width={14} height={14} /></Link>
+              </div>
+              {recentWorkOrders.length === 0 ? (
+                <div className="dsh-empty dsh-empty-list"><Package width={22} height={22} /><span>{t('dashboard.no_recent_orders')}</span></div>
+              ) : (
+                <ul className="dsh-list">
+                  {recentWorkOrders.slice(0, 5).map((order) => {
+                    const vehicleLabel = [order.vehicle_make, order.vehicle_model].filter(Boolean).join(' ');
+                    const primary = order.customer_name || t('orders.walk_in', 'Walk-in');
+                    const secondaryBits = [];
+                    if (vehicleLabel) secondaryBits.push(vehicleLabel);
+                    if (order.vehicle_plate_number) secondaryBits.push(order.vehicle_plate_number);
+                    if (!secondaryBits.length && order.mechanic_name) secondaryBits.push(order.mechanic_name);
+                    secondaryBits.push(fmtWhen(order.created_at));
+                    const color = stageColor(order);
+                    return (
+                      <li key={order.id}>
+                        <Link to={`/work-orders/${order.id}`} className="dsh-list-link">
+                          <span className="dsh-stage-dot" style={{ background: color }} aria-hidden="true" />
+                          <div className="dsh-list-text">
+                            <strong>{primary}</strong>
+                            <span>{order.work_order_number ? `${order.work_order_number} · ` : ''}{secondaryBits.join(' · ')}</span>
+                          </div>
+                          <span className="dsh-pill" style={{ background: `${color}14`, color }}>{woLabel(t, order, 'short')}</span>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          )}
         </div>
       )}
 
-      {/* Top ServiceBays, Top Mechanics, Recent WorkOrders */}
-      {(widgetVis.service_bays || widgetVis.mechanics || widgetVis.recent) && (
-      <div className="recent-data-row triple">
-        {widgetVis.service_bays && (
-        <div className="recent-card">
-          <div className="card-header">
-            <h3><MapPin width={20} height={20} /> {t('dashboard.top_zones')}</h3>
-            {hasModule(user, 'service-bays') && <Link to="/service-bays" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>}
+      {quickActions.length > 0 && (
+        <section className="dsh-card dsh-card-wide">
+          <div className="dsh-card-head"><h2>{t('dashboard.quick_actions')}</h2></div>
+          <div className="dsh-actions">
+            {quickActions.map(a => (
+              <Link key={a.to} to={a.to} className={`dsh-action tone-${a.tone}`}>
+                <span className="dsh-action-icon" aria-hidden="true"><a.icon width={16} height={16} strokeWidth={1.8} /></span>
+                <span>{a.label}</span>
+                <ArrowRight width={14} height={14} className="dsh-action-arrow" />
+              </Link>
+            ))}
           </div>
-          <div className="card-body">
-            {topServiceBays.length === 0 ? (
-              <div className="empty-state-mini">
-                <MapPin width={32} height={32} />
-                <p>{t('dashboard.no_zone_data')}</p>
-              </div>
-            ) : (
-              <div className="recent-list">
-                {topServiceBays.slice(0, 5).map((bay, i) => (
-                  <div key={i} className="recent-item">
-                    <div className="recent-avatar" style={{ background: '#1e3a6b' }}>
-                      {i + 1}
-                    </div>
-                    <div className="recent-info">
-                      <strong>{bay.name}</strong>
-                      <span>{bay.bay_type ? bay.bay_type.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()) : bay.bay_number}</span>
-                    </div>
-                    <span className="status-badge" style={{ background: '#fff7ed', color: '#f97316' }}>
-                      {fmtNum(bay.orders_count)} {t('dashboard.orders_short', 'orders')}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-        )}
-
-        {widgetVis.mechanics && (
-        <div className="recent-card">
-          <div className="card-header">
-            <h3><Wrench width={20} height={20} /> {t('dashboard.top_mechanics')}</h3>
-            {hasModule(user, 'mechanics') && <Link to="/mechanics" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>}
-          </div>
-          <div className="card-body">
-            {topMechanics.length === 0 ? (
-              <div className="empty-state-mini">
-                <Wrench width={32} height={32} />
-                <p>{t('dashboard.no_completed_in_period', 'No jobs completed {{period}}', { period: period === 'all' ? '' : periodPhrase })}</p>
-              </div>
-            ) : (
-            <div className="recent-list">
-              {topMechanics.slice(0, 5).map((mechanic, i) => (
-                <div key={i} className="recent-item">
-                  <div className="recent-avatar">
-                    {mechanic.full_name?.charAt(0)}
-                  </div>
-                  <div className="recent-info">
-                    <strong>{mechanic.full_name}</strong>
-                    <span>{mechanic.specialty ? mechanic.specialty.replace(/_/g, ' ') : t('dashboard.technician', 'Technician')}</span>
-                  </div>
-                  <span className="status-badge active"
-                    style={{ background: '#f0fdf4', color: '#16a34a' }}>
-                    {mechanic.jobs_completed || 0} {t('dashboard.jobs_short', 'jobs')}
-                  </span>
-                </div>
-              ))}
-            </div>
-            )}
-          </div>
-        </div>
-        )}
-
-        {/* Recent WorkOrders Feed (#53) */}
-        {widgetVis.recent && (
-        <div className="recent-card">
-          <div className="card-header">
-            <h3><Package width={20} height={20} /> {t('dashboard.recent_orders')}</h3>
-            <Link to="/work-orders" className="view-all">{t('dashboard.view_all')} <ArrowRight width={16} height={16} /></Link>
-          </div>
-          <div className="card-body">
-            {recentWorkOrders.length === 0 ? (
-              <div className="empty-state-mini">
-                <Package width={32} height={32} />
-                <p>{t('dashboard.no_recent_orders')}</p>
-              </div>
-            ) : (
-              <div className="recent-list">
-                {recentWorkOrders.slice(0, 5).map((order) => {
-                  const vehicleLabel = [order.vehicle_make, order.vehicle_model].filter(Boolean).join(' ');
-                  const primary = order.customer_name || t('orders.walk_in', 'Walk-in');
-                  const secondaryBits = [];
-                  if (vehicleLabel) secondaryBits.push(vehicleLabel);
-                  if (order.vehicle_plate_number) secondaryBits.push(order.vehicle_plate_number);
-                  if (!secondaryBits.length && order.mechanic_name) secondaryBits.push(order.mechanic_name);
-                  secondaryBits.push(fmtWhen(order.created_at));
-                  return (
-                    <div key={order.id} className="recent-item">
-                      <div className="recent-avatar" style={{ background: stageColor(order), fontSize: 10 }}>
-                        {order.work_order_number?.slice(-3) || '#'}
-                      </div>
-                      <div className="recent-info">
-                        <strong>{primary}</strong>
-                        <span>{secondaryBits.join(' \u00B7 ')}</span>
-                      </div>
-                      <span className="status-badge" style={{ background: `${stageColor(order)}18`, color: stageColor(order) }}>
-                        {woLabel(t, order, 'short')}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-        )}
-      </div>
+        </section>
       )}
-
-      {/* Quick Actions */}
-      <div className="quick-actions-section">
-        <h3>{t('dashboard.quick_actions')}</h3>
-        <div className="quick-actions-grid">
-          {[
-            { to: '/work-orders?new=1', icon: Plus, label: t('dashboard.new_order'), bg: '#fff7ed', color: '#ea580c', cap: 'job.open' },
-            { to: '/estimates?new=1', icon: Page, label: t('dashboard.new_estimate', 'New Estimate'), bg: '#eef2ff', color: '#4f46e5', cap: 'estimate.raise' },
-            { to: '/estimates', icon: ClipboardCheck, label: t('common.estimates', 'Estimates'), mod: 'estimates' },
-            { to: '/store', icon: Page, label: t('common.store', 'Store'), mod: 'store' },
-            { to: '/job-assignment', icon: Group, label: t('dashboard.job-assignment'), mod: 'job-assignment' },
-            { to: '/team-leader', icon: Group, label: t('common.team_board', 'Team Board'), mod: 'team-leader' },
-            { to: '/fleet-intake', icon: Truck, label: t('common.fleet_intake', 'Fleet Intake'), mod: 'fleet-intake' },
-            { to: '/customers', icon: User, label: t('dashboard.customers'), mod: 'customers' },
-            { to: '/reports', icon: StatUp, label: t('dashboard.reports'), mod: 'reports' },
-          ].filter(a => (!a.cap || canDo(user, a.cap)) && (!a.mod || hasModule(user, a.mod))).map(a => (
-            <Link key={a.to} to={a.to} className="quick-action-card">
-              <div className="quick-action-icon" style={a.bg ? { background: a.bg } : undefined}>
-                <a.icon width={24} height={24} color={a.color} />
-              </div>
-              <span>{a.label}</span>
-            </Link>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }

@@ -313,7 +313,7 @@ export default function Layout({ children }) {
 
   const renderIcon = (iconKey) => {
     const IconComponent = iconMap[iconKey];
-    return IconComponent ? <IconComponent width={20} height={20} strokeWidth={1.5} /> : null;
+    return IconComponent ? <IconComponent width={18} height={18} strokeWidth={1.6} /> : null;
   };
 
   return (
@@ -329,7 +329,7 @@ export default function Layout({ children }) {
             <img
               src="/assets/images/logos/pioneer/pioneer_logo_white.svg"
               alt={user?.workshop_name || workshop?.name || 'Pioneer Car Service Center'}
-              style={{ height: '64px', width: '100%', objectFit: 'contain', display: 'block' }}
+              style={{ height: '46px', width: '100%', objectFit: 'contain', display: 'block' }}
               onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }}
             />
             <span style={{ display: 'none', fontSize: 20, fontWeight: 800, color: '#fff', letterSpacing: '-0.5px' }}>
@@ -365,7 +365,7 @@ export default function Layout({ children }) {
       <header className={`custom-topbar ${!sidebarOpen ? 'sidebar-closed' : ''}`}>
         <div className="topbar-left">
           <button className="menu-toggle" onClick={() => setSidebarOpen(!sidebarOpen)}>
-            <Menu width={24} height={24} />
+            <Menu width={20} height={20} />
           </button>
 
           {!sidebarOpen && (
@@ -387,7 +387,7 @@ export default function Layout({ children }) {
 
           <div className="lang-switcher">
             <button className="lang-toggle" onClick={() => setShowLangMenu(!showLangMenu)}>
-              <Language width={20} height={20} />
+              <Language width={16} height={16} />
               <span>{i18n.language.toUpperCase()}</span>
             </button>
             {showLangMenu && (

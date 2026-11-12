@@ -45,7 +45,7 @@ export default function MyTasks() {
           <h3>{t('workflow.tasks.title', 'Your tasks')} {total > 0 && <span className="mt-count">{total}</span>}</h3>
           <p>{t('workflow.tasks.sub', 'Job cards waiting on your part of the workflow')}</p>
         </div>
-        <button className="mt-refresh" onClick={load} aria-label={t('workflow.refresh', 'Refresh')}><Refresh width={15} height={15} /></button>
+        <button className="mt-refresh" onClick={load} aria-label={t('workflow.refresh', 'Refresh')} title={t('workflow.refresh', 'Refresh')}><Refresh width={15} height={15} className={loading ? 'mt-spin' : ''} /></button>
       </header>
       {total === 0 ? (
         <div className="mt-empty"><CheckCircle width={18} height={18} /> {t('workflow.tasks.none', 'Nothing waiting on you right now.')}</div>
@@ -54,7 +54,8 @@ export default function MyTasks() {
           {data.groups.map(g => (
             <div key={g.kind} className={`mt-group tone-${KIND_TONE[g.kind] || 'advisor'}`}>
               <div className="mt-group-head">
-                <span>{t(`workflow.tasks.${g.kind}`, g.title)}</span>
+                <span className="mt-dot" aria-hidden="true" />
+                <span className="mt-group-title">{t(`workflow.tasks.${g.kind}`, g.title)}</span>
                 <b>{g.total}</b>
               </div>
               <ul>

@@ -124,13 +124,13 @@ export function DashboardSkeleton() {
       {/* Metrics row */}
       <StatCardSkeleton count={6} />
 
-      {/* COD widget skeleton */}
+      {/* "Your tasks" card skeleton */}
       <div className="tl-skel-cod">
-        <Skeleton width={140} height={15} radius={4} />
-        <div className="tl-skel-cod-body">
-          <Skeleton width={100} height={28} radius={6} />
-          <Skeleton width={100} height={28} radius={6} />
-          <Skeleton width={100} height={28} radius={6} />
+        <Skeleton width={120} height={15} radius={4} />
+        <div className="tl-skel-cod-body" style={{ gap: 12 }}>
+          <Skeleton height={96} radius={10} style={{ flex: 1 }} />
+          <Skeleton height={96} radius={10} style={{ flex: 1 }} />
+          <Skeleton height={96} radius={10} style={{ flex: 1 }} />
         </div>
       </div>
 

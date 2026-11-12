@@ -5,15 +5,18 @@ runs the **2 Nov feedback update** (`689d199`, "Client feedback (2 Nov, part
 2)…") plus three fixes made on the server and never pushed (`90a6d95`,
 `bbbbd64`, `d3e6d29` — scheduled reports, document-expiry cron, public
 enquiry name, mechanic documents route). This update brings the 18 points from
-the client meeting of 3 Nov 2026. On GitHub it is **three commits**:
+the client meeting of 3 Nov 2026, plus a redesigned dashboard. On GitHub it is
+**four commits**:
 
 - `735dbd6` ("Client meeting (3 Nov), part 1 — NOT FOR DEPLOYMENT YET…") — a
   checkpoint that must **never be deployed on its own**;
 - `91b3c9d` ("Production fixes (made on the server as 90a6d95, bbbbd64,
   d3e6d29), redone on the branch") — the server's three fixes, redone (their
   patches never reached the developer's machine);
-- the latest commit, which completes the update — its message starts with
-  **"Client meeting (3 Nov), part 2"**.
+- `b7c0e5a` ("Client meeting (3 Nov), part 2…") — completes the update;
+- the latest commit, which starts with **"Dashboard redesign and smaller
+  type (12 Nov)"** — frontend only: the Inter font, a smaller sidebar /
+  topbar, and the new dashboard layout.
 
 Deploy the latest commit only. The server's own three commits are replaced by
 `91b3c9d` (step 2 keeps them on a backup branch). It has **six database migrations** and no new
@@ -23,7 +26,7 @@ packages or settings.
 |---|---|
 | Repository | https://github.com/osamahkenawy/pioneer-workshop (private) |
 | Branch | `fix/job-card-leaks` — **not** `main` |
-| New commit | the latest one on the branch; message starts with **"Client meeting (3 Nov), part 2"** |
+| New commit | the latest one on the branch; message starts with **"Dashboard redesign and smaller type (12 Nov)"**, directly on top of `b7c0e5a` ("Client meeting (3 Nov), part 2…") |
 | Previous version (for a rollback) | the server's `d3e6d29`, kept as branch `server-fixes-backup` in step 2 |
 | Database migrations | 6 — they add columns / tables, widen one list of values and change the menu modules of the roles; every one is safe to run twice |
 | New packages / settings | none |
@@ -89,14 +92,17 @@ git checkout fix/job-card-leaks && git reset --hard origin/fix/job-card-leaks
 ```
 
 ```bash
-git log --oneline -3
+git log --oneline -4
 ```
 
-The top line must start with **"Client meeting (3 Nov), part 2"**, the next
-one with **"Production fixes (made on the server…"**. If the top line starts
-with "Client meeting (3 Nov), part 1 — NOT FOR DEPLOYMENT YET", **stop**: the
-second part has not been pushed yet; tell the user (and go back with
-`git reset --hard server-fixes-backup`).
+From the top, the lines must start with **"Dashboard redesign and smaller
+type (12 Nov)"**, **"Client meeting (3 Nov), part 2"**, **"Production fixes
+(made on the server…"** and "Client meeting (3 Nov), part 1…". If the top line
+starts with "Client meeting (3 Nov), part 1 — NOT FOR DEPLOYMENT YET", **stop**:
+the second part has not been pushed yet; tell the user (and go back with
+`git reset --hard server-fixes-backup`). If the top line is part 2 itself, the
+dashboard commit has not been pushed yet — that is fine to deploy; tell the
+user.
 
 Optional check that nothing of the server's fixes is missing — the differences
 shown should only be the client-meeting changes, plus the mechanic documents
@@ -181,30 +187,34 @@ The log must show `listening on port …` and no errors.
 the Workshop Foreman no longer has Work Orders). Then reload once
 (Ctrl+Shift+R, or Cmd+Shift+R on a Mac).
 
-1. **Menu:** Work Orders, **Job Cards** and **Scan station** are there for a
+1. **Look:** the sidebar and page titles are smaller and the text is in the
+   Inter font. The Dashboard has no big navy banner: a header with the
+   greeting and the This Week / This Month / All time switch, six figure tiles
+   in a row, then Your tasks, the charts and lists.
+2. **Menu:** Work Orders, **Job Cards** and **Scan station** are there for a
    manager. A Workshop Foreman sees Job Cards but not Work Orders.
-2. **Customers:** the menu entry has two tabs, Enquiries and Customers. New
+3. **Customers:** the menu entry has two tabs, Enquiries and Customers. New
    Enquiry asks for the **Emirate** and the car's **make, model and year**; the
    "Not Converted" filter is gone. Internal customers can be **Staff**. Cancel
    without saving.
-3. **Work Orders:** the cards on top read Total / Open / Completed / Cancelled.
+4. **Work Orders:** the cards on top read Total / Open / Completed / Cancelled.
    Open a work order whose physical inspection the customer has acknowledged:
    it reads **Completed — the job continues on job card JC-…**, with a link to
    the job card.
-4. **Physical inspection:** no damage-type list — tap the car to mark, tap a mark
+5. **Physical inspection:** no damage-type list — tap the car to mark, tap a mark
    to remove it. Customer and car details are read-only (they come from the
    work order).
-5. **Technical inspection:** no Findings box; each service line needs a service
+6. **Technical inspection:** no Findings box; each service line needs a service
    type. Once completed it can be sent to the customer as a link that shows the
    jobs and parts **without** hours or quantities.
-6. **Estimates:** New Estimate asks for the work order and refuses one whose
+7. **Estimates:** New Estimate asks for the work order and refuses one whose
    technical inspection is not completed. Once the customer has decided the
    main estimate, the job card offers **Raise a supplementary estimate**
    (number `SEST-…`, fixed cost, the customer's consent). The estimates list
    can approve / reject several lines at once.
-7. **Parts first:** on a job whose approved work has parts, assigning a
+8. **Parts first:** on a job whose approved work has parts, assigning a
    technician says to request the parts (MRN) first.
-8. **Technicians:** each technician has **Skills** tick boxes, **Print badge**
+9. **Technicians:** each technician has **Skills** tick boxes, **Print badge**
    and **Lost badge**. Scan station opens with a large input. On a job card,
    **Jobs** lists each approved job with its technician and a **Print job card
    with barcodes** button.
@@ -294,3 +304,8 @@ The client meeting of 3 Nov 2026, point by point:
 17. Printed job cards with a barcode per job; the **Scan station** starts and
     ends jobs (no phones on the floor).
 18. The parts are requested from the Store (MRN) before a technician is assigned.
+
+Also in this update (the user's feedback, 12 Nov): smaller text across the
+app's frame (sidebar 13.5px, page titles 18px, base text 14px), the Inter font
+loaded for everyone (Windows used to show Arial), and a redesigned Dashboard —
+compact header and figure tiles, quieter task lists and charts.

@@ -27,11 +27,11 @@
 }
 
 [dir="rtl"] .staff-wrapper.rtl .sidebar-nav-link {
-  padding: 12px 16px 12px 12px;
+  padding: 8px 10px;
 }
 
 [dir="rtl"] .staff-wrapper.rtl .sidebar-nav-link svg {
-  margin-left: 12px;
+  margin-left: 0; /* the link's gap spaces it */
   margin-right: 0;
 }
 
