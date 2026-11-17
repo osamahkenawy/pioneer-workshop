@@ -602,6 +602,48 @@ i.tb-faint { font-style: italic; }
 .tb-mname b { color: var(--tb-ink); }
 .tb-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--tb-bad); font-size: 12.5px; font-weight: 600; }
 
+/* ── Assign per job (client feedback, 16 Nov 2026, point 4) ──
+   Compact scale: 13px body, 14px titles, 1px #e6eaf0 lines, 12px radius. */
+.tb-dialog.is-drawer.is-wide { inline-size: min(600px, 100vw); }
+.tb-dialog.is-wide .tb-dlg-head h2 { font-size: 15px; font-weight: 700; }
+.tb-dialog.is-wide .tb-dlg-body { gap: 12px; font-size: 13px; }
+.tb-dlg-err > span { min-width: 0; }
+.tb-jobs-blocked { flex-wrap: wrap; }
+.tb-jobs-blocked > span { flex: 1 1 240px; min-width: 0; }
+.tb-allbox { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #e6eaf0; border-radius: 12px; background: var(--tb-soft); }
+.tb-allbox-h { display: flex; flex-direction: column; gap: 2px; }
+.tb-allbox-h b { color: var(--tb-ink); font-size: 14px; font-weight: 650; }
+.tb-allbox-h span { color: var(--tb-muted); font-size: 12px; }
+.tb-allbox-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--tb-warn); font-size: 12.5px; font-weight: 600; }
+.tb-allbox-note svg { flex-shrink: 0; margin-top: 2px; }
+.tb-jobs { list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; }
+.tb-job { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid #e6eaf0; border-radius: 12px; background: #fff; }
+.tb-job.is-waiting { border-color: #fed7aa; background: #fffaf5; }
+.tb-job.is-changed { border-color: #93b4e0; background: #f7faff; }
+.tb-job.is-locked { background: var(--tb-soft); }
+.tb-job-top { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.tb-job-n { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; border: 1px solid #e6eaf0; border-radius: 50%; background: #fff; color: var(--tb-navy); font-size: 11.5px; font-weight: 700; }
+.tb-job-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1; min-width: 0; }
+.tb-job-title > b { color: var(--tb-ink); font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+.tb-job-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.tb-job-now { margin: 0; padding-inline-start: 32px; color: var(--tb-text); font-size: 12.5px; }
+.tb-job-none { color: #c2410c; font-weight: 600; }
+.tb-job .tp { margin-inline-start: 32px; }
+.tb-job-locked { display: flex; align-items: center; gap: 6px; margin: 0; padding-inline-start: 32px; color: var(--tb-muted); font-size: 12.5px; }
+.tb-job-warn { display: flex; align-items: center; gap: 6px; margin: 0; padding-inline-start: 32px; color: var(--tb-warn); font-size: 12.5px; font-weight: 600; }
+.tb-job-err { margin: 0 0 0 32px; padding: 6px 10px; border-radius: 8px; background: var(--tb-bad-soft); color: #991b1b; font-size: 12.5px; font-weight: 600; }
+.tb-job-undo { position: absolute; top: 10px; inset-inline-end: 12px; font-size: 12px; font-weight: 600; }
+.tb-override { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid #fde68a; border-radius: 12px; background: #fffbeb; color: #92400e; font-size: 12.5px; font-weight: 600; }
+.tb-override .tb-input { width: 100%; font-weight: 400; }
+/* the queue row: why Assign waits */
+.tb-l3.tb-blocked { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 5px; }
+.tb-row .tb-l3.tb-blocked { flex: 1 1 100%; }
+.tb-l3.tb-blocked svg { flex-shrink: 0; margin-top: 2px; }
+@media (max-width: 520px) {
+  .tb-job .tp, .tb-job-now, .tb-job-locked, .tb-job-warn { margin-inline-start: 0; padding-inline-start: 0; }
+  .tb-job-err { margin-left: 0; }
+}
+
 @media (max-width: 639.98px) {
   .tb-dialog-bg { align-items: flex-end; }
   .tb-dialog.is-drawer, .tb-dialog.is-center { inset-inline: 0; margin: 0; inline-size: 100%; block-size: auto; max-height: 92vh; max-height: 92dvh; border-radius: 20px 20px 0 0; animation: tbSheet .22s ease; }

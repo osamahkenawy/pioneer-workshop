@@ -365,6 +365,8 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
 
   // "Add internal account" (managers only, D7)
   const [internalForm, setInternalForm] = useState(null); // null = closed
+  // The group's entities an internal account belongs to (client point 12).
+  const [entities, setEntities] = useState([]);
   const [savingInternal, setSavingInternal] = useState(false);
 
   const editMode = !!editOrder;
@@ -747,11 +749,16 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   const setFixValue = (k, val) => setCarFix(f => ({
     id: pickedVehicle.id, values: { ...(String(f.id) === String(pickedVehicle.id) ? f.values : {}), [k]: val },
   }));
-  const lastKm = (!enteringVehicle && pickedVehicle?.mileage != null && pickedVehicle.mileage !== '') ? Number(pickedVehicle.mileage) : null;
+  // The car's previous reading. Editing a work order on the same car, it is
+  // the reading before THIS visit (previous_odometer from the server): the
+  // vehicle's stored mileage may be this job's own reading, which made a
+  // typo impossible to correct and showed the job's own number as "last".
+  const sameCarEdit = editMode && !vehicleChanged && !!editInfo?.raw;
+  const lastKm = sameCarEdit
+    ? (editInfo.raw.previous_odometer != null ? Number(editInfo.raw.previous_odometer) : null)
+    : (!enteringVehicle && pickedVehicle?.mileage != null && pickedVehicle.mileage !== '') ? Number(pickedVehicle.mileage) : null;
   const odoNorm = normOdo(odometerIn);
-  // In Edit the vehicle's stored mileage may already be this visit's (or a
-  // later one's) reading, so only a reading the advisor has just changed is
-  // compared against it.
+  // Only a reading the advisor has just changed is compared against it.
   const odoChanged = !editMode || vehicleChanged || odoNorm !== String(editInfo?.raw?.odometer_in ?? '');
   const odoLow = odoChanged && lastKm != null && /^\d+$/.test(odoNorm) && Number(odoNorm) < lastKm;
 
@@ -1105,10 +1112,19 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
     setStep(pages[Math.max(pageIdx - 1, 0)].n);
   };
 
+  // The entity list, loaded once the internal accounts are shown.
+  useEffect(() => {
+    if (!open || customerClass !== 'internal' || entities.length) return;
+    let live = true;
+    api.get('/customers/entities').then(r => { if (live && r?.success) setEntities(r.data || []); }).catch(() => {});
+    return () => { live = false; };
+  }, [open, customerClass]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Add internal account (managers) ── */
   const saveInternalAccount = async () => {
     const f = internalForm || {};
     if (!String(f.full_name || '').trim() || /[<>]/.test(f.full_name)) { showError('Enter the account name (no < or >).', ['intName']); return; }
+    if (entities.length && !f.entity_id) { showError('Choose the entity this account belongs to.', ['intEntity']); return; }
     if (!phoneOk(f.phone || '')) { showError('Enter a valid contact number for the account, e.g. +971 4 123 4567.', ['intPhone']); return; }
     if (f.email && !EMAIL_RE.test(f.email.trim())) { showError('Enter a valid e-mail address, or leave it empty.', ['intEmail']); return; }
     setSavingInternal(true);
@@ -1116,6 +1132,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
       const res = await api.post('/customers', {
         full_name: f.full_name.trim(), phone: f.phone.trim(), email: f.email?.trim() || undefined,
         code: f.code?.trim() || undefined, customer_class: 'internal', customer_subcategory: internalSub,
+        entity_id: f.entity_id ? Number(f.entity_id) : undefined,
       });
       if (!res.success) {
         showError(res.code === 'DUPLICATE_PHONE' && res.existing
@@ -1685,7 +1702,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                                     onClick={() => selectCustomer(c)}>
                                     <div style={st.custName}>{c.full_name}</div>
                                     <div style={st.custMeta}>
-                                      {[real(c.code), real(c.phone) ? <bdi key="p" dir="ltr">{real(c.phone)}</bdi> : null,
+                                      {[customerClass === 'internal' ? c.entity_name : null, real(c.code), real(c.phone) ? <bdi key="p" dir="ltr">{real(c.phone)}</bdi> : null,
                                         // Under "All" external, say which accounts are an outside fleet or insurer.
                                         customerClass === 'external' && !externalSub && c.customer_subcategory ? subLabel(c.customer_subcategory) : '',
                                       ].filter(Boolean).reduce((acc, x, i) => (i ? [...acc, ' · ', x] : [x]), [])}
@@ -1705,7 +1722,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                                 out of the Supervisor/WM approval, so only a manager
                                 creates one. */}
                             {internalEmpty && manager && !internalForm && (
-                              <button type="button" style={st.addVehicleBtn} onClick={() => setInternalForm({ full_name: '', phone: '', email: '', code: '' })}>
+                              <button type="button" style={st.addVehicleBtn} onClick={() => setInternalForm({ full_name: '', phone: '', email: '', code: '', entity_id: '' })}>
                                 <Plus width={16} height={16} /> Add internal account
                               </button>
                             )}
@@ -1732,6 +1749,15 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                                     <input style={st.input} maxLength={50} placeholder="FLT-006"
                                       value={internalForm.code} onChange={e => setInternalForm(f => ({ ...f, code: e.target.value }))} />
                                   </Field>
+                                  {entities.length > 0 && (
+                                    <Field label="Entity" required>
+                                      <select style={st.input} className={badCls('intEntity')} data-field="intEntity"
+                                        value={internalForm.entity_id} onChange={e => setInternalForm(f => ({ ...f, entity_id: e.target.value }))}>
+                                        <option value="">Choose the group company…</option>
+                                        {entities.map(en => <option key={en.id} value={en.id}>{en.name}</option>)}
+                                      </select>
+                                    </Field>
+                                  )}
                                 </div>
                                 <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
                                   <button type="button" style={st.primaryBtnSm} disabled={savingInternal} onClick={saveInternalAccount}>
@@ -1992,7 +2018,9 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                 </div>
                 <div style={st.blockHint}>
                   What the dashboard reads today — the same as or higher than the car's previous reading.
-                  {lastKm != null && <> Last recorded for this car: <bdi dir="ltr">{fmtKm(lastKm)}</bdi>.</>}
+                  {lastKm != null && (sameCarEdit
+                    ? <> Before this visit: <bdi dir="ltr">{fmtKm(lastKm)}</bdi>{editInfo.raw.previous_odometer_wo ? <> ({editInfo.raw.previous_odometer_wo})</> : null}.</>
+                    : <> Last recorded for this car: <bdi dir="ltr">{fmtKm(lastKm)}</bdi>.</>)}
                 </div>
                 <div style={st.mileageRow}>
                   <input id="nwo-odometer" style={st.mileageInput} className={badCls('odometer')} data-field="odometer"

@@ -24,6 +24,7 @@ import {
 import { syncWorkOrderFromJobCards } from '../lib/workflow-sync.js';
 import { can, requireCapability, capabilitiesOf, isManagerRole } from '../lib/roles.js';
 import { ASSIGN_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE } from '../lib/floor-queues.js';
+import { WAITING_TASK_WHERE } from '../lib/job-tasks.js';
 import { jobCardGate, openJobCardIfReady, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
 import { ESTIMATE_APPROVAL_REQUIRED } from '../lib/job-card-approval.js';
 
@@ -187,6 +188,20 @@ router.get('/my-tasks', async (req, res) => {
     await add('job.assign', 'assign', 'Assign a technician',
       `SELECT COUNT(*) n FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id WHERE ${ASSIGN_WHERE}`,
       `${WO_COLS} FROM work_orders wo LEFT JOIN vehicles v ON v.id = wo.vehicle_id WHERE ${ASSIGN_WHERE} ORDER BY wo.customer_approved_at`, [W], woItem);
+    // New approved jobs on a work order that already has technicians (an
+    // approved supplementary estimate, …): the Team Board lists them under
+    // "To assign" as well (routes/team-leader.js, the same WAITING_TASK_WHERE).
+    const NEW_JOBS_FROM = `FROM (SELECT t.work_order_id, COUNT(*) AS n, MIN(t.created_at) AS since,
+                GROUP_CONCAT(t.job_name ORDER BY t.sort_order, t.id SEPARATOR ' · ') AS names
+           FROM job_card_tasks t JOIN job_cards jc ON jc.id = t.job_card_id
+          WHERE t.workshop_id = ? AND ${WAITING_TASK_WHERE}
+          GROUP BY t.work_order_id) w
+      JOIN work_orders wo ON wo.id = w.work_order_id
+     WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled') AND wo.mechanic_id IS NOT NULL`;
+    await add('job.assign', 'assign_new', 'New work to assign',
+      `SELECT COUNT(*) n ${NEW_JOBS_FROM}`,
+      `SELECT wo.id, wo.work_order_number, w.names, w.since AS at ${NEW_JOBS_FROM} ORDER BY w.since`,
+      [W, W], r => ({ id: r.id, title: r.work_order_number, subtitle: r.names || '', link: `/job-cards/${r.id}`, at: r.at }));
     await add('job.assign', 'assign_sub', 'Sub-job cards without a technician',
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${ASSIGN_SUB_WHERE}`,
       `SELECT wo.id, wo.work_order_number, jc.title, jc.job_card_number, jc.created_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
@@ -196,7 +211,7 @@ router.get('/my-tasks', async (req, res) => {
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${QC_WHERE}`,
       `SELECT wo.id, wo.work_order_number, wo.customer_name, jc.job_card_number, jc.title, jc.completed_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
         WHERE ${QC_WHERE} ORDER BY jc.completed_at`,
-      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title && r.title !== 'Main job card' ? ` · ${r.title}` : ''}`, link: `/job-cards/${r.id}`, at: r.at }));
+      [W], r => ({ id: r.id, title: r.work_order_number, subtitle: `${r.job_card_number}${r.title && !['Main job card', 'Inspection job card'].includes(r.title) ? ` · ${r.title}` : ''}`, link: `/job-cards/${r.id}`, at: r.at }));
     await add('job.assign', 'rework', 'Rework after a failed quality check',
       `SELECT COUNT(*) n FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id WHERE ${REWORK_WHERE}`,
       `SELECT wo.id, wo.work_order_number, jc.job_card_number, jc.qc_notes, jc.updated_at AS at FROM job_cards jc JOIN work_orders wo ON wo.id = jc.work_order_id
@@ -263,7 +278,7 @@ router.post('/work-orders/:id/job-card', requireCapability('job.open'), async (r
       });
       overridden = true;
     }
-    // The history gets "Main job card … opened — physical inspection skipped (…: reason)".
+    // The history gets "Inspection job card … opened — physical inspection skipped (…: reason)".
     const r = await openJobCardIfReady({ workOrderId: wo.id, workshopId: req.workshopId, userId: req.user.id });
     if (!r.opened) return res.status(409).json({ success: false, ...PHYSICAL_INSPECTION_REQUIRED });
     res.status(201).json({ success: true, data: r.jobCard, overridden });

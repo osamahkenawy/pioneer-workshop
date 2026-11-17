@@ -98,8 +98,8 @@ try {
   expect('completed with the customer\'s signature → the main job card opens (Step 3)',
     ack.status === 200 && ack.json?.job_card?.opened_now === true && !!mainJc && ack.json.job_card.number === mainJc.job_card_number, `HTTP ${ack.status} ${JSON.stringify(ack.json?.job_card)}`);
   expect('Supervisor and Team Leader told a request was raised (Step 4) — once, on the acknowledgement', await notesFor(users.supervisor.id, 'New request%') === 1 && await notesFor(users.leader.id, 'New request%') === 1, '');
-  const [ackLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [woId]);
-  expect('history: "Main job card … opened — physical inspection acknowledged (signed by the customer at the car)"',
+  const [ackLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Inspection job card%opened%'", [woId]);
+  expect('history: "Inspection job card … opened — physical inspection acknowledged (signed by the customer at the car)"',
     !!mainJc && (ackLog?.note || '').includes(mainJc.job_card_number) && /physical inspection acknowledged \(signed by the customer at the car\)/.test(ackLog.note), ackLog?.note);
   d = await wf(advisor, woId);
   expect('workflow: steps 1–3 done, step 4 current; Step 3 reads "Signed at the car"',
@@ -377,7 +377,7 @@ try {
   const ov = await call('POST', `/workflow/work-orders/${wo3}/job-card`, mgrTok, { override_reason: 'Car left overnight, customer signs tomorrow' });
   const jc3 = await mainOf(wo3);
   const [ovRow] = await q('SELECT inspection_override_by, inspection_override_reason FROM work_orders WHERE id = ?', [wo3]);
-  const [ovLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [wo3]);
+  const [ovLog] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Inspection job card%opened%'", [wo3]);
   const [{ n: ovAudit }] = await q("SELECT COUNT(*) n FROM audit_logs WHERE action = 'JOB_CARD_OVERRIDE' AND entity_type = 'work_orders' AND entity_id = ? AND id > ?", [wo3, baseline.audit_logs]);
   expect('a manager opens it with a reason → 201 overridden; the reason is kept on the work order, in its history and in the audit log',
     ov.status === 201 && ov.json?.overridden === true && !!jc3 && ovRow.inspection_override_by === users.mgr.id && ovRow.inspection_override_reason === 'Car left overnight, customer signs tomorrow'

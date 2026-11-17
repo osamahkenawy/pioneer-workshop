@@ -850,7 +850,7 @@ export default function WorkOrders({ mode = 'work-orders' }) {
         const count = key => (WO_FILTERS.find(f => f.key === key)?.statuses || []).reduce((sum, s) => sum + n(s), 0);
         return (
           <div style={{ display: _mob ? 'grid' : 'flex', gridTemplateColumns: _mob ? '1fr 1fr' : undefined, gap: _mob ? 10 : 16, marginBottom: _mob ? 16 : 24, flexWrap:'wrap' }}>
-            <KPICard icon={ClipboardCheck} label={t('orders.stats.total_orders')} value={stats.total || 0} sub={t('orders.stats.today_count', { count: stats.today||0 })} color="#1e3a6b" />
+            <KPICard icon={ClipboardCheck} label={t('jobCards.total', 'Total job cards')} value={stats.total || 0} sub={t('orders.stats.today_count', { count: stats.today||0 })} color="#1e3a6b" />
             <KPICard icon={Clock} label={woFilterLabel(t, 'waiting')} value={count('waiting')}
               sub={t('orders.stats.approved_waiting', '{{n}} approved, to assign', { n: stats.to_assign ?? (n('approved_waiting') + n('estimate_approved') + n('auto_assign')) })} color="#4338ca" />
             <KPICard icon={Wrench} label={woLabel(t, 'in_progress', 'short')} value={count('in_work')}
@@ -983,7 +983,7 @@ export default function WorkOrders({ mode = 'work-orders' }) {
                           <div>
                             <div style={{ fontWeight:700, color:'#1e293b', fontSize:13 }}>{jobCardMode ? (o.main_job_card_number || o.work_order_number) : o.work_order_number}</div>
                             {(jobCardMode ? o.main_job_card_number : woSideCompleted(o)) && (
-                              <div style={{ fontSize:11, color:'#64748b' }}>{jobCardMode ? o.work_order_number : o.main_job_card_number}</div>
+                              <div style={{ fontSize:11, color:'#64748b' }}>{jobCardMode ? `${t('workflow.inspection_card', 'Inspection job card')} · ${o.work_order_number}` : o.main_job_card_number}</div>
                             )}
                             <div style={{ fontSize:11, color:'#94a3b8' }}>{fmtDate(o.created_at)} · {fmtTime(o.created_at)}</div>
                           </div>
@@ -1085,7 +1085,7 @@ export default function WorkOrders({ mode = 'work-orders' }) {
                       <td style={{ padding:'13px 16px' }}>
                         <OrderNumCell orderNumber={jobCardMode ? (o.main_job_card_number || o.work_order_number) : o.work_order_number} />
                         {(jobCardMode ? o.main_job_card_number : woSideCompleted(o)) && (
-                          <div style={{ fontSize:11, color:'#64748b', marginTop:2 }}>{jobCardMode ? o.work_order_number : o.main_job_card_number}</div>
+                          <div style={{ fontSize:11, color:'#64748b', marginTop:2 }}>{jobCardMode ? `${t('workflow.inspection_card', 'Inspection job card')} · ${o.work_order_number}` : o.main_job_card_number}</div>
                         )}
                       </td>
                       <td style={{ padding:'13px 16px' }}><StatusPill wo={o} woSide={!jobCardMode} /></td>

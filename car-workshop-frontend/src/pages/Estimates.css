@@ -350,6 +350,7 @@
 .es-consentChk { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; font-weight: 600; color: #7c2d12; cursor: pointer; line-height: 1.45; }
 .es-consentChk input { margin-block-start: 2px; accent-color: #f97316; flex-shrink: 0; }
 .es-consentBox .es-input { max-inline-size: 340px; }
+.es-consentName { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: #9a3412; }
 
 .es-consents, .es-suppList { margin-block-start: 18px; }
 .es-consent {

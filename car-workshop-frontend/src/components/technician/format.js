@@ -98,9 +98,9 @@ export function deptLabel(t, dept) {
   return t(`workflow.dept.${dept}`, fallback[dept] || String(dept).replace(/_/g, ' '));
 }
 
-/** "Main job card" or "Sub-job card · Body & paint". */
+/** "Inspection job card" (the main one) or "Sub-job card · Body & paint". */
 export function cardKindLabel(t, card) {
-  if (card?.is_main ?? !card?.parent_job_card_id) return t('technician.main_card', 'Main job card');
+  if (card?.is_main ?? !card?.parent_job_card_id) return t('technician.main_card', 'Inspection job card');
   const dept = deptLabel(t, card?.department);
   return dept
     ? t('technician.sub_card_dept', { dept, defaultValue: 'Sub-job card · {{dept}}' })

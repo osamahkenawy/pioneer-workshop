@@ -374,6 +374,8 @@ export default function WorkOrderDetail({ mode = 'work-order' }) {
             {/* The other half of the same job. */}
             {jobCardMode ? (
               <div className="od-hero-sub">
+                {/* The main job card opens at the physical inspection (client feedback, 16 Nov 2026). */}
+                {jcNumber && <><strong>{t('workflow.inspection_card', 'Inspection job card')}</strong>{' · '}</>}
                 {t('jobCards.of_work_order', 'Work order')}{' '}
                 {hasModule(user, 'work-orders')
                   ? <button type="button" className="od-link-btn" onClick={() => navigate(`/work-orders/${id}`)}>{order.work_order_number}</button>
@@ -381,7 +383,7 @@ export default function WorkOrderDetail({ mode = 'work-order' }) {
               </div>
             ) : jcNumber && (
               <div className="od-hero-sub">
-                {t('jobCards.job_card', 'Job card')}{' '}
+                {t('workflow.inspection_card', 'Inspection job card')}{' '}
                 {hasModule(user, 'job-cards')
                   ? <button type="button" className="od-link-btn" onClick={() => navigate(`/job-cards/${id}`)}>{jcNumber}</button>
                   : <strong>{jcNumber}</strong>}

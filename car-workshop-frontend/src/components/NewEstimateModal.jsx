@@ -30,7 +30,8 @@
  *   editEstimate                 — the GET /estimates/:id payload ({ estimate, lines }):
  *                                    edit mode (PUT), line ids sent back so Store prices carry over
  *   kind                         — 'supplementary' to raise one (Estimates: "Supplementary
- *                                    estimate"); left out: whichever the work order needs next
+ *                                    estimate", the job card's "Raise a supplementary estimate");
+ *                                    left out: whichever the work order needs next
  *
  * Client decisions (3 Nov 2026): an estimate is raised for a work order once
  * its technical inspection is completed. The form asks the server first
@@ -40,12 +41,22 @@
  * page, a quote from an enquiry) it offers the work orders that are ready
  * (GET /estimates/ready-jobs) instead of a customer: a quote from an enquiry
  * or for a customer alone has no technical inspection, so it is not raised.
- * Once the customer has decided the main estimate, the next one for the job
- * is a SUPPLEMENTARY estimate (SEST-…): extra work at a fixed cost — its
- * parts priced by the Store in ONE type (the type the customer took on the
- * main estimate unless changed here), so every line has one firm price —
- * approved by the customer with their consent; it is not pre-filled from
- * the technical report (that was the main estimate's work).
+ * Work beyond the main estimate is a SUPPLEMENTARY estimate (SEST-…): at a
+ * fixed cost — its parts priced by the Store in ONE type (the type the
+ * customer took on the main estimate unless changed here; with no main
+ * estimate, the first they asked for), so every line has one firm price —
+ * approved by the customer with their consent. Client feedback (16 Nov 2026,
+ * point 7): it shares the technical report with the customer even when the
+ * main estimate is empty, so it can be raised as soon as the technical
+ * inspection is completed (main estimate decided, open or not raised; one
+ * supplementary estimate open at a time). Its form lists the report's jobs
+ * with tick boxes ("From the technical report", GET /raise-check `report`):
+ * ticking one adds it — its labour line with the report's hours, and its
+ * parts — unticking takes it off; a job already on another estimate of the
+ * job (pending or approved there) is marked ("On main estimate EST-…") and
+ * cannot be ticked, so nothing is billed twice. Lines can still be added
+ * and changed by hand. The main estimate is still pre-filled from the
+ * report — without the jobs already on a supplementary estimate.
  *
  * Also exports the parts-category helpers and SendEstimatePanel (the
  * preference with its totals + channel picker) shared with pages/Estimates.jsx
@@ -257,14 +268,32 @@ function jobsFromLines(lines) {
  * pricing as usual.
  */
 function jobsFromReport(lines) {
-  const jobs = (lines || []).filter(l => String(l?.job || '').trim()).map(l => ({
-    key: uid(), name: String(l.job).trim(),
+  const jobs = (lines || []).filter(l => String(l?.job || '').trim()).map(l => jobFromReport(l));
+  return jobs.length ? jobs : [blankJob()];
+}
+/** One service line of the report as a job block; `reportKey`: the report job it was ticked from (a supplementary estimate). */
+function jobFromReport(l, reportKey = null) {
+  return {
+    key: uid(), name: String(l.job).trim(), reportKey,
     labour: [{ ...blankLine(), description: String(l.labour || l.job).trim(), quantity: Number(l.hours) || 1 }],
     parts: (l.parts || []).length
       ? l.parts.map(p => ({ ...blankLine(), description: String(p.description || '').trim(), part_number: p.part_number || '', quantity: Number(p.quantity) || 1 }))
       : [blankLine()],
-  }));
-  return jobs.length ? jobs : [blankJob()];
+  };
+}
+/** A job's name as the server matches it to the report (routes/estimates.js jobMatchKey). */
+const jobMatchKey = v => String(v || '').trim().replace(/\s+/g, ' ').toLowerCase();
+/** Edit mode: the job blocks that are report jobs, ticked (matched by name, each report job once). */
+function linkReport(jobs, report) {
+  if (!report?.jobs?.length) return jobs;
+  const used = new Set();
+  return jobs.map(j => {
+    const k = jobMatchKey(j.name || j.labour[0]?.description || j.parts[0]?.description);
+    const rj = k ? report.jobs.find(r => !used.has(r.key) && jobMatchKey(r.job) === k) : null;
+    if (!rj) return j;
+    used.add(rj.key);
+    return { ...j, reportKey: rj.key };
+  });
 }
 /** Nothing typed yet: the one empty job a new estimate starts with. */
 const untouched = jobs => jobs.length === 1 && !jobs[0].name.trim()
@@ -370,7 +399,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     setPref(editE ? preferenceOf(editE) : fromEnquiry.length ? fromEnquiry : DEFAULT_PREFERENCE);
     if (editEstimate?.lines) {
       const r = jobsFromLines(editEstimate.lines);
-      setJobs(r.jobs); setExtras(r.extras);
+      // A supplementary estimate's jobs that are the report's show ticked (GET /estimates/:id `report`).
+      setJobs(editE?.kind === 'supplementary' ? linkReport(r.jobs, editEstimate.report) : r.jobs); setExtras(r.extras);
     } else {
       setJobs([blankJob()]); setExtras([]);
     }
@@ -429,21 +459,34 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   }, [open, intakeWo?.id, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Step 4: a new main estimate on a work order whose technical report is
-  // completed starts from the report's service lines — unless the advisor
-  // has typed something meanwhile. Everything stays editable. A
-  // supplementary estimate is extra work, so it starts empty.
+  // completed starts from the report's service lines (GET /raise-check
+  // `report`) — unless the advisor has typed something meanwhile — leaving
+  // out a job already on a supplementary estimate raised before it.
+  // Everything stays editable. A supplementary estimate starts empty: its
+  // report jobs are ticked onto it (ReportPicker).
   const mainReady = !!check?.ok && check.kind === 'main';
+  const checkReport = check?.ok ? check.report || null : null;
   useEffect(() => {
     if (!open || !intakeWo?.id || isEdit || !mainReady) return;
-    let live = true;
-    api.get(`/technical-inspections?work_order_id=${encodeURIComponent(intakeWo.id)}`).then(r => {
-      const report = r?.success ? r.data : null;
-      if (!live || report?.status !== 'completed' || !report.service_lines?.length || !untouched(jobsRef.current)) return;
-      setJobs(jobsFromReport(report.service_lines));
-      setFromReport({ by: report.completed_by_name || '', at: report.completed_at });
-    }).catch(() => { /* the form starts empty, as before */ });
-    return () => { live = false; };
-  }, [open, intakeWo?.id, isEdit, mainReady]);
+    if (!checkReport?.jobs?.length || !untouched(jobsRef.current)) return;
+    const free = checkReport.jobs.filter(j => !j.on_estimate);
+    if (free.length) setJobs(jobsFromReport(free));
+    setFromReport({ by: checkReport.completed_by_name || '', at: checkReport.completed_at, none: !free.length,
+      left: checkReport.jobs.filter(j => j.on_estimate).map(j => ({ job: j.job, estimate_number: j.on_estimate.estimate_number })) });
+  }, [open, intakeWo?.id, isEdit, mainReady, checkReport]);
+
+  // A supplementary estimate's "From the technical report": the report's
+  // jobs to tick (new: GET /raise-check; edit: GET /estimates/:id).
+  const report = supp ? (isEdit ? editEstimate?.report || null : checkReport) : null;
+  /** Tick a report job: its job block (labour at the report's hours, its parts) joins the form; untick: it leaves. */
+  const toggleReportJob = rj => setJobs(prev => {
+    if (prev.some(j => j.reportKey === rj.key)) {
+      const rest = prev.filter(j => j.reportKey !== rj.key);
+      return rest.length ? rest : [blankJob()];
+    }
+    const added = jobFromReport(rj, rj.key);
+    return untouched(prev) ? [added] : [...prev, added];
+  });
 
   if (!open) return null;
 
@@ -538,7 +581,11 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     if (!isEdit && !supp && !manager && effectiveType === 'internal_fleet' && klass?.cls !== 'internal') {
       return t('estimates.err_internal_manager', 'This customer is External: only a manager can raise the estimate as Internal.');
     }
-    if (!allLabour.length && !allParts.length) return t('estimates.err_no_lines', 'Add at least one labour or part line with a description.');
+    if (!allLabour.length && !allParts.length) {
+      return report?.jobs?.length
+        ? t('estimates.err_no_lines_report', 'Tick a job from the technical report, or add a labour or part line with a description.')
+        : t('estimates.err_no_lines', 'Add at least one labour or part line with a description.');
+    }
     if (!pref.length) return t('estimates.err_pref', 'Choose the customer’s parts preference — at least one of Genuine, After-Market or Used.');
     for (const r of [...allLabour, ...allParts]) {
       if (!(Number(r.quantity) > 0)) return t('estimates.err_qty', '"{{d}}" needs a quantity above zero.', { d: r.description.trim() });
@@ -625,7 +672,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     setPickedWo(j ? { id: j.id, work_order_number: j.work_order_number, customer_id: j.customer_id, customer_name: j.customer_name,
       vehicle_id: j.vehicle_id, plate_number: [j.plate_number, [j.make, j.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ') } : null);
     setJobs([blankJob()]); setExtras([]); setFromReport(null); setKlass(null); setTypeTouched(false); setAskedPref(null); setPref(DEFAULT_PREFERENCE);
-    setWantKind(requestedKind); setError('');
+    // The kind the list offers it for: a job with its main estimate takes a supplementary one.
+    setWantKind(requestedKind || j?.kind || null); setError('');
   };
 
   return (
@@ -722,8 +770,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 <div style={st.suppNote} role="note">
                   <Label width={15} height={15} style={{ flexShrink: 0, marginTop: 2 }} />
                   <span>{mainNumber
-                    ? t('estimates.supp_note', 'Supplementary estimate — extra work on this job at a fixed cost, linked to the main estimate {{n}}. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.', { n: mainNumber })
-                    : t('estimates.supp_note_plain', 'Supplementary estimate — extra work on this job at a fixed cost. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.')}</span>
+                    ? t('estimates.supp_note_report', 'Supplementary estimate — work on this job beyond the main estimate {{n}}, at a fixed cost: tick the technical report’s jobs below, or add lines. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.', { n: mainNumber })
+                    : t('estimates.supp_note_alone', 'Supplementary estimate — raised on its own (this job has no main estimate; one can still be raised), at a fixed cost: tick the technical report’s jobs below, or add lines. The Store prices every part in the one type below, so each line has one firm price; the customer approves it with their consent. Approved work goes onto the same job card.')}</span>
                 </div>
               )}
 
@@ -775,16 +823,28 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
               {fromReport && (
                 <div style={st.reportNote} role="status">
                   <Wrench width={15} height={15} style={{ flexShrink: 0 }} />
-                  <span>{t('estimates.from_report', 'Pre-filled from the technical report (completed by {{name}} on {{date}}).', {
-                    name: fromReport.by || '—',
-                    date: fromReport.at ? new Date(String(fromReport.at).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—',
-                  })}</span>
+                  {fromReport.none ? (
+                    <span>{t('estimates.from_report_none', 'Every job of the technical report is already on a supplementary estimate ({{list}}) — add the main estimate’s lines by hand.', {
+                      list: fromReport.left.map(x => `${x.job}: ${x.estimate_number}`).join(', '),
+                    })}</span>
+                  ) : (
+                    <span>{t('estimates.from_report', 'Pre-filled from the technical report (completed by {{name}} on {{date}}).', {
+                      name: fromReport.by || '—',
+                      date: fromReport.at ? new Date(String(fromReport.at).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—',
+                    })}{fromReport.left?.length > 0 && ` ${t('estimates.from_report_left', 'Left out — already on a supplementary estimate: {{list}}.', {
+                      list: fromReport.left.map(x => `${x.job} (${x.estimate_number})`).join(', '),
+                    })}`}</span>
+                  )}
                 </div>
+              )}
+
+              {supp && report && (
+                <ReportPicker t={t} report={report} jobs={jobs} onToggle={toggleReportJob} />
               )}
 
               {jobs.map((j, ji) => (
                 <JobBlock
-                  key={j.key} t={t} job={j} index={ji} canRemove={jobs.length > 1} pref={pref}
+                  key={j.key} t={t} job={j} index={ji} canRemove={jobs.length > 1} pref={pref} fromReport={supp && j.reportKey != null}
                   canParts={canParts} canLabour={canLabour}
                   onName={v => setJobName(j.key, v)}
                   onRemove={() => removeJob(j.key)}
@@ -868,7 +928,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
 /**
  * The form opened without a work order: the open work orders whose technical
  * inspection is completed and that can take an estimate now — a main one, or
- * a supplementary one once the customer has decided the main estimate.
+ * a supplementary one when the job has its main estimate (decided or not)
+ * and no supplementary one open.
  */
 function WorkOrderPicker({ t, jobs, value, enquiry, onPick }) {
   const label = j => [
@@ -893,7 +954,7 @@ function WorkOrderPicker({ t, jobs, value, enquiry, onPick }) {
         </select>
       </Field>
       <p style={{ ...st.note, margin: '6px 0 0' }}>
-        {t('estimates.choose_wo_hint', 'Listed: open work orders whose technical inspection is completed — the estimate follows it. A job whose main estimate the customer has decided takes a supplementary estimate.')}
+        {t('estimates.choose_wo_hint_supp', 'Listed: open work orders whose technical inspection is completed — the estimate follows it. A job that already has its main estimate takes a supplementary estimate. To share the report on a supplementary estimate before raising the main one, use “Raise a supplementary estimate” on the job card.')}
       </p>
     </div>
   );
@@ -903,7 +964,9 @@ function WorkOrderPicker({ t, jobs, value, enquiry, onPick }) {
  * What GET /estimates/raise-check said for the work order, before anything
  * is typed: checking…, or why no estimate can be raised now and the way on —
  * the technical inspection, the physical inspection, the estimate already
- * open, or a supplementary estimate instead of a second main one.
+ * open, or a supplementary estimate instead of a second main one (whether
+ * the main estimate is decided or still open, when no supplementary one is
+ * open: check.can_supplementary).
  */
 function RaiseNotice({ t, check, woId, onClose, onKind }) {
   if (!check) return <div style={st.checking}>{t('estimates.checking_wo', 'Checking the work order…')}</div>;
@@ -913,14 +976,17 @@ function RaiseNotice({ t, check, woId, onClose, onKind }) {
     TECHNICAL_INSPECTION_REQUIRED: { to: `/work-orders/${woId}/technical-inspection`, label: t('estimates.open_tech_insp', 'Open the technical inspection') },
     PHYSICAL_INSPECTION_REQUIRED: { to: `/work-orders/${woId}/inspection?type=intake`, label: t('estimates.open_phys_insp', 'Open the physical inspection') },
     ESTIMATE_OPEN: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
-    MAIN_ESTIMATE_NOT_DECIDED: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
     SUPPLEMENTARY_OPEN: est && { to: `/estimates?id=${est.id}`, label: t('estimates.open_est_n', 'Open {{n}}', { n: est.estimate_number }) },
   }[check.code];
   const title = {
     TECHNICAL_INSPECTION_REQUIRED: t('estimates.tech_first_title', 'The technical inspection comes first'),
     PHYSICAL_INSPECTION_REQUIRED: t('estimates.phys_first_title', 'The physical inspection comes first'),
     MAIN_ESTIMATE_DECIDED: t('estimates.main_decided_title', 'The main estimate is decided'),
+    ESTIMATE_OPEN: t('estimates.main_open_title', 'This job already has its main estimate'),
+    SUPPLEMENTARY_OPEN: t('estimates.supp_open_title', 'A supplementary estimate is already open'),
   }[check.code] || t('estimates.cannot_raise_title', 'No estimate can be raised for this work order now');
+  // A second main estimate is refused; a supplementary one can be raised instead while none is open.
+  const suppInstead = ['MAIN_ESTIMATE_DECIDED', 'ESTIMATE_OPEN'].includes(check.code) && check.can_supplementary !== false;
   return (
     <div style={st.notice} role="alert">
       <WarningCircle width={18} height={18} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -929,14 +995,9 @@ function RaiseNotice({ t, check, woId, onClose, onKind }) {
         <div>{check.message}</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
           {go && <Link to={go.to} onClick={onClose} style={{ ...st.ghostBtn, textDecoration: 'none', padding: '7px 12px', fontSize: 12.5 }}>{go.label}</Link>}
-          {check.code === 'MAIN_ESTIMATE_DECIDED' && (
+          {suppInstead && (
             <button type="button" style={{ ...st.primaryBtn, padding: '7px 14px', fontSize: 12.5 }} onClick={() => onKind('supplementary')}>
               <Plus width={14} height={14} /> {t('estimates.raise_supp_instead', 'Raise a supplementary estimate')}
-            </button>
-          )}
-          {check.code === 'MAIN_ESTIMATE_REQUIRED' && (
-            <button type="button" style={{ ...st.primaryBtn, padding: '7px 14px', fontSize: 12.5 }} onClick={() => onKind('main')}>
-              {t('estimates.raise_main_instead', 'Raise the main estimate')}
             </button>
           )}
         </div>
@@ -945,8 +1006,73 @@ function RaiseNotice({ t, check, woId, onClose, onKind }) {
   );
 }
 
+/* ── A supplementary estimate: the technical report's jobs to tick ─────── */
+
+/**
+ * "From the technical report" (client feedback, 16 Nov 2026, point 7): each
+ * job of the completed report with a tick box. Ticked = its job block is on
+ * the form (job.reportKey). A job already on another estimate of the job
+ * (pending or approved there) says which and cannot be ticked — it would be
+ * billed twice.
+ */
+function ReportPicker({ t, report, jobs, onToggle }) {
+  const ticked = new Set(jobs.map(j => j.reportKey).filter(k => k !== null && k !== undefined));
+  const free = report.jobs.filter(rj => !rj.on_estimate || ticked.has(rj.key)).length;
+  const when = report.completed_at ? new Date(String(report.completed_at).replace(' ', 'T')).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  return (
+    <div style={st.reportBox} role="group" aria-labelledby="est-report-label">
+      <div style={st.prefHead}>
+        <span style={{ ...st.fieldLabel, display: 'inline-flex', alignItems: 'center', gap: 6 }} id="est-report-label">
+          <Wrench width={14} height={14} /> {t('estimates.sest_report_title', 'From the technical report')}
+          {ticked.size > 0 && <span style={st.reportCount}>{t('estimates.sest_report_ticked', '{{n}} ticked', { n: ticked.size })}</span>}
+        </span>
+        <span style={st.prefHint}>
+          {t('estimates.sest_report_hint', 'Tick a job to add it — its labour at the report’s hours, and its parts — at the fixed cost for the customer’s approval. Untick it to take it off. You can still add or change lines by hand.')}
+          {(report.completed_by_name || when) && ` ${t('estimates.sest_report_by', 'Report completed by {{name}} on {{date}}.', { name: report.completed_by_name || '—', date: when || '—' })}`}
+        </span>
+      </div>
+      {report.jobs.length === 0 ? (
+        <p style={{ ...st.note, margin: 0 }}>{t('estimates.sest_report_empty', 'The technical report has no jobs — add the lines by hand.')}</p>
+      ) : (
+        <ul style={st.reportList}>
+          {report.jobs.map(rj => {
+            const on = ticked.has(rj.key);
+            const elsewhere = rj.on_estimate;
+            const blocked = !!elsewhere && !on;
+            const parts = (rj.parts || []).length;
+            const meta = [
+              rj.hours ? t('estimates.sest_report_hours', '{{h}} h labour', { h: rj.hours }) : t('estimates.sest_report_labour', 'Labour'),
+              parts ? t('estimates.sest_report_parts', '{{n}} part(s)', { n: parts }) : t('estimates.sest_report_no_parts', 'no parts'),
+            ].join(' · ');
+            return (
+              <li key={rj.key}>
+                <label style={{ ...st.reportRow, ...(on ? st.reportRowOn : null), ...(blocked ? st.reportRowOff : null) }}
+                  title={blocked ? t('estimates.sest_report_blocked', 'Already on {{n}} — it would be billed twice. Take it off there first to put it here.', { n: elsewhere.estimate_number }) : undefined}>
+                  <input type="checkbox" checked={on} disabled={blocked} onChange={() => onToggle(rj)} style={st.reportCheck} />
+                  <span style={st.reportMain}>
+                    <span style={st.reportJob}>{rj.job}</span>
+                    <span style={st.reportMeta}>{meta}</span>
+                  </span>
+                  {elsewhere && (
+                    <span style={st.reportTag}>{elsewhere.kind === 'supplementary'
+                      ? t('estimates.on_supp_n', 'On supplementary estimate {{n}}', { n: elsewhere.estimate_number })
+                      : t('estimates.on_main_n', 'On main estimate {{n}}', { n: elsewhere.estimate_number })}</span>
+                  )}
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {report.jobs.length > 0 && free === 0 && (
+        <p style={{ ...st.note, margin: '8px 0 0' }}>{t('estimates.sest_report_all_on', 'Every job of the report is already on an estimate — add any further work by hand.')}</p>
+      )}
+    </div>
+  );
+}
+
 /* ── One job: name + labour lines + part lines ─────────────────────────── */
-function JobBlock({ t, job, index, canRemove, pref, canParts, canLabour, onName, onRemove, onLine, onAdd, onDel }) {
+function JobBlock({ t, job, index, canRemove, pref, canParts, canLabour, onName, onRemove, onLine, onAdd, onDel, fromReport = false }) {
   const lab = job.labour.filter(r => r.description.trim());
   const par = job.parts.filter(r => r.description.trim());
   const labour = lab.reduce((s, r) => s + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0), 0);
@@ -957,6 +1083,7 @@ function JobBlock({ t, job, index, canRemove, pref, canParts, canLabour, onName,
     <div style={st.jobCard}>
       <div style={st.jobHead}>
         <span style={st.jobNo}>{t('estimates.job_n', 'Job {{n}}', { n: index + 1 })}</span>
+        {fromReport && <span style={st.jobFromReport}><Wrench width={12} height={12} /> {t('estimates.job_from_report', 'Technical report')}</span>}
         <input style={{ ...st.input, flex: 1, minWidth: 160, fontWeight: 700 }} value={job.name}
           placeholder={t('estimates.job_name_ph', 'Job name, e.g. AC compressor')}
           onChange={e => onName(e.target.value)} />
@@ -1367,6 +1494,18 @@ const st = {
   fieldLabel: { fontSize: 12, fontWeight: 700, color: '#475569' },
   input: { border: '1.5px solid #e2e8f0', borderRadius: 10, padding: '9px 11px', fontSize: 13.5, outline: 'none', color: '#1e293b', background: '#fff', fontFamily: 'inherit', minWidth: 0, boxSizing: 'border-box' },
   prefBox: { border: '1.5px solid #fed7aa', background: '#fffaf5', borderRadius: 14, padding: '12px 14px', marginBottom: 14 },
+  reportBox: { border: '1.5px solid #bae6fd', background: '#f5fbff', borderRadius: 14, padding: '12px 14px', marginBottom: 14 },
+  reportCount: { fontSize: 11, fontWeight: 800, color: '#075985', background: '#e0f2fe', borderRadius: 999, padding: '1px 8px' },
+  reportList: { listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 },
+  reportRow: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '8px 10px', borderRadius: 10, borderWidth: 1, borderStyle: 'solid', borderColor: '#e2e8f0', background: '#fff', cursor: 'pointer' },
+  reportRowOn: { borderColor: '#38bdf8', background: '#f0f9ff' },
+  reportRowOff: { cursor: 'not-allowed', background: '#f8fafc', color: '#94a3b8' },
+  reportCheck: { width: 17, height: 17, accentColor: ORANGE, flexShrink: 0, margin: 0 },
+  reportMain: { display: 'flex', flexDirection: 'column', gap: 1, flex: '1 1 180px', minWidth: 0 },
+  reportJob: { fontSize: 13.5, fontWeight: 700, color: 'inherit', overflowWrap: 'anywhere' },
+  reportMeta: { fontSize: 12, color: '#64748b' },
+  reportTag: { fontSize: 11.5, fontWeight: 700, color: '#92400e', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 999, padding: '2px 9px', maxWidth: '100%', overflowWrap: 'anywhere' },
+  jobFromReport: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 700, color: '#075985', background: '#e0f2fe', borderRadius: 999, padding: '3px 9px', flexShrink: 0 },
   reportNote: { display: 'flex', gap: 8, alignItems: 'center', background: '#f0f9ff', border: '1px solid #bae6fd', color: '#075985', padding: '9px 12px', borderRadius: 10, fontSize: 13, marginBottom: 14, lineHeight: 1.45 },
   prefHead: { display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 10 },
   prefHint: { fontSize: 12, color: '#64748b', lineHeight: 1.4 },

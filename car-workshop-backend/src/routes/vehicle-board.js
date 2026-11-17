@@ -136,9 +136,12 @@ function boardSql(withPauseReason) {
     SELECT x.wo_id, e.id, e.status, e.customer_type, e.internal_approved_at, e.customer_approved_at,
            ${ago('e.created_at')} AS created_ago, ${ago('e.updated_at')} AS updated_ago,
            ${ago('e.sent_to_customer_at')} AS sent_ago, ${ago('e.customer_approved_at')} AS approved_ago,
-           -- The main estimate, not a supplementary one (SEST-…), is the job's estimate.
+           -- The main estimate, not a supplementary one (SEST-…), is the job's estimate. With
+           -- none, a supplementary one raised on its own (client feedback, 16 Nov 2026) — but
+           -- not a rejected or expired one: that only drops its work, the job goes on.
            ROW_NUMBER() OVER (PARTITION BY x.wo_id ORDER BY e.kind = 'supplementary', x.id DESC) AS rn
       FROM est_ids x JOIN service_estimates e ON e.id = x.id
+     WHERE NOT (e.kind = 'supplementary' AND e.status IN ('rejected','expired'))
   ),
   est_lines AS (
     SELECT l.estimate_id, SUM(l.line_type <> 'discount') AS line_count,

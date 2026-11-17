@@ -7,7 +7,14 @@
  *  window that technician is expected to work. The board answers:
  *
  *    1. What is waiting on me? (assign, sub-job cards, QC, rework — the
- *       same queues as "Your tasks", lib/floor-queues.js)
+ *       same queues as "Your tasks", lib/floor-queues.js). "To assign" also
+ *       lists work approved on a job that already has technicians — a
+ *       supplementary estimate's new job ("1 new job to assign",
+ *       lib/job-tasks.js WAITING_TASK_WHERE) — and says when the parts must
+ *       be requested (MRN) before anyone can be assigned (client feedback,
+ *       16 Nov 2026, points 4 and 5). Assigning a job that has jobs is per
+ *       job (POST /api/job-tasks/assign); POST /assign below stays the
+ *       whole-job assign for work with no jobs.
  *    2. Who is on my team, and what is each of them on right now?
  *    3. What is each technician booked for today, and what have they worked?
  *    4. Which job cards are on my team, and what are they waiting for?
@@ -28,7 +35,8 @@ import { onTechnicianAssigned } from '../lib/workflow.js';
 import { can, capabilitiesOf, requireCapability } from '../lib/roles.js';
 import { customerApprovalMissing } from '../lib/job-card-approval.js';
 import { awaitingPhysicalInspection, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
-import { partsRequestMissing } from '../lib/parts-request.js';
+import { partsRequestMissing, partsRequestStatus } from '../lib/parts-request.js';
+import { syncJobTasks, WAITING_TASK_WHERE } from '../lib/job-tasks.js';
 import {
   ASSIGN_WHERE, AWAITING_CUSTOMER_WHERE, ASSIGN_SUB_WHERE, QC_WHERE, REWORK_WHERE,
 } from '../lib/floor-queues.js';
@@ -113,7 +121,7 @@ router.get('/overview', async (req, res) => {
                      JOIN work_orders wo ON wo.id = jc.work_order_id
                      LEFT JOIN vehicles v ON v.id = wo.vehicle_id`;
 
-    const [[clock], teams, technicians, assign, assignSub, qc, rework, awaitingCustomer] = await Promise.all([
+    const [[clock], teams, technicians, assign, assignSub, qc, rework, awaitingCustomer, newJobs] = await Promise.all([
       query('SELECT NOW() AS now, CURDATE() AS today'),
 
       // ── Teams a manager can switch between ──────────────────────────
@@ -156,6 +164,7 @@ router.get('/overview', async (req, res) => {
                 (SELECT COALESCE(SUM(i.quantity), 0) FROM work_order_items i WHERE i.work_order_id = wo.id AND i.item_type = 'labour') AS labour_hours,
                 (SELECT GROUP_CONCAT(i.name ORDER BY i.id SEPARATOR ' · ') FROM work_order_items i WHERE i.work_order_id = wo.id) AS items_preview,
                 (SELECT COUNT(*) FROM job_cards s WHERE s.work_order_id = wo.id AND s.parent_job_card_id IS NOT NULL AND s.status <> 'cancelled') AS sub_count,
+                (SELECT COUNT(*) FROM job_card_tasks t WHERE t.work_order_id = wo.id AND t.status <> 'cancelled') AS task_count,
                 EXISTS (SELECT 1 FROM service_estimates e JOIN estimate_lines l ON l.estimate_id = e.id
                          WHERE e.work_order_id = wo.id AND l.customer_status = 'rejected') AS partial_approval
            FROM work_orders wo
@@ -207,6 +216,32 @@ router.get('/overview', async (req, res) => {
       canAssign
         ? query(`SELECT COUNT(*) n FROM work_orders wo WHERE ${AWAITING_CUSTOMER_WHERE}`, [W]).then(([r]) => Number(r.n))
         : 0,
+
+      // Work approved on a job that already has technicians (a supplementary
+      // estimate's new job): it waits for a technician of its own and joins
+      // the "To assign" queue as "N new jobs to assign".
+      canAssign ? query(
+        `SELECT wo.id, wo.work_order_number, wo.status, wo.customer_name, wo.customer_approved_at, wo.customer_approval_channel,
+                w.since, TIMESTAMPDIFF(MINUTE, w.since, NOW()) AS waiting_minutes,
+                w.n AS new_jobs, w.names AS new_job_names,
+                v.make AS vehicle_make, v.model AS vehicle_model, v.year AS vehicle_year, v.plate_number,
+                mj.id AS job_card_id, mj.job_card_number, mj.department, mm.full_name AS main_mechanic_name,
+                (SELECT GROUP_CONCAT(DISTINCT m.full_name ORDER BY m.full_name SEPARATOR ', ')
+                   FROM job_card_tasks t2 JOIN mechanics m ON m.id = t2.mechanic_id
+                  WHERE t2.work_order_id = wo.id AND t2.status <> 'cancelled') AS technicians_on_job,
+                (SELECT COUNT(*) FROM job_card_tasks t3 WHERE t3.work_order_id = wo.id AND t3.status <> 'cancelled') AS task_count,
+                (SELECT COUNT(*) FROM job_cards s WHERE s.work_order_id = wo.id AND s.parent_job_card_id IS NOT NULL AND s.status <> 'cancelled') AS sub_count
+           FROM (SELECT t.work_order_id, COUNT(*) AS n, MIN(t.created_at) AS since,
+                        GROUP_CONCAT(t.job_name ORDER BY t.sort_order, t.id SEPARATOR ' · ') AS names
+                   FROM job_card_tasks t JOIN job_cards jc ON jc.id = t.job_card_id
+                  WHERE t.workshop_id = ? AND ${WAITING_TASK_WHERE}
+                  GROUP BY t.work_order_id) w
+           JOIN work_orders wo ON wo.id = w.work_order_id
+           LEFT JOIN vehicles v ON v.id = wo.vehicle_id
+           LEFT JOIN job_cards mj ON mj.main_for_work_order = wo.id
+           LEFT JOIN mechanics mm ON mm.id = wo.mechanic_id
+          WHERE wo.workshop_id = ? AND wo.status NOT IN ('completed','cancelled') AND wo.mechanic_id IS NOT NULL
+          ORDER BY w.since LIMIT 100`, [W, W]) : [],
     ]);
 
     // ── What the technicians are on, worked on and booked for ─────────
@@ -341,9 +376,27 @@ router.get('/overview', async (req, res) => {
     }
     for (const r of qc?.rows || []) r.minutes_booked = Number(r.minutes_booked);
     for (const r of assign?.rows || []) {
+      r.kind = 'assign';
       r.items_preview = r.items_preview ? String(r.items_preview).slice(0, 140) : null;
       r.labour_hours = Number(r.labour_hours) || 0;
       r.partial_approval = Number(r.partial_approval);
+      r.task_count = Number(r.task_count);
+    }
+    // The new jobs join the "To assign" queue, oldest first like the rest.
+    if (assign) {
+      for (const r of newJobs) {
+        r.kind = 'new_jobs';
+        r.new_jobs = Number(r.new_jobs); r.task_count = Number(r.task_count); r.sub_count = Number(r.sub_count);
+        r.new_job_names = r.new_job_names ? String(r.new_job_names).slice(0, 160) : null;
+      }
+      assign.total += newJobs.length;
+      assign.rows = [...assign.rows, ...newJobs].sort((a, b) => String(a.since || '').localeCompare(String(b.since || '')));
+      // The parts come before the technician (MRN): which rows cannot be assigned yet.
+      const parts = await partsRequestStatus(assign.rows.map(r => r.id), W);
+      for (const r of assign.rows) {
+        const p = parts.get(r.id);
+        r.parts_needed = !!p?.needed; r.parts_lines = p?.parts || 0; r.requisitions = p?.requisitions || 0;
+      }
     }
 
     const team = scope.kind === 'team' ? teams.find(x => Number(x.leader_id) === scope.leaderId) : null;
@@ -367,6 +420,7 @@ router.get('/overview', async (req, res) => {
         working: count('working'), paused: count('paused'), assigned: count('assigned'), free: count('free'), off,
         booked_today: bookings.length,
         awaiting_assignment: assign?.total ?? 0,
+        assign_new_jobs: newJobs.length,
         awaiting_shown: assign?.rows.length ?? 0,
         assign: assign?.total ?? null, assign_sub: assignSub?.total ?? null, qc: qc?.total ?? null, rework: rework?.total ?? null,
         awaiting_customer: awaitingCustomer,
@@ -533,6 +587,9 @@ router.post('/assign', requireCapability('job.assign'), async (req, res) => {
 
     // Step 6: the main job card follows the technician, who is told.
     await onTechnicianAssigned({ workOrderId: Number(work_order_id), workshopId: req.workshopId, mechanicId: Number(mechanic_id) });
+    // Its jobs (job_card_tasks) follow the job card's technician too, so the
+    // scan station knows whose they are (lib/job-tasks.js).
+    await syncJobTasks({ workOrderId: Number(work_order_id), workshopId: req.workshopId, userId: req.user?.id });
 
     await logAudit({
       workshopId: req.workshopId, userId: req.user?.id,

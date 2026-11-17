@@ -97,7 +97,7 @@ export async function jobCardGate({ workOrderId, workshopId, db = null }) {
  * false, or `db` is given: the card is then written on that transaction and
  * the caller runs announceMainJobCard() after the commit.
  *
- * The work order's history gets "Main job card JC-… opened — <how it was
+ * The work order's history gets "Inspection job card JC-… opened — <how it was
  * acknowledged>" (not for internal customers, whose card opens with the job).
  *
  * @param {{workOrderId: number, workshopId: number, userId?: number|null,
@@ -126,7 +126,7 @@ export async function openJobCardIfReady({ workOrderId, workshopId, userId = nul
     const how = gate.via === 'override' && wo.inspection_override_reason
       ? `${ACKNOWLEDGED_VIA.override}: ${String(wo.inspection_override_reason).slice(0, 200)}`
       : ACKNOWLEDGED_VIA[gate.via];
-    const note = `Main job card ${jobCard.job_card_number} opened — physical inspection ${gate.via === 'override' ? 'skipped' : 'acknowledged'} (${how})`;
+    const note = `Inspection job card ${jobCard.job_card_number} opened — physical inspection ${gate.via === 'override' ? 'skipped' : 'acknowledged'} (${how})`;
     // Once per card: two acknowledgements racing (the link and the portal)
     // open one card, and the history says so once.
     const write = db ? (sql, p) => db.query(sql, p) : execute;
@@ -134,7 +134,7 @@ export async function openJobCardIfReady({ workOrderId, workshopId, userId = nul
       `INSERT INTO work_order_status_logs (work_order_id, status, changed_by, note)
        SELECT wo.id, wo.status, ?, ? FROM work_orders wo
         WHERE wo.id = ? AND NOT EXISTS (SELECT 1 FROM work_order_status_logs sl WHERE sl.work_order_id = wo.id AND sl.note LIKE ?)`,
-      [userId, note, wo.id, `Main job card ${jobCard.job_card_number} opened%`]
+      [userId, note, wo.id, `%job card ${jobCard.job_card_number} opened%`] // old notes said "Main job card"
     ).catch(err => console.error('[PhysicalInspection] status log failed:', err.message));
   }
   return { opened: true, jobCard, reason: null };

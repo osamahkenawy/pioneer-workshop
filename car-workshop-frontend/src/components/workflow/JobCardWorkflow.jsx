@@ -343,7 +343,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
         {step.key === 'job_card' && (
           <PhysicalBody data={data} t={t} closed={closed} mayOpen={roles.open} canOverride={!!data.you?.can_override_job_card}
             busy={busy} onInspect={() => navigate(`/work-orders/${wo.id}/inspection?type=intake`)}
-            onOpen={() => act('open', () => api.post(`/workflow/work-orders/${wo.id}/job-card`), t('workflow.jc_opened', 'Main job card opened'))}
+            onOpen={() => act('open', () => api.post(`/workflow/work-orders/${wo.id}/job-card`), t('workflow.inspection_card_opened', 'Inspection job card opened'))}
             onOverride={() => setModal({ type: 'override' })} />
         )}
         {step.key === 'inspection_pricing' && (
@@ -374,7 +374,7 @@ export default function JobCardWorkflow({ workOrderId, user, currency = 'AED', m
 
       {modal?.type === 'override' && <OverrideModal t={t} onClose={() => setModal(null)}
         onSave={reason => act('override', () => api.post(`/workflow/work-orders/${wo.id}/job-card`, { override_reason: reason }),
-          t('workflow.pi_override_done', 'Main job card opened without the customer\'s acknowledgement')).then(r => r?.success !== false && setModal(null))} />}
+          t('workflow.pi_override_done', 'Inspection job card opened without the customer\'s acknowledgement')).then(r => r?.success !== false && setModal(null))} />}
       {modal?.type === 'classify' && <ClassifyModal t={t} wo={wo} manager={isManager(user)} onClose={() => setModal(null)}
         onSave={(cls, sub) => act('classify', () => api.put(`/customers/${wo.customer_id}`,
           // A non-manager only fills in the missing subcategory (the class stays as it is).
@@ -707,7 +707,7 @@ function JobCardList({ data, t, children }) {
               <div key={c.id} className="wf-jc-mini-row">
                 <Page width={15} height={15} />
                 <strong>{c.job_card_number}</strong>
-                <span className="wf-muted">{c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')}: ${c.title || ''}` : t('workflow.main', 'Main job card')}</span>
+                <span className="wf-muted">{c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')}: ${c.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}</span>
                 <span className={`wf-pill ${tone}`}>{label}</span>
               </div>
             );
@@ -817,7 +817,8 @@ function JobTypesBody({ t, value, closed, canEdit, busy, onSave }) {
 
 function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, onOpen }) {
   const est = data.estimate;
-  const counter = !est && data.job_cards.length && data.steps[3].done;
+  // Priced at the counter (the server says; a supplementary estimate raised on its own is not that).
+  const counter = !est && (data.counter_priced ?? (data.job_cards.length && data.steps[3].done));
   // The customer's parts preference and the totals per category (Genuine /
   // After-Market / Used) come with the estimate itself (GET /estimates/:id,
   // the same summary as lib/workflow.js); until it loads, the workflow's own.
@@ -838,10 +839,14 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, 
   // meeting, 3 Nov 2026: estimation follows the technical inspection; POST
   // /estimates refuses one without it).
   const fromReport = data.technical_inspection?.status === 'completed';
-  // Supplementary estimates (SEST-…): extra work on top of a decided main estimate.
+  // Supplementary estimates (SEST-…): the technical report's jobs beyond the
+  // main estimate, or extra work found later, at a fixed cost the customer
+  // consents to. Raised as soon as the technical inspection is completed —
+  // whether the main estimate is decided, still open, empty or not raised
+  // (client feedback, 16 Nov 2026) — one open at a time.
   const sests = data.supplementary_estimates || [];
-  const mainDecided = ['approved', 'partially_approved', 'converted'].includes(est?.status);
-  const sestOpen = sests.some(e => !['approved', 'partially_approved', 'converted', 'rejected', 'expired'].includes(e.status));
+  const sestOpen = sests.some(e => ['draft', 'sent_to_customer'].includes(e.status));
+  const mayRaiseSest = fromReport && !closed && canRaise && !sestOpen;
   return (
     <div className="wf-body">
       {step === 'inspection_pricing' && !est && !closed && canRaise && (fromReport ? (
@@ -908,18 +913,18 @@ function EstimateBody({ data, t, money, closed, step, canRaise, canOpen, onNew, 
           {est.customer_notes && <p className="wf-note">{t('workflow.customer_said', 'Customer')}: {est.customer_notes}</p>}
         </>
       )}
-      {(sests.length > 0 || (mainDecided && !closed && canRaise)) && (
+      {(sests.length > 0 || mayRaiseSest) && (
         <div className="wf-sest">
           <div className="wf-est-head">
             <strong>{t('workflow.sest_title', 'Supplementary estimates')}</strong>
-            {mainDecided && !closed && canRaise && !sestOpen && (
+            {mayRaiseSest && (
               <button className="wf-btn ghost sm" onClick={() => onNew('supplementary')}>
                 <Plus width={13} height={13} /> {t('workflow.sest_raise', 'Raise a supplementary estimate')}
               </button>
             )}
           </div>
           {sests.length === 0
-            ? <p className="wf-muted sm">{t('workflow.sest_none', 'None — extra work found later is priced on a supplementary estimate, at a fixed cost the customer consents to.')}</p>
+            ? <p className="wf-muted sm">{t('workflow.sest_none_report', 'None yet. A supplementary estimate shares the technical report’s jobs with the customer — tick them on it — at a fixed cost they consent to. It can go out before the main estimate is decided, or without one.')}</p>
             : (
               <ul className="wf-part-list">
                 {sests.map(e => (
@@ -943,7 +948,9 @@ function WorkBody({ data, t, money, roles, busy, act, elapsed, closed, mechanics
   const [note, setNote] = useState('');
   const [tech, setTech] = useState('');
   const approved = data.steps[5].checks[0].done;
-  const counter = !data.estimate;
+  // Priced at the counter: no estimate at all — not a job whose only estimate
+  // is a stand-alone supplementary one (counter_priced comes from the server).
+  const counter = !data.estimate && data.counter_priced !== false;
   return (
     <div className="wf-body">
       {!approved && counter && !closed && roles.approval && (
@@ -1014,7 +1021,7 @@ function JobCardCard({ card, t, roles, busy, act, elapsed, closed, approved, mec
       <header className="wf-jc-head">
         <div>
           <div className="wf-jc-num">{card.job_card_number}</div>
-          <div className="wf-jc-title">{card.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${card.title || ''}` : t('workflow.main', 'Main job card')}
+          <div className="wf-jc-title">{card.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${card.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}
             <span className="wf-muted"> · {t(`workflow.dept.${card.department}`, (DEPARTMENTS.find(d => d[0] === card.department) || [0, card.department])[1])}</span></div>
         </div>
         <span className={`wf-pill ${tone}`}>{label}</span>
@@ -1148,7 +1155,7 @@ function ClosureBody({ data, t, money, currency, workshopName, roles, busy, act,
             const [label, tone] = jcPill(t, c.status);
             return (
               <div key={c.id} className="wf-qc-row">
-                <span><strong>{c.job_card_number}</strong> <span className="wf-muted">{c.parent_job_card_id ? c.title : t('workflow.main', 'Main job card')}</span></span>
+                <span><strong>{c.job_card_number}</strong> <span className="wf-muted">{c.parent_job_card_id ? c.title : t('workflow.inspection_card', 'Inspection job card')}</span></span>
                 <span className={`wf-pill ${tone}`}>{label}</span>
                 {c.status === 'qc_pending' && !closed && (roles.qc
                   ? <button className="wf-btn primary sm" onClick={() => openModal({ type: 'qc', card: c })}>{t('workflow.do_qc', 'Quality check')}</button>

@@ -9,7 +9,17 @@
  *
  * Everything comes from GET /api/team-leader/overview. The board assigns and
  * books time for technicians with no phone at hand; Job done, the quality
- * check, parts and new sub-job cards stay on the job card.
+ * check and new sub-job cards stay on the job card.
+ *
+ * Client feedback, 16 Nov 2026: Assign is per job (point 4) — the dialog
+ * lists the job's jobs (GET /api/job-tasks) with a technician picker each
+ * (components/workflow/TechnicianPicker.jsx: availability, open jobs, booked
+ * time, team, skills), "same technician for all", and saves them in one go
+ * (POST /api/job-tasks/assign); work with no jobs keeps the whole-job assign.
+ * New approved work on a job already being worked comes back on the queue
+ * as "N new jobs to assign". A job whose parts were not requested yet shows
+ * "Parts to request" and Request parts (point 5, RequestPartsDialog.jsx);
+ * Assign waits for it.
  */
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -19,10 +29,12 @@ import i18next from 'i18next';
 import {
   UserPlus, MultiplePages, ShieldCheck, Undo, Flash, OpenNewWindow, Car, Play, Pause, Square, Group,
   PhoneDisabled, Refresh, Search, Check, CheckCircle, Xmark, InfoCircle, WarningTriangle, Box3dPoint,
-  Clock, NavArrowRight,
+  Clock, NavArrowRight, Package, Lock,
 } from 'iconoir-react';
 import api from '../lib/api';
 import { getSocket } from '../lib/socketClient';
+import TechnicianPicker, { fitOf } from '../components/workflow/TechnicianPicker';
+import RequestPartsDialog from '../components/workflow/RequestPartsDialog';
 import { jcLabel, jcTone, timeStateLabel, pauseReasonLabel, PAUSE_REASONS, PAUSE_NOTE_MAX } from '../lib/statusLabels';
 import './TeamLeader.css';
 
@@ -157,7 +169,7 @@ function defaultWindow(tech, labourHours, bookingsToday) {
 
 const norm = s => String(s ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 const searchText = r => norm([r.work_order_number, r.job_card_number, r.plate_number, r.customer_name, r.vehicle_make,
-  r.vehicle_model, r.mechanic_name, r.main_mechanic_name].filter(Boolean).join(' '));
+  r.vehicle_model, r.mechanic_name, r.main_mechanic_name, r.new_job_names, r.technicians_on_job].filter(Boolean).join(' '));
 const vehicleOf = r => [r.vehicle_make, r.vehicle_model, r.vehicle_year].filter(Boolean).join(' ');
 const shortWo = n => (n ? `WO-…${String(n).slice(-4)}` : '');
 
@@ -221,7 +233,8 @@ export default function TeamBoard() {
   const [loadedAt, setLoadedAt] = useState(0);
   const [team, setTeam] = useState(() => readStore('tb.team') || '');
   const [tab, setTab] = useState(() => readStore('tb.tab'));
-  const [assign, setAssign] = useState(null);       // { row, mode: 'main' | 'sub', trigger }
+  const [assign, setAssign] = useState(null);       // { row, mode: 'jobs' | 'main' | 'sub', trigger }
+  const [partsFor, setPartsFor] = useState(null);   // { row, trigger } — the Request parts dialog
   const [teamModal, setTeamModal] = useState(null); // { trigger }
   const [done, setDone] = useState(() => new Set());
   const [toasts, setToasts] = useState([]);
@@ -286,9 +299,9 @@ export default function TeamBoard() {
   }, []);
 
   useEffect(() => {
-    hold.current = !!assign || !!teamModal;
+    hold.current = !!assign || !!teamModal || !!partsFor;
     if (!hold.current && pending.current) { pending.current = false; loadRef.current(); }
-  }, [assign, teamModal]);
+  }, [assign, teamModal, partsFor]);
 
   // "/" jumps to the queue search, as in most list screens.
   useEffect(() => {
@@ -309,6 +322,7 @@ export default function TeamBoard() {
 
   const caps = data?.capabilities || [];
   const canAssign = caps.includes('job.assign');
+  const canParts = caps.includes('parts.request');
   const canTime = caps.includes('time.book');
   const scope = data?.scope;
   const technicians = data?.technicians || [];
@@ -345,12 +359,16 @@ export default function TeamBoard() {
     let next = trigger?.closest('li')?.nextElementSibling;
     while (next && !next.querySelector('[data-assign]')) next = next.nextElementSibling;
     const target = next?.querySelector('[data-assign]') || document.getElementById(`tb-tab-${activeTab}`);
-    setDone(prev => new Set(prev).add(`${mode}-${row.id}`));
+    setDone(prev => new Set(prev).add(`${mode === 'sub' ? 'sub' : 'main'}-${row.id}`));
     setAssign(null);
     const name = splitName(tech?.full_name || res.technician?.full_name).name;
-    pushToast('ok', t('teamBoard.toast_assigned', '{{number}} assigned to {{name}}.', {
-      number: mode === 'sub' ? row.job_card_number : row.work_order_number, name,
-    }));
+    pushToast('ok', mode === 'jobs'
+      ? (res.assigned === 1
+        ? t('teamBoard.toast_jobs_assigned_one', '{{number}}: 1 job assigned.', { number: row.work_order_number })
+        : t('teamBoard.toast_jobs_assigned_n', '{{number}}: {{n}} jobs assigned.', { number: row.work_order_number, n: res.assigned }))
+      : t('teamBoard.toast_assigned', '{{number}} assigned to {{name}}.', {
+        number: mode === 'sub' ? row.job_card_number : row.work_order_number, name,
+      }));
     if (res.conflict) {
       pushToast('warn', t('teamBoard.toast_conflict', 'Heads up — {{name}} is already booked {{start}}–{{end}} on {{wo}}.', {
         name, wo: res.conflict.work_order_number,
@@ -360,6 +378,18 @@ export default function TeamBoard() {
     requestAnimationFrame(() => target?.focus());
     // loadRef: the load of the team on screen now, not of the render this
     // closure came from.
+    loadRef.current();
+  };
+
+  const closeParts = () => {
+    const back = partsFor?.trigger;
+    setPartsFor(null);
+    requestAnimationFrame(() => back?.focus?.());
+  };
+  const partsSent = res => {
+    const { row } = partsFor;
+    setPartsFor(null);
+    pushToast('ok', t('teamBoard.toast_parts', '{{number}}: requisition {{req}} sent to the Store — you can assign the technicians now.', { number: row.work_order_number, req: res.req_number }));
     loadRef.current();
   };
 
@@ -444,9 +474,11 @@ export default function TeamBoard() {
           <div className={`tb-main${showQueue ? '' : ' no-queue'}`}>
             {showQueue && (
               <QueuePanel data={data} tabs={tabs} active={activeTab} onTab={chooseTab} searchRef={searchRef}
-                done={done} canTime={canTime} canManage={canManage} busyKeys={busyKeys} errors={errors}
+                done={done} canTime={canTime} canManage={canManage} canParts={canParts} busyKeys={busyKeys} errors={errors}
                 clashes={clashes} clashActions={clashActions}
-                onAssign={(row, mode, trigger) => setAssign({ row, mode, trigger })}
+                // A job with jobs is assigned per job; the dialog falls back to the whole-job one when it has none.
+                onAssign={(row, mode, trigger) => setAssign({ row, mode: mode === 'main' ? 'jobs' : mode, trigger })}
+                onParts={(row, trigger) => setPartsFor({ row, trigger })}
                 onAddTech={e => openTeam(e.currentTarget)}
                 onRestart={row => timeAction('start', {
                   jcId: row.id, jcNumber: row.job_card_number, mechanicId: row.mechanic_id, name: row.mechanic_name, key: `rw-${row.id}`,
@@ -461,10 +493,20 @@ export default function TeamBoard() {
         </>
       )}
 
-      {assign && (
+      {assign && assign.mode === 'jobs' && (
+        <JobsAssignDialog row={assign.row} team={team} bookings={data?.bookings || []} canParts={canParts}
+          onClose={closeAssign} onDone={res => assigned(res, null)}
+          onFallback={() => setAssign(a => (a ? { ...a, mode: 'main' } : a))}
+          onParts={() => setPartsFor({ row: assign.row, trigger: assign.trigger })} />
+      )}
+      {assign && assign.mode !== 'jobs' && (
         <AssignDialog row={assign.row} mode={assign.mode} technicians={technicians} bookings={data?.bookings || []} data={data}
           scope={scope} canManage={canManage} onClose={closeAssign} onDone={assigned}
           onAddTech={() => { setAssign(null); setTeamModal({ trigger: assign.trigger }); }} />
+      )}
+      {partsFor && (
+        <RequestPartsDialog workOrderId={partsFor.row.id} onClose={closeParts}
+          onDone={res => { setAssign(null); partsSent(res); }} />
       )}
       {teamModal && data && (
         <TeamModal scope={scope} technicians={technicians} onClose={closeTeam} onChanged={teamChanged} />
@@ -544,7 +586,7 @@ function Hero({ data, loading, failed, stale, loadedAt, team, allCount, onTeam, 
 
 /* ── Queue panel ─────────────────────────────────────────────────── */
 
-function QueuePanel({ data, tabs, active, onTab, searchRef, done, canTime, canManage, busyKeys, errors, clashes, clashActions, onAssign, onAddTech, onRestart }) {
+function QueuePanel({ data, tabs, active, onTab, searchRef, done, canTime, canManage, canParts, busyKeys, errors, clashes, clashActions, onAssign, onParts, onAddTech, onRestart }) {
   const { t } = useTranslation();
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('oldest');
@@ -674,9 +716,9 @@ function QueuePanel({ data, tabs, active, onTab, searchRef, done, canTime, canMa
               {rows.slice(0, limit).map(row => (
                 <li key={`${active}-${row.id}`}>
                   <QueueRow kind={active} row={row} done={done.has(`${active === 'assign_sub' ? 'sub' : 'main'}-${row.id}`)}
-                    noTeam={noTeam} canTime={canTime} busy={busyKeys.has(`rw-${row.id}:start`)} error={errors[`rw-${row.id}`]}
+                    noTeam={noTeam} canTime={canTime} canParts={canParts} busy={busyKeys.has(`rw-${row.id}:start`)} error={errors[`rw-${row.id}`]}
                     clash={clashes[`rw-${row.id}`]} clashActions={clashActions}
-                    onAssign={onAssign} onAddTech={onAddTech} onRestart={onRestart} />
+                    onAssign={onAssign} onParts={onParts} onAddTech={onAddTech} onRestart={onRestart} />
                 </li>
               ))}
             </ul>
@@ -715,7 +757,7 @@ function AgeBlock({ since, minutes, caption }) {
 const Plate = ({ value }) => (value ? <bdi className="tb-plate">{value}</bdi> : null);
 
 /** One row of a queue — the shell is shared; each queue has its own lines and actions. */
-function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashActions, onAssign, onAddTech, onRestart }) {
+function QueueRow({ kind, row, done, noTeam, canTime, canParts, busy, error, clash, clashActions, onAssign, onParts, onAddTech, onRestart }) {
   const { t } = useTranslation();
   const labelId = `tb-r-${kind}-${row.id}`;
   const woLink = (id) => <Link to={`/job-cards/${row.work_order_id ?? row.id}`} id={id} className="tb-wo"><bdi>{row.work_order_number}</bdi></Link>;
@@ -746,26 +788,59 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
   if (kind === 'assign') {
     const channel = row.customer_approval_channel === 'estimate' ? t('teamBoard.channel_estimate', 'via estimate')
       : { in_person: t('workflow.in_person', 'In person'), phone: t('workflow.phone', 'By phone'), written: t('workflow.written', 'In writing') }[row.customer_approval_channel];
-    const meta = [
-      row.items_preview && `${row.items_preview}${row.line_count > 3 ? ` ${t('teamBoard.lines_more', '+{{n}} more', { n: row.line_count - 3 })}` : ''}`,
-      row.labour_hours > 0 && t('teamBoard.labour_h', '{{h}} h labour', { h: row.labour_hours }),
-      row.customer_approved_at && t('teamBoard.approved_via', 'Approved {{time}} · {{channel}}', { time: fmtDayHM(parseDT(row.customer_approved_at)), channel: channel || '' }),
-    ].filter(Boolean).join(' · ');
+    // New approved work on a job already being worked (a supplementary estimate's job).
+    const isNew = row.kind === 'new_jobs';
+    const meta = isNew
+      ? [
+        row.new_job_names && t('teamBoard.new_jobs_names', 'New: {{names}}', { names: row.new_job_names }),
+        row.technicians_on_job && t('teamBoard.on_the_job', 'On the job: {{names}}', { names: row.technicians_on_job }),
+      ].filter(Boolean).join(' · ')
+      : [
+        row.items_preview && `${row.items_preview}${row.line_count > 3 ? ` ${t('teamBoard.lines_more', '+{{n}} more', { n: row.line_count - 3 })}` : ''}`,
+        row.labour_hours > 0 && t('teamBoard.labour_h', '{{h}} h labour', { h: row.labour_hours }),
+        row.customer_approved_at && t('teamBoard.approved_via', 'Approved {{time}} · {{channel}}', { time: fmtDayHM(parseDT(row.customer_approved_at)), channel: channel || '' }),
+      ].filter(Boolean).join(' · ');
+    const blockId = `tb-blk-${row.id}`;
     age = <AgeBlock since={row.since} minutes={row.waiting_minutes} caption={t('teamBoard.waiting', 'waiting')} />;
     lines = (
       <>
         <div className="tb-l1">
           {woLink(labelId)}
           {row.job_card_number && <bdi className="tb-mono">{row.job_card_number}</bdi>}
+          {isNew && (
+            <span className="tb-chip accent">{row.new_jobs === 1 ? t('teamBoard.new_jobs_one', '1 new job to assign')
+              : t('teamBoard.new_jobs_n', '{{n}} new jobs to assign', { n: row.new_jobs })}</span>
+          )}
+          {!isNew && row.task_count > 1 && <span className="tb-chip">{t('teamBoard.jobs_n', '{{n}} jobs', { n: row.task_count })}</span>}
+          {row.parts_needed && <span className="tb-chip warn"><Package width={12} height={12} /> {t('teamBoard.parts_to_request', 'Parts to request')}</span>}
           {row.department && row.department !== 'mechanical' && <span className="tb-chip">{deptLabel(t, row.department)}</span>}
           {!!row.partial_approval && <span className="tb-chip warn">{t('teamBoard.partial', 'Partial approval')}</span>}
           {row.sub_count > 0 && <span className="tb-chip">{t('teamBoard.subs_count', '+{{count}} sub-job cards', { count: Number(row.sub_count) })}</span>}
         </div>
         <div className="tb-l2">{vehicleLine}</div>
         {meta && <div className="tb-l3" title={meta}>{meta}</div>}
+        {row.parts_needed && (
+          <div className="tb-l3 warn tb-blocked" id={blockId}>
+            <Lock width={13} height={13} aria-hidden="true" />
+            {t('teamBoard.parts_first', 'Assign opens once the parts are requested from the Store (MRN).')}
+          </div>
+        )}
       </>
     );
-    actions = <>{assignBtn('main')}{openLink}</>;
+    actions = row.parts_needed ? (
+      <>
+        {canParts && (
+          <button type="button" className="tb-btn accent" data-assign="" onClick={e => onParts(row, e.currentTarget)}>
+            <Package width={15} height={15} /> {t('teamBoard.request_parts', 'Request parts')}
+          </button>
+        )}
+        <button type="button" className="tb-btn ghost" disabled aria-describedby={blockId}
+          title={t('teamBoard.parts_first', 'Assign opens once the parts are requested from the Store (MRN).')}>
+          <Lock width={14} height={14} /> {t('workflow.assign', 'Assign')}
+        </button>
+        {openLink}
+      </>
+    ) : <>{assignBtn('main')}{openLink}</>;
   } else if (kind === 'assign_sub') {
     const main = row.main_mechanic_name ? splitName(row.main_mechanic_name).name : null;
     age = <AgeBlock since={row.since} minutes={row.waiting_minutes} caption={t('teamBoard.opened', 'opened')} />;
@@ -778,7 +853,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
         </div>
         <div className="tb-l2">{woLink()} {vehicleLine}</div>
         <div className={`tb-l3${main ? '' : ' warn'}`}>
-          {main ? t('teamBoard.main_tech', 'Main job card: {{name}}', { name: main }) : t('teamBoard.main_tech_none', 'Main job card: not assigned')}
+          {main ? t('teamBoard.inspection_tech', 'Inspection job card: {{name}}', { name: main }) : t('teamBoard.inspection_tech_none', 'Inspection job card: not assigned')}
         </div>
       </>
     );
@@ -789,7 +864,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, busy, error, clash, clashA
       <>
         <div className="tb-l1">
           <bdi className="tb-mono b" id={labelId}>{row.job_card_number}</bdi>
-          <span className="tb-title sm">{row.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${row.title || ''}` : t('workflow.main', 'Main job card')}</span>
+          <span className="tb-title sm">{row.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${row.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}</span>
           {woLink()}
         </div>
         <div className="tb-l2">{vehicleLine}</div>
@@ -1237,6 +1312,327 @@ function AssignDialog({ row, mode, technicians, bookings, data, scope, canManage
   );
 }
 
+/* ── Assign per job (client feedback, 16 Nov 2026, point 4) ────────── */
+
+/**
+ * The job's jobs, each with a technician picker that shows who is free;
+ * "same technician for all" fills them in one pick; one Save sends them all
+ * (POST /api/job-tasks/assign — the job-tasks rules: customer approval, MRN,
+ * team, skills, a manager's override with a reason). A booked window goes
+ * with the work order's first technician, as the whole-job assign books it:
+ * offered while the job has no technician and one technician takes the jobs.
+ * Work with no jobs (old / imported) falls back to the whole-job dialog.
+ */
+function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFallback, onParts }) {
+  const { t } = useTranslation();
+  const [jt, setJt] = useState(null);           // GET /api/job-tasks data
+  const [loadErr, setLoadErr] = useState('');
+  const [picks, setPicks] = useState({});        // task id → technician id
+  const [allPick, setAllPick] = useState(null);
+  const [allSkipped, setAllSkipped] = useState({ name: '', ids: [] }); // jobs "same for all" could not fill
+  const [reason, setReason] = useState('');
+  const [windowOn, setWindowOn] = useState(true);
+  const [win, setWin] = useState(null);
+  const [edited, setEdited] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [jobErrors, setJobErrors] = useState({}); // task id → message
+  const submitRef = useRef(null);
+  const reasonRef = useRef(null);
+  const isNewRow = row.kind === 'new_jobs';
+  const labour = Number(row.labour_hours) || 0;
+
+  const load = useCallback(async () => {
+    setLoadErr('');
+    try {
+      const qs = `work_order_id=${row.id}${team ? `&team_leader_id=${encodeURIComponent(team)}` : ''}`;
+      const res = await api.get(`/job-tasks?${qs}`);
+      if (!res.success) { setLoadErr(res.message || t('teamBoard.jobs_load_failed', 'Could not load the jobs.')); return; }
+      // Old / imported work with no jobs: the whole-job assign, as before.
+      if (!(res.data.tasks || []).some(x => x.status !== 'cancelled')) { onFallback(); return; }
+      setJt(res.data);
+    } catch (e) {
+      setLoadErr(e?.message || t('teamBoard.jobs_load_failed', 'Could not load the jobs.'));
+    }
+  }, [row.id, team, t, onFallback]);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const techs = jt?.technicians || [];
+  const techById = useMemo(() => new Map(techs.map(x => [Number(x.id), x])), [techs]);
+  const tasks = (jt?.tasks || []).filter(x => x.status !== 'cancelled');
+  const assignable = x => ['open', 'paused'].includes(x.status) && !x.running;
+  const waiting = x => !x.mechanic_id && x.status === 'open';
+  // "Same technician for all": the jobs still without one when others already
+  // have a technician (new work on a job being worked), else every job that can take one.
+  const waitingJobs = tasks.filter(x => assignable(x) && waiting(x));
+  const allTargets = tasks.some(x => x.mechanic_id) && waitingJobs.length ? waitingJobs : tasks.filter(assignable);
+  const typesOf = list => [...new Set(list.map(x => x.service_type).filter(Boolean))];
+  const fitFor = (techId, task) => fitOf(techById.get(Number(techId)), task.service_type ? [task.service_type] : []);
+
+  const changes = tasks.filter(x => assignable(x) && picks[x.id] && (Number(picks[x.id]) !== Number(x.mechanic_id) || x.inherited));
+  const overrides = changes.filter(x => fitFor(picks[x.id], x) !== 'all');
+  const needReason = overrides.length > 0;
+  const chosenTechs = [...new Set(changes.map(x => Number(picks[x.id])))];
+  const firstAssign = !!jt && !jt.work_order?.mechanic_id;
+  const windowAllowed = firstAssign && chosenTechs.length === 1;
+  const soleTech = windowAllowed ? techById.get(chosenTechs[0]) : null;
+  const blocked = jt?.blocked || null;
+
+  // The window starts after the technician's last booking today (as the whole-job dialog).
+  useEffect(() => {
+    if (soleTech && !edited) setWin(defaultWindow(soleTech, labour, bookings));
+  }, [soleTech?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const startD = win?.start ? new Date(win.start) : null;
+  const endD = win?.end ? new Date(win.end) : null;
+  const validWindow = startD && endD && endD > startD;
+  const durMin = validWindow ? Math.round((endD - startD) / 60000) : 0;
+  const bookWindow = windowAllowed && windowOn;
+  const overlap = bookWindow && validWindow && soleTech && bookings.find(b => b.mechanic_id === soleTech.id && b.work_order_id !== row.id
+    && parseDT(b.scheduled_start_at) < endD && (parseDT(b.scheduled_end_at) || parseDT(b.scheduled_start_at)) > startD);
+  const setStart = v => { setEdited(true); setTouched(true); setWin(w => ({ ...w, start: v })); };
+  const setEnd = v => { setEdited(true); setTouched(true); setWin(w => ({ ...w, end: v })); };
+
+  const pickOne = (task, id) => {
+    setPicks(p => ({ ...p, [task.id]: id }));
+    setTouched(true); setErr(''); setJobErrors(e => ({ ...e, [task.id]: '' }));
+  };
+  const pickAll = (id, info) => {
+    const next = { ...picks }, skipped = [];
+    for (const task of allTargets) {
+      if (fitFor(id, task) !== 'all' && !jt.can_override) { skipped.push(task.id); delete next[task.id]; continue; }
+      next[task.id] = id;
+    }
+    setPicks(next); setAllPick(id); setTouched(true); setErr(''); setJobErrors({});
+    setAllSkipped({ name: splitName(info?.tech?.full_name).name, ids: skipped });
+  };
+  // Still to choose by hand: the jobs "same for all" skipped that have no pick yet.
+  const stillSkipped = allTargets.filter(x => allSkipped.ids.includes(x.id) && !picks[x.id]);
+  const allNote = stillSkipped.length ? t('teamBoard.all_skipped', '{{name}} is not qualified for {{jobs}} — choose someone for it below.', {
+    name: allSkipped.name, jobs: stillSkipped.map(x => x.job_name).join(', '),
+  }) : '';
+
+  const submit = async e => {
+    e.preventDefault();
+    if (!changes.length) { setErr(t('teamBoard.err_pick_jobs', 'Choose a technician for at least one job.')); return; }
+    if (needReason && reason.trim().length < 3) {
+      setErr(t('teamBoard.err_reason', 'Say why the job goes to someone outside their skills (recorded on the job).'));
+      reasonRef.current?.focus();
+      return;
+    }
+    if (bookWindow && !validWindow) { setErr(t('teamBoard.err_window', 'The end of the window must be after its start.')); return; }
+    setSaving(true); setErr(''); setJobErrors({});
+    try {
+      const res = await api.post('/job-tasks/assign', {
+        work_order_id: row.id,
+        assignments: changes.map(x => ({
+          task_id: x.id, mechanic_id: Number(picks[x.id]),
+          // The dialog says who it saw on the job: another leader assigning it meanwhile gets a 409, not a silent swap.
+          expected_mechanic_id: x.mechanic_id || null,
+          ...(fitFor(picks[x.id], x) !== 'all' ? { override: true } : {}),
+        })),
+        ...(needReason ? { reason: reason.trim() } : {}),
+        ...(bookWindow ? { scheduled_start_at: toSql(win.start), scheduled_end_at: toSql(win.end) } : {}),
+      });
+      if (!res.success) {
+        setErr(res.message || t('teamBoard.action_failed', 'That did not work.'));
+        if (Array.isArray(res.errors)) setJobErrors(Object.fromEntries(res.errors.map(x => [x.task_id, x.message])));
+        if (['MRN_REQUIRED', 'ALREADY_ASSIGNED', 'TASK_NOT_FOUND', 'ASSIGN_REFUSED'].includes(res.code)) load();
+        setSaving(false);
+        return;
+      }
+      onDone(res);
+    } catch (e2) {
+      setErr(e2?.message || t('teamBoard.action_failed', 'That did not work.'));
+      setSaving(false);
+    }
+  };
+
+  const statusText = x => ({
+    open: t('jobTasks.status.open', 'Not started'),
+    in_progress: t('teamBoard.job_running', 'Clock running'),
+    paused: t('jobTasks.status.paused', 'Paused'),
+    done: t('jobTasks.status.done', 'Finished'),
+  }[x.running ? 'in_progress' : x.status] || x.status);
+  const context = [row.job_card_number, vehicleOf(row), row.plate_number, row.customer_name,
+    t('teamBoard.waiting_for', 'waiting {{age}}', { age: fmtAge(minutesSince(row.since, row.waiting_minutes)) })].filter(Boolean).join(' · ');
+  const multiCard = new Set(tasks.map(x => x.job_card_id)).size > 1;
+
+  return (
+    <Dialog id="tb-jobs" variant="is-drawer is-wide" dirty={touched} busy={saving} onClose={onClose} onSubmit={submit} initialFocus={submitRef}
+      title={isNewRow ? t('teamBoard.assign_new_title', 'Assign the new work on {{number}}', { number: row.work_order_number })
+        : t('teamBoard.assign_title', 'Assign {{number}}', { number: row.work_order_number })}
+      sub={context}
+      footer={(
+        <>
+          {err && <p className="tb-dlg-err" role="alert"><WarningTriangle width={15} height={15} /> <span>{err}</span></p>}
+          <button type="button" className="tb-btn ghost" onClick={onClose} disabled={saving}>{t('teamBoard.cancel', 'Cancel')}</button>
+          <button ref={submitRef} type="submit" className="tb-btn accent" disabled={saving || !jt || !!blocked || !changes.length}>
+            {saving ? t('teamBoard.assigning', 'Assigning…')
+              : !changes.length ? t('workflow.assign', 'Assign')
+                : changes.length === 1
+                  ? (bookWindow ? t('teamBoard.assign_book_one', 'Assign 1 job & book') : t('teamBoard.assign_one', 'Assign 1 job'))
+                  : (bookWindow ? t('teamBoard.assign_book_n', 'Assign {{n}} jobs & book', { n: changes.length }) : t('teamBoard.assign_n', 'Assign {{n}} jobs', { n: changes.length }))}
+          </button>
+        </>
+      )}>
+      {loadErr ? (
+        <div className="tb-empty">
+          <WarningTriangle width={18} height={18} /><span>{loadErr}</span>
+          <button type="button" className="tb-btn ghost sm" onClick={load}>{t('teamBoard.retry', 'Try again')}</button>
+        </div>
+      ) : !jt ? (
+        <div aria-busy="true">{[0, 1, 2].map(i => <span key={i} className="tb-shimmer tb-row-skel sm" />)}</div>
+      ) : (
+        <>
+          {blocked && (
+            <div className="tb-warn tb-jobs-blocked" role="status">
+              <Lock width={14} height={14} />
+              <span>{blocked.code === 'MRN_REQUIRED'
+                ? t('teamBoard.parts_first_long', 'The approved work has parts: request them from the Store (MRN) first, then assign the technicians.')
+                : blocked.message}</span>
+              {blocked.code === 'MRN_REQUIRED' && canParts && (
+                <button type="button" className="tb-btn primary sm" onClick={onParts}><Package width={14} height={14} /> {t('teamBoard.request_parts', 'Request parts')}</button>
+              )}
+            </div>
+          )}
+          {!techs.length && (
+            <p className="tb-warn"><InfoCircle width={14} height={14} /> {jt.team_only
+              ? t('teamBoard.empty_team_leader', 'Your team is empty. Add technicians to start assigning.')
+              : t('teamBoard.no_technicians', 'No active technicians to offer.')}</p>
+          )}
+
+          {allTargets.length > 1 && !blocked && techs.length > 0 && (
+            <section className="tb-allbox" aria-labelledby="tb-all-h">
+              <div className="tb-allbox-h">
+                <b id="tb-all-h">{allTargets.length === tasks.filter(assignable).length
+                  ? t('teamBoard.same_for_all', 'Same technician for all {{n}} jobs', { n: allTargets.length })
+                  : t('teamBoard.same_for_new', 'Same technician for the {{n}} jobs without one', { n: allTargets.length })}</b>
+                <span>{t('teamBoard.same_for_all_hint', 'One pick fills every job below; you can still change any of them.')}</span>
+              </div>
+              <TechnicianPicker technicians={techs} value={allPick} serviceTypes={typesOf(allTargets)} serviceLabels={jt.service_types}
+                canOverride={jt.can_override} preferTeamId={jt.prefer_team_leader_id} disabled={saving}
+                label={t('teamBoard.same_for_all_label', 'Technician for every job')}
+                placeholder={t('teamBoard.choose_for_all', 'Choose one technician for all…')} onChange={pickAll} />
+              {allNote && <p className="tb-allbox-note"><InfoCircle width={13} height={13} /> {allNote}</p>}
+            </section>
+          )}
+
+          <ol className="tb-jobs" aria-label={t('teamBoard.jobs_label', 'Jobs')}>
+            {tasks.map((x, i) => {
+              const can = assignable(x) && !blocked && techs.length > 0;
+              const picked = picks[x.id] ? techById.get(Number(picks[x.id])) : null;
+              const fit = picked ? fitFor(picked.id, x) : null;
+              const isChange = changes.includes(x);
+              return (
+                <li key={x.id} className={`tb-job${waiting(x) ? ' is-waiting' : ''}${isChange ? ' is-changed' : ''}${assignable(x) ? '' : ' is-locked'}`}>
+                  <div className="tb-job-top">
+                    <span className="tb-job-n" aria-hidden="true">{i + 1}</span>
+                    <div className="tb-job-title">
+                      <b>{x.job_name}</b>
+                      <span className="tb-job-tags">
+                        {x.service_type
+                          ? <span className="tb-chip navy">{t(`jobTasks.type.${x.service_type}`, x.service_type_label)}</span>
+                          : <span className="tb-chip">{t('teamBoard.any_type', 'Any technician')}</span>}
+                        {isNewRow && waiting(x) && <span className="tb-chip accent">{t('teamBoard.new_chip', 'New')}</span>}
+                        {multiCard && !x.is_main && <span className="tb-chip"><bdi>{x.job_card_number}</bdi>{x.job_card_title ? ` · ${x.job_card_title}` : ''}</span>}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="tb-job-now">
+                    {x.mechanic_name
+                      ? t('teamBoard.job_now', 'Now: {{name}}', { name: splitName(x.mechanic_name).name })
+                      : <span className="tb-job-none">{t('teamBoard.job_nobody', 'No technician yet')}</span>}
+                    {x.inherited && <span className="tb-faint"> {t('teamBoard.job_inherited', '(the job card\'s technician)')}</span>}
+                    {x.mechanic_id && x.status !== 'open' && <> · {statusText(x)}</>}
+                  </p>
+                  {can ? (
+                    <TechnicianPicker technicians={techs} value={picks[x.id] ?? null} currentId={x.mechanic_id}
+                      serviceTypes={x.service_type ? [x.service_type] : []} serviceLabels={jt.service_types}
+                      canOverride={jt.can_override} preferTeamId={jt.prefer_team_leader_id} disabled={saving}
+                      label={t('jobTasks.pick_label', 'Technician for {{job}}', { job: x.job_name })}
+                      placeholder={x.mechanic_id ? t('teamBoard.keep_or_change', 'Keep, or choose another…') : t('techPicker.choose', 'Choose a technician…')}
+                      onChange={id => pickOne(x, id)} />
+                  ) : !assignable(x) && (
+                    <p className="tb-job-locked">
+                      <Lock width={13} height={13} aria-hidden="true" />
+                      {x.status === 'done' ? t('teamBoard.job_locked_done', 'Finished — reopen it on the job card to give it to someone else.')
+                        : t('teamBoard.job_locked_running', 'The clock is running — it ends with a scan before the job can move.')}
+                    </p>
+                  )}
+                  {isChange && fit !== 'all' && (
+                    <p className="tb-job-warn"><WarningTriangle width={13} height={13} /> {t('teamBoard.job_override', 'Outside their skills — a manager\'s override with the reason below.')}</p>
+                  )}
+                  {isChange && (
+                    <button type="button" className="tb-linkbtn tb-job-undo" onClick={() => { setPicks(p => { const n = { ...p }; delete n[x.id]; return n; }); }}>
+                      {t('teamBoard.job_undo', 'Undo')}
+                    </button>
+                  )}
+                  {jobErrors[x.id] && <p className="tb-job-err" role="alert">{jobErrors[x.id]}</p>}
+                </li>
+              );
+            })}
+          </ol>
+
+          {needReason && (
+            <label className="tb-override">
+              <span>{overrides.length === 1
+                ? t('teamBoard.override_reason_one', 'Reason for assigning 1 job outside the technician\'s skills (recorded on the job)')
+                : t('teamBoard.override_reason_n', 'Reason for assigning {{n}} jobs outside the technicians\' skills (recorded on each job)', { n: overrides.length })}</span>
+              <input ref={reasonRef} className="tb-input" value={reason} maxLength={255} onChange={e => { setReason(e.target.value); setTouched(true); }}
+                placeholder={t('teamBoard.override_ph', 'e.g. the body technician is off today')} />
+            </label>
+          )}
+
+          {windowAllowed && soleTech && win && (
+            <div className="tb-win">
+              <label className="tb-switch">
+                <input type="checkbox" role="switch" checked={windowOn} onChange={e => { setWindowOn(e.target.checked); setTouched(true); setErr(''); }} />
+                <span className="tb-switch-ui" aria-hidden="true" />
+                <span>{t('teamBoard.window_switch_for', 'Book a time window for {{name}}', { name: splitName(soleTech.full_name).name })}</span>
+              </label>
+              {windowOn && (
+                <>
+                  <div className="tb-win-grid">
+                    <label>
+                      <span>{t('teamBoard.start_label', 'Start')}</span>
+                      <input type="datetime-local" className="tb-input" value={win.start} onChange={e => setStart(e.target.value)} />
+                    </label>
+                    <label>
+                      <span>{t('teamBoard.end_label', 'End')}</span>
+                      <input type="datetime-local" className="tb-input" value={win.end} onChange={e => setEnd(e.target.value)} />
+                    </label>
+                  </div>
+                  <div className="tb-durs" role="group" aria-label={t('teamBoard.duration', 'Duration')}>
+                    {DURATIONS.map(d => (
+                      <button key={d} type="button" className="tb-chipbtn" aria-pressed={durMin === d} disabled={!startD}
+                        onClick={() => setEnd(toLocalInput(new Date(startD.getTime() + d * 60000)))}>
+                        {fmtDur(d)}
+                      </button>
+                    ))}
+                  </div>
+                  {overlap && (
+                    <p className="tb-warn">
+                      <WarningTriangle width={14} height={14} />
+                      {t('teamBoard.overlap_warn', 'Overlaps {{wo}} {{start}}–{{end}} — you can still book it.', {
+                        wo: overlap.work_order_number, start: fmtHM(parseDT(overlap.scheduled_start_at)), end: fmtHM(parseDT(overlap.scheduled_end_at)),
+                      })}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+          {firstAssign && chosenTechs.length > 1 && (
+            <p className="tb-hint muted"><Clock width={14} height={14} /> {t('teamBoard.window_one_tech', 'A time window is booked when one technician takes the jobs; split jobs are timed at the scan station.')}</p>
+          )}
+          {jt.team_only && <p className="tb-hint muted"><InfoCircle width={14} height={14} /> {t('jobTasks.team_only', 'You can assign the technicians on your team.')}</p>}
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 /* ── Team panel ──────────────────────────────────────────────────── */
 
 /** The hours the lanes cover: from the earliest thing today (07:00 at the latest) to 19:00 or later. */
@@ -1601,7 +1997,7 @@ function CardsPanel({ data, panelRef, tech, onClearTech }) {
                   <td className="c-job">
                     <Link to={`/job-cards/${c.work_order_id}`} className="tb-mono b"><bdi>{c.job_card_number}</bdi></Link>
                     <span className="tb-sub">
-                      {c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${c.title || ''}` : t('workflow.main', 'Main job card')}
+                      {c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${c.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}
                       {c.department && c.department !== 'mechanical' && <> · {deptLabel(t, c.department)}</>}
                     </span>
                   </td>

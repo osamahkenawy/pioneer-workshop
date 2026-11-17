@@ -137,7 +137,7 @@ try {
   const noName = await call('POST', `/public/inspections/${linkToken}/sign`, null, { signature: PNG });
   const s1 = await call('POST', `/public/inspections/${linkToken}/sign`, null, { name: 'QA Intake Walk-in A', signature: PNG });
   const jc1 = await mainOf(w1.id);
-  const [log1] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [w1.id]);
+  const [log1] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Inspection job card%opened%'", [w1.id]);
   expect('the customer signs from the link (name required) → the main job card opens, logged as signed from the link',
     noName.status === 400 && s1.status === 200 && !!jc1 && /signed by the customer from the link/.test(log1?.note || ''), `${noName.status}/${s1.status} ${log1?.note}`);
   expect('…department from the category (bodywork → body_paint), with the plate', jc1?.department === 'body_paint' && jc1?.vehicle_plate === vA.plate_number, JSON.stringify(jc1 && { department: jc1.department, plate: jc1.vehicle_plate }));
@@ -237,7 +237,7 @@ try {
   const noDoc = await call('PATCH', `/vehicle-inspections/${i2?.id}/complete`, advisor, {});
   const up = await upload(advisor, `/vehicle-inspections/${i2?.id}/documents`, 'paper-form.png', PNG);
   const c2 = await call('PATCH', `/vehicle-inspections/${i2?.id}/complete`, advisor, {});
-  const [log2] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Main job card%opened%'", [w2.id]);
+  const [log2] = await q("SELECT note FROM work_order_status_logs WHERE work_order_id = ? AND note LIKE 'Inspection job card%opened%'", [w2.id]);
   expect('paper form: not without the upload (DOCUMENT_REQUIRED); uploaded and completed → the main job card opens, logged as the paper form',
     empty.json.code === 'SIGNATURE_REQUIRED' && noDoc.status === 400 && noDoc.json.code === 'DOCUMENT_REQUIRED' && up.status === 201 && c2.status === 200 && c2.json.job_card?.opened_now === true
     && !!(await mainOf(w2.id)) && /paper form uploaded/.test(log2?.note || ''), `${empty.json.code} ${noDoc.status} ${noDoc.json.code} upload ${up.status} complete ${c2.status} ${log2?.note}`);

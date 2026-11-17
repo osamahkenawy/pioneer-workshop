@@ -202,7 +202,7 @@ export async function ensureMainJobCard({ workOrderId, workshopId, userId = null
         `INSERT INTO job_cards
            (workshop_id, job_card_number, work_order_id, title, customer_id, vehicle_id, vehicle_plate,
             service_bay_id, mechanic_id, department, status, wip_opened_at, created_by)
-         VALUES (?, ?, ?, 'Main job card', ?, ?, ?, ?, ?, ?, 'open', NOW(), ?)`,
+         VALUES (?, ?, ?, 'Inspection job card', ?, ?, ?, ?, ?, ?, 'open', NOW(), ?)`,
         [workshopId, number, wo.id, wo.customer_id, wo.vehicle_id, wo.plate_number || null,
          wo.service_bay_id, wo.mechanic_id, departmentFor(wo.service_category), userId]
       );
@@ -345,7 +345,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     [wo.id, workshopId]);
 
   const [items, timeLogs, qcRows, reqItems, estimates, inspections, invoices, contacts, gatePasses, assignment, sentNotices, [creator], [techRow]] = await Promise.all([
-    query('SELECT id, name, item_type, quantity, unit_price, job_card_id FROM work_order_items WHERE work_order_id = ? ORDER BY id', [wo.id]),
+    query('SELECT id, name, item_type, quantity, unit_price, job_card_id, estimate_line_id FROM work_order_items WHERE work_order_id = ? ORDER BY id', [wo.id]),
     jcIds.length ? query(
       `SELECT t.id, t.job_card_id, t.mechanic_id, COALESCE(m.full_name, t.mechanic_name) AS mechanic_name,
               t.clock_in, t.clock_out, t.end_reason, t.pause_reason, t.end_note
@@ -397,17 +397,30 @@ export async function buildWorkflow(workOrderId, workshopId) {
   // meeting 3 Nov 2026) are extra work on top and never reopen Steps 4–6.
   const estimate = estimates.find(e => e.kind !== 'supplementary') || null;
   const supplementary = estimates.filter(e => e.kind === 'supplementary');
+  // Priced at the counter (the intake wizard): a fee, or lines the job
+  // started with that came from no estimate — a supplementary estimate's
+  // approved lines carry their estimate line, and a line added by hand
+  // after them does not make the job counter-priced.
+  const counterPriced = !estimate && (Number(wo.service_fee) > 0 || (items.length > 0 && !items[0].estimate_line_id));
+  // With no main estimate, a supplementary estimate raised on its own from
+  // the technical report (client feedback, 16 Nov 2026) carries Steps 4–6:
+  // the latest one not rejected or expired. It is never "the estimate"
+  // (estimate, data.estimate): the main estimate can still be raised, and
+  // rejecting it does not close the job (rejectedAll is the main one's).
+  const loneSupplementary = !estimate && !counterPriced
+    ? supplementary.find(e => !['rejected', 'expired'].includes(e.status)) || null : null;
+  const stepEstimate = estimate || loneSupplementary;
   let pricing = null;
-  if (estimate) {
+  if (stepEstimate) {
     const lines = await query(
       `SELECT id, job_name, line_type, description, quantity, unit_price,
               genuine_price, genuine_available, genuine_expected_date,
               aftermarket_price, aftermarket_available, aftermarket_expected_date,
               used_price, used_available, used_expected_date,
               alternative_option, alternative_for, alternative_approved, part_option, customer_status
-         FROM estimate_lines WHERE estimate_id = ? AND line_type <> 'discount' ORDER BY sort_order, id`, [estimate.id]);
+         FROM estimate_lines WHERE estimate_id = ? AND line_type <> 'discount' ORDER BY sort_order, id`, [stepEstimate.id]);
     // Totals in the categories of the customer's parts preference.
-    pricing = summariseEstimatePricing(lines, estimate);
+    pricing = summariseEstimatePricing(lines, stepEstimate);
   }
 
   // Time booking per job card
@@ -443,20 +456,19 @@ export async function buildWorkflow(workOrderId, workshopId) {
   const isInternal = customerClass === 'internal';
   const isClosed = wo.status === 'completed';
   const isCancelled = wo.status === 'cancelled';
-  const counterPriced = !estimate && (items.length > 0 || Number(wo.service_fee) > 0);   // priced in the intake wizard
   // An external job priced at the counter skipped the estimate; it carries
   // the Supervisor / Workshop Manager approval only if one of them priced it.
   const counterSignedOff = counterPriced && !isInternal && !!creator && canApproveEstimates(creator);
   // The estimate's account type counts only for a job with no classification at all.
-  const estimateInternal = isInternal || (!customerClass && estimate?.customer_type === 'internal_fleet');
+  const estimateInternal = isInternal || (!customerClass && stepEstimate?.customer_type === 'internal_fleet');
   // Off since the client's review (2 Nov 2026) unless the .env brings it back (lib/job-card-approval.js).
-  const managerApproved = !ESTIMATE_APPROVAL_REQUIRED || estimateInternal || !!estimate?.internal_approved_at || counterSignedOff;
+  const managerApproved = !ESTIMATE_APPROVAL_REQUIRED || estimateInternal || !!stepEstimate?.internal_approved_at || counterSignedOff;
   const hasVin = !!(wo.vin && String(wo.vin).trim());
   const hasIssue = !!(wo.description && wo.description.trim());
   // Step 2 of the process: the vehicle information and the reported issue.
   // The odometer and VIN are recorded when available but do not hold the step.
   const intakeMissing = [!wo.vehicle_id && 'the vehicle', !hasIssue && 'the reported issue'].filter(Boolean);
-  const approved = !!wo.customer_approved_at || (estimate && ['approved', 'partially_approved', 'converted'].includes(estimate.status) && !!estimate.customer_approved_at);
+  const approved = !!wo.customer_approved_at || (stepEstimate && ['approved', 'partially_approved', 'converted'].includes(stepEstimate.status) && !!stepEstimate.customer_approved_at);
   const rejectedAll = estimate?.status === 'rejected';
   const workDone = cards.length > 0 && cards.every(c => JC_WORK_DONE.includes(c.status));
   const qcPassed = cards.length > 0 && cards.every(c => JC_QC_PASSED.includes(c.status));
@@ -565,7 +577,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
       checks: [
         C('physical_ack', 'Physical inspection acknowledged by the customer', !physical.needed || physical.acknowledged,
           ...physicalAckDetail(physical, !!everOpened)),
-        C('main_jc_opened', 'Main job card opened', !!everOpened, everOpened ? everOpened.job_card_number : null),
+        { ...C('main_jc_opened', 'Inspection job card opened', !!everOpened, everOpened ? everOpened.job_card_number : null), label_key: 'inspection_jc_opened' },
         C('floor_notified', 'Supervisor, Foreman and Team Leader notified', !!everOpened, everOpened ? 'On opening' : null, everOpened ? { key: 'val.on_opening' } : null),
       ],
       done: !!everOpened,
@@ -573,13 +585,13 @@ export async function buildWorkflow(workOrderId, workshopId) {
     {
       n: 4, key: 'inspection_pricing', title_key: 'technical_pricing', title: 'Technical inspection & pricing',
       ...sumOf(counterPriced ? L('sum.priced_counter', 'Priced at the counter')
-        : !estimate ? (techDone ? L('sum.tech_report_ready', 'Technical report ready — raise the estimate')
+        : !stepEstimate ? (techDone ? L('sum.tech_report_ready', 'Technical report ready — raise the estimate')
           : technical ? L('sum.tech_in_progress', 'Technical inspection in progress')
           : physical.job_card_open || !physical.needed ? L('sum.tech_not_started', 'Technical inspection not started')
           : L('sum.no_estimate', 'No estimate yet'))
         : pricing.unpricedParts > 0 ? L('sum.parts_waiting_store', `${pricing.unpricedParts} part line(s) waiting for the store`, { n: pricing.unpricedParts })
         : pricing.unpricedLabour > 0 ? L('sum.labour_not_priced', 'Labour not priced')
-        : L('sum.estimate_priced', `Estimate ${estimate.estimate_number} priced`, { est: estimate.estimate_number })),
+        : L('sum.estimate_priced', `Estimate ${stepEstimate.estimate_number} priced`, { est: stepEstimate.estimate_number })),
       // A job priced at the counter skipped the estimate: it is priced (the
       // step is done), but the checks say what did not happen — no inspection
       // on record, parts not priced by the Storekeeper.
@@ -589,9 +601,9 @@ export async function buildWorkflow(workOrderId, workshopId) {
       // from before the report existed, and an estimate raised without it
       // (the report guides the advisor, it does not hold the estimate).
       checks: [
-        C('technical_inspection', 'Technical inspection', techDone || !!estimate, ...techInspectionDetail(technical, estimate, counterPriced)),
+        C('technical_inspection', 'Technical inspection', techDone || !!stepEstimate, ...techInspectionDetail(technical, stepEstimate, counterPriced)),
         // label_key: the screen's workflow.chk.* key for this wording (the check key stays).
-        { ...C('parts_priced', `Parts priced by the Storekeeper (${prefText(partsPreference(estimate))})`, !!pricing && pricing.unpricedParts === 0,
+        { ...C('parts_priced', `Parts priced by the Storekeeper (${prefText(partsPreference(stepEstimate))})`, !!pricing && pricing.unpricedParts === 0,
           pricing ? `${pricing.partLines - pricing.unpricedParts}/${pricing.partLines} part lines` : counterPriced ? 'Priced at the counter, not by the Storekeeper' : null,
           pricing ? { key: 'val.part_lines', params: { a: pricing.partLines - pricing.unpricedParts, b: pricing.partLines } } : counterPriced ? { key: 'val.counter_not_store' } : null),
           label_key: 'parts_priced_categories' },
@@ -609,25 +621,25 @@ export async function buildWorkflow(workOrderId, workshopId) {
       n: 5, key: 'estimate', title: 'Estimate to customer',
       ...sumOf(counterPriced ? (managerApproved ? L('sum.shown_counter', 'Shown to the customer at the counter')
                                                 : L('sum.counter_no_approval', 'Priced at the counter — no Supervisor / Workshop Manager approval'))
-        : !estimate ? L('sum.raw', '—', { v: '—' })
-        : estimate.sent_to_customer_at ? L('sum.sent_pref', `Sent — ${prefText(partsPreference(estimate))}`, { pref: prefText(partsPreference(estimate)) })
-        : ESTIMATE_APPROVAL_REQUIRED && !estimateInternal && !estimate.internal_approved_at ? L('sum.needs_approval', 'Needs Supervisor / Workshop Manager approval')
+        : !stepEstimate ? L('sum.raw', '—', { v: '—' })
+        : stepEstimate.sent_to_customer_at ? L('sum.sent_pref', `Sent — ${prefText(partsPreference(stepEstimate))}`, { pref: prefText(partsPreference(stepEstimate)) })
+        : ESTIMATE_APPROVAL_REQUIRED && !estimateInternal && !stepEstimate.internal_approved_at ? L('sum.needs_approval', 'Needs Supervisor / Workshop Manager approval')
         : L('sum.ready_to_send', 'Ready to send')),
       checks: [
         // The Supervisor / Workshop Manager sign-off — only while it is switched on.
         ...(ESTIMATE_APPROVAL_REQUIRED ? [C('manager_approval', 'Supervisor / Workshop Manager approval (external customers)', estimateInternal || managerApproved,
-          estimateInternal ? 'Not needed — internal customer' : estimate?.internal_approved_at ? 'Approved'
+          estimateInternal ? 'Not needed — internal customer' : stepEstimate?.internal_approved_at ? 'Approved'
             : counterSignedOff ? 'Priced by a Supervisor / Workshop Manager at the counter' : counterPriced ? 'Not given — priced at the counter' : null,
-          estimateInternal ? { key: 'val.not_needed_internal' } : estimate?.internal_approved_at ? { key: 'val.approved' }
+          estimateInternal ? { key: 'val.not_needed_internal' } : stepEstimate?.internal_approved_at ? { key: 'val.approved' }
             : counterSignedOff ? { key: 'val.counter_signed_off' } : counterPriced ? { key: 'val.counter_no_approval' } : null)] : []),
-        C('sent', 'Sent by WhatsApp or Email', counterPriced || !!estimate?.sent_to_customer_at,
-          estimate?.sent_to_customer_at ? prefText(partsPreference(estimate)) : counterPriced ? 'Shown at the counter' : null,
-          estimate?.sent_to_customer_at ? { key: 'val.pref', params: { pref: prefText(partsPreference(estimate)) } } : counterPriced ? { key: 'val.shown_counter' } : null),
+        C('sent', 'Sent by WhatsApp or Email', counterPriced || !!stepEstimate?.sent_to_customer_at,
+          stepEstimate?.sent_to_customer_at ? prefText(partsPreference(stepEstimate)) : counterPriced ? 'Shown at the counter' : null,
+          stepEstimate?.sent_to_customer_at ? { key: 'val.pref', params: { pref: prefText(partsPreference(stepEstimate)) } } : counterPriced ? { key: 'val.shown_counter' } : null),
       ],
       // A counter-priced external job without that approval is done here only
       // once the customer has agreed (history cannot be redone); the check
       // above still shows the approval never happened.
-      done: counterPriced ? (managerApproved || approved) : !!estimate?.sent_to_customer_at,
+      done: counterPriced ? (managerApproved || approved) : !!stepEstimate?.sent_to_customer_at,
     },
     {
       n: 6, key: 'work', title: 'Customer decision & work',
@@ -639,8 +651,8 @@ export async function buildWorkflow(workOrderId, workshopId) {
         : L('sum.waiting_assign', 'Approved — waiting for the Team Leader to assign')),
       checks: [
         C('decision', 'Customer decision', approved || rejectedAll,
-          rejectedAll ? 'Rejected all' : estimate?.status === 'partially_approved' || (estimate?.status === 'converted' && pricing?.rejected > 0) ? 'Partial approval — approved lines only' : approved ? 'Approved' : null,
-          rejectedAll ? { key: 'val.rejected_all' } : estimate?.status === 'partially_approved' || (estimate?.status === 'converted' && pricing?.rejected > 0) ? { key: 'val.partial' } : approved ? { key: 'val.approved' } : null),
+          rejectedAll ? 'Rejected all' : stepEstimate?.status === 'partially_approved' || (stepEstimate?.status === 'converted' && pricing?.rejected > 0) ? 'Partial approval — approved lines only' : approved ? 'Approved' : null,
+          rejectedAll ? { key: 'val.rejected_all' } : stepEstimate?.status === 'partially_approved' || (stepEstimate?.status === 'converted' && pricing?.rejected > 0) ? { key: 'val.partial' } : approved ? { key: 'val.approved' } : null),
         C('jc_for_work', 'Job card(s) for the approved work', approved && !!main,
           cards.length ? `${cards.length} job card(s)` : null, cards.length ? { key: 'val.job_cards', params: { n: cards.length } } : null),
         ...(partsNeeded ? [C('mrn', 'Parts requested from the Store (MRN)', !mrnMissing,
@@ -715,7 +727,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
     },
     steps,
     current_step: steps.find(s => s.state === 'current')?.n || null,
-    next: nextAction({ wo, steps, estimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, mrnMissing, customerClass, physical, techDone }),
+    next: nextAction({ wo, steps, estimate: stepEstimate, pricing, approved, counterPriced, managerApproved, intakeMissing, cards, workDone, qcPassed, qcFailed, pickupContacted, paid, gateReleased, isClosed, isCancelled, rejectedAll, partsWaiting, mrnMissing, customerClass, physical, techDone }),
     // Step 3: where the physical inspection and the customer's acknowledgement stand.
     physical_inspection: physical,
     // Step 4: the technical inspection (null = not started).
@@ -724,6 +736,10 @@ export async function buildWorkflow(workOrderId, workshopId) {
     estimate: estimate ? { ...estimate, pricing } : null,
     estimates,
     supplementary_estimates: supplementary,
+    // Priced at the counter (no estimate); and the supplementary estimate
+    // Steps 4–6 follow when there is no main estimate (id, or null).
+    counter_priced: counterPriced,
+    lone_supplementary_id: loneSupplementary?.id || null,
     inspections,
     invoice,
     contacts,
@@ -1085,6 +1101,12 @@ export async function onTechnicianAssigned({ workOrderId, workshopId, mechanicId
     // no job card, and assigning a technician does not open one.
     const { jobCard: main } = await openJobCardIfReady({ workOrderId, workshopId, notify: false });
     if (main) await execute('UPDATE job_cards SET mechanic_id = ? WHERE id = ?', [mechanicId, main.id]);
+    // The jobs on it follow the job card's technician straight away (the scan
+    // station reads them), whichever screen assigned the whole job.
+    if (main) {
+      const { syncJobTasks } = await import('./job-tasks.js');
+      await syncJobTasks({ workOrderId, workshopId });
+    }
     await notifyTechnicianAssigned({ workshopId, workOrderId, mechanicId, jobCardId: main?.id || null });
   } catch (err) {
     console.error('[Workflow] assignment follow-up failed:', err.message);

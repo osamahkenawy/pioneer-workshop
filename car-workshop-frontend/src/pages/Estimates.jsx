@@ -23,11 +23,15 @@
  *
  * Main and supplementary estimates (client decisions, 3 Nov 2026): every
  * row and the detail say which it is — a supplementary one (SEST-…) links to
- * its main estimate (EST-…), a main one lists its supplementary ones and,
- * once the customer has decided it, offers "Supplementary estimate" for
- * extra work on the same job. A supplementary estimate has a fixed cost (one
- * part type, no alternatives) and its approval carries the customer's
- * consent, shown here: who, when, the statement, the cost, the IP.
+ * its main estimate (EST-…) when there is one, a main one lists the job's
+ * supplementary ones and offers "Supplementary estimate" for work beyond it
+ * on the same job — decided or not (client feedback, 16 Nov 2026: a
+ * supplementary estimate can go out as soon as the technical inspection is
+ * completed, even with the main estimate empty, and may stand alone). A
+ * supplementary estimate has a fixed cost (one part type, no alternatives)
+ * and its approval carries the customer's consent, shown here: who, when,
+ * the statement, the cost, the IP. Recording it in person, the name starts
+ * filled with the customer's (editable).
  *
  * URLs: /estimates?id=<id> (notifications) · /estimates?new=1 (dashboard) ·
  * /estimates?new=1&wo=<workOrderId> (from a job card: the estimate for that
@@ -329,7 +333,10 @@ function EstimateDetail({ id, user, onClose, onOpen, onChanged, onError, onSuppl
   const [busy, setBusy] = useState('');
   // A supplementary estimate approved in person: the customer's consent, recorded by staff.
   const [consentOk, setConsentOk] = useState(false);
-  const [consentName, setConsentName] = useState('');
+  // Starts as the customer's name on the estimate (client feedback, 16 Nov 2026); once edited it stays as typed.
+  const [consentName, setConsentNameState] = useState('');
+  const consentNameTouched = useRef(false);
+  const setConsentName = v => { consentNameTouched.current = true; setConsentNameState(v); };
   const [sent, setSent] = useState(null); // last send result: { approval_url, whatsapp_url, channel }
   const [sendOpen, setSendOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -338,12 +345,16 @@ function EstimateDetail({ id, user, onClose, onOpen, onChanged, onError, onSuppl
   const load = useCallback(async () => {
     try {
       const res = await api.get(`/estimates/${id}`);
-      if (res.success) setData(res);
-      else { onError(res.message || t('estimates.err_open', 'Could not open that estimate')); onClose(); }
+      if (res.success) {
+        setData(res);
+        if (!consentNameTouched.current) setConsentNameState(String(res.estimate?.customer_full_name || res.estimate?.customer_name || '').trim());
+      } else { onError(res.message || t('estimates.err_open', 'Could not open that estimate')); onClose(); }
     } catch { onError(t('estimates.err_open', 'Could not open that estimate')); onClose(); }
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { setSent(null); setData(null); setConsentOk(false); setConsentName(''); load(); }, [load]);
+  useEffect(() => {
+    setSent(null); setData(null); setConsentOk(false); setConsentNameState(''); consentNameTouched.current = false; load();
+  }, [load]);
 
   if (!data) return <Shell onClose={onClose}><div className="es-mLoading">{t('estimates.loading', 'Loading…')}</div></Shell>;
   const { estimate: e, lines, can_approve } = data;
@@ -524,8 +535,11 @@ function EstimateDetail({ id, user, onClose, onOpen, onChanged, onError, onSuppl
                 <input type="checkbox" checked={consentOk} onChange={ev => setConsentOk(ev.target.checked)} />
                 <span>{t('estimates.consent_in_person_stmt', 'The customer agrees to the additional work at the fixed cost of each item approved below (incl. VAT).')}</span>
               </label>
-              <input className="es-input" value={consentName} maxLength={200} onChange={ev => setConsentName(ev.target.value)}
-                placeholder={t('estimates.consent_name_ph', 'The customer’s full name')} aria-label={t('estimates.consent_name_ph', 'The customer’s full name')} />
+              <label className="es-consentName">
+                <span>{t('estimates.consent_name_label', 'Customer’s full name')}</span>
+                <input className="es-input" value={consentName} maxLength={200} onChange={ev => setConsentName(ev.target.value)}
+                  placeholder={t('estimates.consent_name_ph', 'The customer’s full name')} autoComplete="off" />
+              </label>
             </div>
           )}
 

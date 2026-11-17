@@ -66,7 +66,7 @@ import { createTask } from '../lib/crm-cycle.js';
 import { scheduleNextReminder } from './crm-reminders.js';
 import { ASSIGN_WHERE } from '../lib/floor-queues.js';
 import {
-  missingVehicleDetails, vehicleDetailsRequired, ODOMETER_REQUIRED, checkOdometer, parsePartsPreference, parseJobTypes,
+  missingVehicleDetails, vehicleDetailsRequired, ODOMETER_REQUIRED, checkOdometer, previousOdometer, parsePartsPreference, parseJobTypes,
 } from '../lib/intake-rules.js';
 
 // SR-01/SR-16 — sanitise at the write boundary. Identity fields can never
@@ -819,7 +819,15 @@ router.get('/:id', async (req, res) => {
       );
     } catch (_) { /* completion_photos table may not exist yet */ }
 
-    return res.json({ success: true, data: { ...workOrder, items, parts, photos, status_logs: statusLogs } });
+    // The car's reading before this visit (earlier work orders only): what an
+    // edit of this job's own odometer is checked against. The vehicle's stored
+    // mileage is no use there — this job may have raised it itself.
+    const prevOdo = workOrder.vehicle_id
+      ? await previousOdometer({ vehicleId: workOrder.vehicle_id, workshopId: req.workshopId, workOrderId: workOrder.id }).catch(() => null)
+      : null;
+
+    return res.json({ success: true, data: { ...workOrder, items, parts, photos, status_logs: statusLogs,
+      previous_odometer: prevOdo ? prevOdo.last : null, previous_odometer_wo: prevOdo?.work_order_number || null } });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch work order' });
   }
@@ -2005,6 +2013,12 @@ router.put('/:id', requireCapability('job.open'), async (req, res) => {
         await conn.query('UPDATE vehicles SET mileage = ? WHERE id = ? AND workshop_id = ? AND mileage = ?',
           [odometer, vehicleId, req.workshopId, current.odometer_in]);
       }
+      // One reading per visit (client feedback, 16 Nov 2026): the physical
+      // inspection shows the work order's odometer, so a corrected reading
+      // goes onto it too — draft or completed.
+      await conn.query(
+        "UPDATE vehicle_inspections SET odometer = ? WHERE work_order_id = ? AND workshop_id = ? AND inspection_type = 'intake' AND (odometer IS NULL OR odometer <> ?)",
+        [odometer, current.id, req.workshopId, odometer]);
     }
 
     // History: intake corrections are part of the job's story.

@@ -289,7 +289,7 @@ export default function BoardDrawer({ item, sheet = false, onClose, actions }) {
                             <span className="vsb-badge" style={{ background: tone.bg, color: tone.color }}>{jcLabel(t, c.status)}</span>
                           </div>
                           <div className="vsb-muted vsb-small">
-                            {c.parent_job_card_id ? t('vehicleBoard.drawer.sub_card', 'Sub-job card') : t('vehicleBoard.drawer.main_card', 'Main job card')}
+                            {c.parent_job_card_id ? t('vehicleBoard.drawer.sub_card', 'Sub-job card') : t('vehicleBoard.drawer.main_card', 'Inspection job card')}
                             {c.department ? ` · ${deptLabel(t, c.department)}` : ''}
                             {c.parent_job_card_id && c.title ? ` · ${c.title}` : ''}
                           </div>

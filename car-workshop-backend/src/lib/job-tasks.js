@@ -16,10 +16,14 @@
  *     was booked on it). It runs whenever the tasks are read, printed or
  *     assigned, so work approved later appears without anyone pressing a
  *     button.
- *   - a new task takes its job card's technician while the job is still
- *     assigned as a whole (old jobs, the Team Board); once anyone has
- *     assigned a job on its own, new jobs wait for a technician and the floor
- *     is told.
+ *   - technicians: while the work order is assigned as a whole (nobody has
+ *     given a job its own technician — Job Assignment, auto-assign, the
+ *     whole-job assign), its jobs follow their job card's technician. Work
+ *     approved AFTER the work order got its technician (a supplementary
+ *     estimate) waits for one of its own, and the floor is told — it shows
+ *     on the Team Board's "To assign" queue (WAITING_TASK_WHERE; client
+ *     feedback, 16 Nov 2026, point 4). Jobs found on the first sync of an
+ *     old job (assigned before jobs existed) take the job card's technician.
  *
  * Time per job: the scan station (scanTask) books technician_time_logs rows
  * with the task's id ON its job card, so the job card's clock, totals and
@@ -129,6 +133,44 @@ async function approvedJobs(workOrderId) {
   return [...jobs.values()];
 }
 
+/** When the work order was (last) assigned as a whole: its current work_order_assignments row. */
+const ASSIGNED_AT_SQL = `(SELECT MAX(wa.assigned_at) FROM work_order_assignments wa
+                           WHERE wa.work_order_id = t.work_order_id AND wa.is_current = 1)`;
+
+/**
+ * A job waiting for a technician of its own on a job already being worked —
+ * the Team Board's "N new jobs to assign" (routes/team-leader.js). A WHERE
+ * fragment over `job_card_tasks t JOIN job_cards jc ON jc.id = t.job_card_id`,
+ * no placeholders. The exact opposite of what followJobCardTechnician()
+ * fills, so the board never lists a job the next read gives a technician:
+ * open, no technician, its job card live (an unassigned sub-job card's work
+ * is on the "Sub-job cards" queue instead) and either per-job mode, or no
+ * technician on its job card, or approved after the work order was assigned.
+ */
+export const WAITING_TASK_WHERE = `t.status = 'open' AND t.mechanic_id IS NULL AND jc.status <> 'cancelled'
+  AND NOT (jc.parent_job_card_id IS NOT NULL AND jc.mechanic_id IS NULL)
+  AND (EXISTS (SELECT 1 FROM job_card_tasks p WHERE p.work_order_id = t.work_order_id AND p.assigned_by IS NOT NULL)
+       OR jc.mechanic_id IS NULL
+       OR NOT (t.created_at <= COALESCE(${ASSIGNED_AT_SQL}, '1000-01-01')))`;
+
+/**
+ * Assigned as a whole (no job has a technician of its own): the jobs not
+ * started follow their job card's technician — a whole-job reassignment moves
+ * them too. A job with no technician takes it only if it was approved before
+ * the work order was assigned; later work waits (WAITING_TASK_WHERE).
+ */
+async function followJobCardTechnician(workOrderId, workshopId) {
+  await execute(
+    `UPDATE job_card_tasks t
+       JOIN job_cards jc ON jc.id = t.job_card_id
+        SET t.mechanic_id = jc.mechanic_id
+      WHERE t.work_order_id = ? AND t.workshop_id = ? AND t.status = 'open' AND t.assigned_by IS NULL
+        AND jc.mechanic_id IS NOT NULL AND NOT (t.mechanic_id <=> jc.mechanic_id)
+        AND NOT EXISTS (SELECT 1 FROM technician_time_logs l WHERE l.task_id = t.id)
+        AND (t.mechanic_id IS NOT NULL OR t.created_at <= ${ASSIGNED_AT_SQL})`,
+    [workOrderId, workshopId]);
+}
+
 /**
  * Bring a work order's tasks in line with its approved work. Closed jobs and
  * jobs without a main job card are left alone. Never throws.
@@ -137,7 +179,7 @@ async function approvedJobs(workOrderId) {
 export async function syncJobTasks({ workOrderId, workshopId, userId = null }) {
   const out = { added: 0, cancelled: 0 };
   try {
-    const [wo] = await query('SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ?', [workOrderId, workshopId]);
+    const [wo] = await query('SELECT id, work_order_number, status, mechanic_id FROM work_orders WHERE id = ? AND workshop_id = ?', [workOrderId, workshopId]);
     if (!wo || ['completed', 'cancelled'].includes(wo.status)) return out;
     const cards = await query(
       "SELECT id, parent_job_card_id, mechanic_id FROM job_cards WHERE work_order_id = ? AND workshop_id = ? AND status <> 'cancelled' ORDER BY parent_job_card_id IS NOT NULL, id",
@@ -157,6 +199,9 @@ export async function syncJobTasks({ workOrderId, workshopId, userId = null }) {
     const byKey = new Map(existing.map(t => [t.job_key, t]));
     // Per-job mode once anyone assigned a job on its own.
     const perJob = existing.some(t => t.assigned_by != null);
+    // The first sync of an old job (assigned as a whole before jobs existed):
+    // its jobs are the job card's technician's. Later work waits for its own.
+    const firstSync = existing.length === 0;
     const waiting = [];
 
     for (const job of jobs) {
@@ -164,7 +209,7 @@ export async function syncJobTasks({ workOrderId, workshopId, userId = null }) {
       const type = types.get(job.key) || null;
       const t = byKey.get(job.key);
       if (!t) {
-        const mechanicId = perJob ? null : cardTech.get(cardId);
+        const mechanicId = firstSync && !perJob ? cardTech.get(cardId) : null;
         for (let attempt = 0; attempt < 5; attempt++) {
           try {
             await execute(
@@ -199,7 +244,15 @@ export async function syncJobTasks({ workOrderId, workshopId, userId = null }) {
       out.cancelled = r.affectedRows || 0;
     }
 
-    if (perJob && waiting.length) {
+    // Assigned as a whole: the jobs follow their job card's technician — the
+    // ones not started, that nobody gave a technician of their own — except
+    // work approved after the work order was assigned, which waits.
+    if (!perJob) await followJobCardTechnician(wo.id, workshopId);
+
+    // New work on a job already being worked: the floor assigns it (the Team
+    // Board's queue lists it). A job nobody is on yet is on the queue anyway.
+    const hasTechnician = !!wo.mechanic_id || cards.some(c => c.mechanic_id);
+    if (!firstSync && hasTechnician && waiting.length) {
       await notifyGroups(workshopId, FLOOR, {
         title: `New work to assign: ${wo.work_order_number}`,
         body: `Approved and waiting for a technician: ${waiting.join(', ').slice(0, 180)}.`,

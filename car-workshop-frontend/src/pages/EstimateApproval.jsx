@@ -34,8 +34,12 @@
  * the statement to tick ("I agree to the additional work at the fixed cost
  * of AED X") and the customer's name — the server stores it (who, when, the
  * statement, the IP) and checks the cost is still X.
+ *
+ * The name field (on the page and in the consent step) starts filled with
+ * the customer's name from the estimate (client feedback, 16 Nov 2026,
+ * point 3); it stays editable, and what they type is kept across reloads.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import './EstimateApproval.css';
@@ -72,7 +76,10 @@ export default function EstimateApproval() {
   const [choice, setChoice] = useState({}); // lineId → 'genuine' | 'after_market' | 'used'
   const [busyLineId, setBusyLine] = useState(null);
   const [banner, setBanner] = useState('');
-  const [name, setName] = useState('');
+  const [name, setNameState] = useState('');
+  // Once the customer has typed in it, the name is theirs — a reload does not refill it.
+  const nameTouched = useRef(false);
+  const setName = v => { nameTouched.current = true; setNameState(v); };
   const [reason, setReason] = useState('');
   const [consents, setConsents] = useState([]);
   // Jobs ticked for a decision together (their pending lines).
@@ -89,6 +96,8 @@ export default function EstimateApproval() {
       if (res.status === 410) { setPhase('expired'); return; }
       if (!res.ok || !json.success) { setPhase('invalid'); return; }
       setEstimate(json.estimate);
+      // Filled with the customer's name on the estimate; still editable.
+      if (!nameTouched.current) setNameState(String(json.estimate?.customer_name || '').trim());
       setLines(json.lines || []);
       setJobs(json.jobs || []);
       setByType(json.totals_by_type || null);

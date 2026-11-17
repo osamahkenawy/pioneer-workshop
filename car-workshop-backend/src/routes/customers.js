@@ -38,6 +38,27 @@ function parseSub(v) {
 }
 
 /** Why a class + subcategory pair cannot be stored, or null. */
+// ── Entity (meeting of 3 Nov point 12; feedback 16 Nov 2026) ──
+// An internal account belongs to one of the group's entities (Aman Taxi,
+// Aman Public Transport, …: table customer_entities). External customers
+// have none.
+const ENTITY_NAME_SQL = '(SELECT e.name FROM customer_entities e WHERE e.id = c.entity_id) AS entity_name';
+
+/** A sent entity_id: undefined when not sent, null when cleared, an id, or false when invalid. */
+function parseEntityId(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === '' || v === 0 || v === '0') return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : false;
+}
+
+async function activeEntity(id, workshopId) {
+  const [e] = await query('SELECT id, name FROM customer_entities WHERE id = ? AND workshop_id = ? AND is_active = 1', [id, workshopId]);
+  return e || null;
+}
+
+const cleanEntityName = v => stripMarkup(String(v ?? '').replace(/\s+/g, ' ').trim(), 150);
+
 function classificationProblem(cls, sub) {
   if (cls === 'external' && INTERNAL_ONLY[sub]) return `${INTERNAL_ONLY[sub]} is an internal-only subcategory`;
   if (cls === 'internal' && sub === 'walkin') return 'Walk-in is an external-only subcategory';
@@ -181,7 +202,7 @@ router.get('/', async (req, res) => {
   try {
     const {
       search, type, emirate, page = 1, limit = 50, sort,
-      customer_class, customer_subcategory, active_only, include_inactive,
+      customer_class, customer_subcategory, active_only, include_inactive, entity_id,
     } = req.query;
     const pg = parseInt(page, 10) || 1;
     const lim = parseInt(limit, 10) || 50;
@@ -210,6 +231,12 @@ router.get('/', async (req, res) => {
       }
       where += ' AND c.customer_subcategory = ?';
       params.push(customer_subcategory);
+    }
+    if (entity_id) {
+      const eid = parseEntityId(entity_id);
+      if (!eid) return res.status(400).json({ success: false, message: 'entity_id must be an entity id' });
+      where += ' AND c.entity_id = ?';
+      params.push(eid);
     }
     // The wizard must not offer a deactivated account to raise a job card
     // against; the Customers screen still wants to list them. A search
@@ -276,7 +303,7 @@ router.get('/', async (req, res) => {
 
     const [{ total }] = await query(`SELECT COUNT(*) as total FROM customers c ${where}`, params);
     const customers = await query(
-      `SELECT c.*,
+      `SELECT c.*, ${ENTITY_NAME_SQL},
               COUNT(o.id) as total_work_orders,
               SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as completed_work_orders,
               MAX(o.completed_at) AS last_visit_at,
@@ -383,6 +410,67 @@ router.get('/stats', async (req, res) => {
 // PATCH /api/customers/:id/toggle — activate / deactivate
 // Managers only, the same as DELETE (which is how a customer is
 // deactivated): a Storekeeper could switch accounts off through here (#43).
+// GET /api/customers/entities — the group's entities (?all=1 includes switched-off ones).
+router.get('/entities', async (req, res) => {
+  try {
+    const all = req.query.all === '1' || req.query.all === 'true';
+    const rows = await query(
+      `SELECT e.id, e.name, e.is_active,
+              (SELECT COUNT(*) FROM customers c WHERE c.entity_id = e.id AND c.workshop_id = e.workshop_id) AS customers
+         FROM customer_entities e
+        WHERE e.workshop_id = ? ${all ? '' : 'AND e.is_active = 1'}
+        ORDER BY e.name`, [req.workshopId]);
+    return res.json({ success: true, data: rows, can_manage: isManagerRole(req.user) });
+  } catch (err) {
+    console.error('[Customers] entities error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to load the entities' });
+  }
+});
+
+// POST /api/customers/entities { name } — a manager adds one of the group's entities.
+router.post('/entities', requireManager, async (req, res) => {
+  try {
+    const name = cleanEntityName(req.body?.name);
+    if (name.length < 2) return res.status(400).json({ success: false, code: 'ENTITY_NAME_REQUIRED', message: "Enter the entity's name." });
+    const [dup] = await query('SELECT id, name, is_active FROM customer_entities WHERE workshop_id = ? AND name = ?', [req.workshopId, name]);
+    if (dup?.is_active) return res.status(409).json({ success: false, code: 'ENTITY_EXISTS', message: `${dup.name} is already on the list.`, data: dup });
+    let id = dup?.id;
+    if (dup) await execute('UPDATE customer_entities SET is_active = 1 WHERE id = ?', [dup.id]);
+    else id = (await execute('INSERT INTO customer_entities (workshop_id, name, created_by) VALUES (?, ?, ?)', [req.workshopId, name, req.user?.id || null])).insertId;
+    await logAudit({ workshopId: req.workshopId, userId: req.user?.id, action: dup ? 'ACTIVATE' : 'CREATE', entityType: 'customer_entities', entityId: id, newValue: { name }, ip: req.ip });
+    return res.status(dup ? 200 : 201).json({ success: true, data: { id, name, is_active: 1, customers: 0 } });
+  } catch (err) {
+    console.error('[Customers] add entity error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to add the entity' });
+  }
+});
+
+// PATCH /api/customers/entities/:id { name?, is_active? } — rename or switch off (managers).
+router.patch('/entities/:id', requireManager, async (req, res) => {
+  try {
+    const [e] = await query('SELECT id, name, is_active FROM customer_entities WHERE id = ? AND workshop_id = ?', [req.params.id, req.workshopId]);
+    if (!e) return res.status(404).json({ success: false, message: 'Entity not found' });
+    const sets = [], vals = [];
+    if (req.body?.name !== undefined) {
+      const name = cleanEntityName(req.body.name);
+      if (name.length < 2) return res.status(400).json({ success: false, code: 'ENTITY_NAME_REQUIRED', message: "Enter the entity's name." });
+      const [dup] = await query('SELECT id FROM customer_entities WHERE workshop_id = ? AND name = ? AND id <> ?', [req.workshopId, name, e.id]);
+      if (dup) return res.status(409).json({ success: false, code: 'ENTITY_EXISTS', message: `${name} is already on the list.` });
+      sets.push('name = ?'); vals.push(name);
+    }
+    if (req.body?.is_active !== undefined) { sets.push('is_active = ?'); vals.push(truthy(req.body.is_active) ? 1 : 0); }
+    if (!sets.length) return res.status(400).json({ success: false, message: 'Nothing to change' });
+    await execute(`UPDATE customer_entities SET ${sets.join(', ')} WHERE id = ?`, [...vals, e.id]);
+    await logAudit({ workshopId: req.workshopId, userId: req.user?.id, action: 'UPDATE', entityType: 'customer_entities', entityId: e.id,
+      oldValue: { name: e.name, is_active: e.is_active }, newValue: req.body, ip: req.ip });
+    const [row] = await query('SELECT id, name, is_active FROM customer_entities WHERE id = ?', [e.id]);
+    return res.json({ success: true, data: row });
+  } catch (err) {
+    console.error('[Customers] update entity error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to update the entity' });
+  }
+});
+
 router.patch('/:id/toggle', requireManager, async (req, res) => {
   try {
     const [customer] = await query('SELECT id, is_active FROM customers WHERE id = ? AND workshop_id = ?',
@@ -513,7 +601,7 @@ router.post('/:id/portal-access', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const [customer] = await query(
-      `SELECT c.* FROM customers c
+      `SELECT c.*, ${ENTITY_NAME_SQL} FROM customers c
        WHERE c.id = ? AND c.workshop_id = ?`,
       [req.params.id, req.workshopId]
     );
@@ -562,6 +650,8 @@ router.post('/', canEditCustomers, async (req, res) => {
       emirate: rawEmirate, latitude, longitude, credit_limit, notes,
       customer_class, customer_subcategory, code,
     } = _clean(req.body);
+    const entityIn = parseEntityId(req.body?.entity_id);
+    if (entityIn === false) return res.status(400).json({ success: false, message: 'entity_id must be an entity id' });
     const emirate = rawEmirate ? String(rawEmirate).slice(0, 100) : null;
     const full_name = trimmed(rawFullName);
     const company_name = trimmed(rawCompany);
@@ -593,6 +683,13 @@ router.post('/', canEditCustomers, async (req, res) => {
     // that bug invisible until the fleet desk cannot find the account.
     const classErr = classificationProblem(_class, _sub);
     if (classErr) return res.status(400).json({ success: false, message: classErr });
+    // The entity is an internal account's (the group's own companies).
+    let entityId = null;
+    if (entityIn) {
+      if (_class !== 'internal') return res.status(400).json({ success: false, code: 'ENTITY_INTERNAL_ONLY', message: "Only an internal account belongs to one of the group's entities." });
+      if (!await activeEntity(entityIn, req.workshopId)) return res.status(400).json({ success: false, code: 'ENTITY_NOT_FOUND', message: 'That entity is not on the list.' });
+      entityId = entityIn;
+    }
 
     if (!full_name || !rawPhone) {
       return res.status(400).json({ success: false, message: 'Name and phone required' });
@@ -643,21 +740,21 @@ router.post('/', canEditCustomers, async (req, res) => {
 
     const result = await run(
       `INSERT INTO customers (workshop_id, full_name, company_name, email, phone, phone_alt, type,
-        client_category, customer_class, customer_subcategory, code,
+        client_category, customer_class, customer_subcategory, entity_id, code,
         address_line1, address_line2, area, city, emirate,
         latitude, longitude, credit_limit, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [req.workshopId, full_name, company_name || null, email || null, phone, phone_alt || null,
-       type, client_category, _class, _sub, code || null,
+       type, client_category, _class, _sub, entityId, code || null,
        address_line1 || null, address_line2 || null, area || null,
        city || null, emirate, latitude || null, longitude || null,
        credit_limit || 0, notes || null]
     );
-    const [customer] = await run('SELECT * FROM customers WHERE id = ?', [result.insertId]);
+    const [customer] = await run(`SELECT c.*, ${ENTITY_NAME_SQL} FROM customers c WHERE c.id = ?`, [result.insertId]);
     if (_class === 'internal') {
       await logAudit({
         workshopId: req.workshopId, userId: req.user?.id, action: 'CREATE', entityType: 'customers',
-        entityId: result.insertId, newValue: { customer_class: _class, customer_subcategory: _sub }, ip: req.ip,
+        entityId: result.insertId, newValue: { customer_class: _class, customer_subcategory: _sub, entity_id: entityId }, ip: req.ip,
       });
     }
     return res.status(201).json({ success: true, data: withoutSecrets(customer) });
@@ -737,6 +834,20 @@ router.put('/:id', canEditCustomers, async (req, res) => {
     const _sub = subIn !== undefined ? subIn : (existing.customer_subcategory || null);
     const classChanged = _class !== existing.customer_class;
     const subChanged = _sub !== (existing.customer_subcategory || null);
+    // The entity: internal accounts only (moving one to External clears it).
+    const entityIn = parseEntityId(body.entity_id);
+    if (entityIn === false) return res.status(400).json({ success: false, message: 'entity_id must be an entity id' });
+    if (entityIn && _class !== 'internal') {
+      return res.status(400).json({ success: false, code: 'ENTITY_INTERNAL_ONLY', message: "Only an internal account belongs to one of the group's entities." });
+    }
+    const _entity = _class !== 'internal' ? null : (entityIn !== undefined ? entityIn : (existing.entity_id ?? null));
+    const entityChanged = Number(_entity || 0) !== Number(existing.entity_id || 0);
+    if (entityChanged && _entity) {
+      // Giving an account the entity it was imported without is filling a
+      // gap; moving it to another entity is a manager's change.
+      if (existing.entity_id && !manager) return roleNotAllowed(res, 'Only the Workshop Manager can move an internal account to another entity.');
+      if (!await activeEntity(_entity, req.workshopId)) return res.status(400).json({ success: false, code: 'ENTITY_NOT_FOUND', message: 'That entity is not on the list.' });
+    }
     // Checked only on a change, so an old row is still editable as it is.
     if (classChanged || subChanged) {
       const fillingMissing = !classChanged && _class === 'external' && !existing.customer_subcategory;
@@ -804,13 +915,13 @@ router.put('/:id', canEditCustomers, async (req, res) => {
 
     await execute(
       `UPDATE customers SET full_name=?, company_name=?, email=?, phone=?, phone_alt=?, type=?,
-       client_category=?, customer_class=?, customer_subcategory=?, code=?,
+       client_category=?, customer_class=?, customer_subcategory=?, entity_id=?, code=?,
        address_line1=?, address_line2=?, area=?, city=?, emirate=?,
        latitude=?, longitude=?, credit_limit=?, notes=?, is_active=?
        WHERE id = ? AND workshop_id = ?`,
       [full_name, company_name || null, email || null, phone, phone_alt || null,
        type || 'individual', client_category || 'other',
-       _class, _sub, code || null,
+       _class, _sub, _entity, code || null,
        address_line1 || null,
        address_line2 || null, area || null, city || null,
        emirate ? String(emirate).slice(0, 100) : (existing.emirate || null),
@@ -818,11 +929,11 @@ router.put('/:id', canEditCustomers, async (req, res) => {
        notes || null, isActive, req.params.id, req.workshopId]
     );
     // Who reclassified or switched off an account was not recorded anywhere.
-    if (classChanged || subChanged) {
+    if (classChanged || subChanged || entityChanged) {
       await logAudit({
         workshopId: req.workshopId, userId: req.user?.id, action: 'RECLASSIFY', entityType: 'customers', entityId: existing.id,
-        oldValue: { customer_class: existing.customer_class, customer_subcategory: existing.customer_subcategory },
-        newValue: { customer_class: _class, customer_subcategory: _sub }, ip: req.ip,
+        oldValue: { customer_class: existing.customer_class, customer_subcategory: existing.customer_subcategory, entity_id: existing.entity_id ?? null },
+        newValue: { customer_class: _class, customer_subcategory: _sub, entity_id: _entity }, ip: req.ip,
       });
     }
     if (activeChanged) {
@@ -831,7 +942,7 @@ router.put('/:id', canEditCustomers, async (req, res) => {
         entityType: 'customers', entityId: existing.id, ip: req.ip,
       });
     }
-    const [customer] = await query('SELECT * FROM customers WHERE id = ?', [req.params.id]);
+    const [customer] = await query(`SELECT c.*, ${ENTITY_NAME_SQL} FROM customers c WHERE c.id = ?`, [req.params.id]);
     return res.json({ success: true, data: withoutSecrets(customer) });
   } catch (err) {
     console.error('[Customers] Update error:', err);

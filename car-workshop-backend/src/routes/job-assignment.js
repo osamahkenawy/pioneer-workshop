@@ -51,7 +51,8 @@ import { requireCapability } from '../lib/roles.js';
 import { onTechnicianAssigned } from '../lib/workflow.js';
 import { woLabel } from '../lib/status-labels.js';
 import { awaitingPhysicalInspection, PHYSICAL_INSPECTION_REQUIRED } from '../lib/physical-inspection.js';
-import { partsRequestMissing } from '../lib/parts-request.js';
+import { partsRequestMissing, partsRequestStatus } from '../lib/parts-request.js';
+import { syncJobTasks } from '../lib/job-tasks.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -141,8 +142,11 @@ router.get('/', async (req, res) => {
     const allWorkOrderIds = [...unassigned, ...active].map(o => o.id);
     const partsByWorkOrder = {};
     const itemsByWorkOrder = {};
+    // The parts come before the technician (MRN, lib/parts-request.js): which
+    // job cards cannot be assigned until the parts are requested.
+    let partsRequest = new Map();
     if (allWorkOrderIds.length > 0) {
-      const [parts, items] = await Promise.all([
+      const [parts, items, mrn] = await Promise.all([
         query(
           `SELECT id, work_order_id, part_number, name, status, quantity, unit_cost, total_cost
            FROM parts
@@ -159,7 +163,9 @@ router.get('/', async (req, res) => {
            ORDER BY work_order_id, id ASC`,
           [allWorkOrderIds]
         ),
+        partsRequestStatus(allWorkOrderIds, req.workshopId),
       ]);
+      partsRequest = mrn;
       parts.forEach(p => { (partsByWorkOrder[p.work_order_id] ||= []).push(p); });
       items.forEach(i => { (itemsByWorkOrder[i.work_order_id] ||= []).push(i); });
     }
@@ -168,6 +174,9 @@ router.get('/', async (req, res) => {
       ...o,
       parts: partsByWorkOrder[o.id] || [],
       items: itemsByWorkOrder[o.id] || [],
+      // "Parts to request": approved parts and no MRN yet — nobody can be assigned until it is raised.
+      parts_request_needed: !!partsRequest.get(o.id)?.needed,
+      main_job_card_id: partsRequest.get(o.id)?.main_job_card_id || null,
     }));
 
     return res.json({ success: true, data: {
@@ -250,6 +259,8 @@ router.post('/assign', canAssign, async (req, res) => {
 
     // Step 6: the main job card follows the technician, who is told.
     await onTechnicianAssigned({ workOrderId: Number(work_order_id), workshopId: req.workshopId, mechanicId: Number(mechanic_id) });
+    // Its jobs follow the job card's technician (lib/job-tasks.js), so the scan station knows whose they are.
+    await syncJobTasks({ workOrderId: Number(work_order_id), workshopId: req.workshopId, userId: req.user?.id });
 
     // ── Notify: mechanic assigned (SMS + Email + Push to mechanic & customer) ──
     notifyMechanicAssigned({
@@ -498,6 +509,7 @@ router.post('/auto-assign', canAssign, async (req, res) => {
     // Step 6, as the manual path: the main job card follows the technician,
     // who is told (before the e-mail below, so its link names their card).
     await onTechnicianAssigned({ workOrderId: Number(work_order_id), workshopId: req.workshopId, mechanicId: Number(best.id) });
+    await syncJobTasks({ workOrderId: Number(work_order_id), workshopId: req.workshopId, userId: req.user?.id });
 
     // The technician's e-mail (the in-app notice above is not repeated)
     notifyMechanicAssigned({
@@ -641,6 +653,7 @@ router.post('/auto-assign-all', canAssign, async (req, res) => {
 
       // Step 6, as the manual path: the main job card follows the technician, who is told.
       await onTechnicianAssigned({ workOrderId: Number(workOrder.id), workshopId: req.workshopId, mechanicId: Number(best.id) });
+      await syncJobTasks({ workOrderId: Number(workOrder.id), workshopId: req.workshopId, userId: req.user?.id });
       notifyMechanicAssigned({
         order: workOrder, driver: best, tenantId: req.workshopId,
       }).catch(() => {});

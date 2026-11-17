@@ -11,11 +11,20 @@
  *     inspection is completed (409 TECHNICAL_INSPECTION_REQUIRED) — a
  *     quote from an enquiry or for a customer alone has none, so it is
  *     refused too.
- *   - Main (EST-…) and supplementary (SEST-…) estimates: extra work found
- *     later on the same job goes on a supplementary estimate, linked to the
- *     decided main one, at a fixed cost and approved with the customer's
- *     consent (estimate_consents); its approved lines join the same job card.
+ *   - Main (EST-…) and supplementary (SEST-…) estimates: work on the same
+ *     job beyond the main estimate goes on a supplementary estimate, at a
+ *     fixed cost and approved with the customer's consent
+ *     (estimate_consents); its approved lines join the same job card.
  *   - The customer decides several lines at once (POST /:token/decide-bulk).
+ *
+ *  Client feedback (16 Nov 2026, point 7): a supplementary estimate shares
+ *  the technical report's jobs with the customer even when the main
+ *  estimate is empty — so it can be raised as soon as the technical
+ *  inspection is completed, whether or not a main estimate exists or is
+ *  decided (one open at a time). It is linked to the main estimate when
+ *  there is one, else it stands alone; the main estimate can still be
+ *  raised. The form ticks the report's jobs onto it (GET /raise-check
+ *  `report`: each job, and the estimate it is already on).
  * ═══════════════════════════════════════════════════════════════
  */
 import express from 'express';
@@ -293,9 +302,13 @@ function accountTypeForClass(customerClass, subcategory) {
 // The estimate stage follows the technical inspection: an estimate is
 // raised for a work order once its technical inspection (Step 4,
 // routes/technical-inspections.js) is completed. The work order's estimate
-// is its MAIN estimate (EST-…). Extra work found later on the same job goes
-// on a SUPPLEMENTARY estimate (SEST-…), raised once the customer has decided
-// the main one and linked to it (parent_estimate_id). It carries a FIXED
+// is its MAIN estimate (EST-…). Work beyond it on the same job — the
+// technical report's jobs when the main estimate is empty, extra work found
+// later — goes on a SUPPLEMENTARY estimate (SEST-…), raised once the
+// technical inspection is completed (client feedback, 16 Nov 2026: not only
+// after the main estimate is decided; one open at a time) and linked to the
+// main estimate when there is one (parent_estimate_id; else NULL — it
+// stands alone and the main estimate can still be raised). It carries a FIXED
 // COST: its parts are priced by the Store in one part type only, so every
 // line has one firm price — no choice between types, no alternative, nothing
 // "not available" when it goes out — and the customer approves it with their
@@ -373,23 +386,19 @@ async function raiseCheck(wo, workshopId, wanted = null) {
   const { main, openSupplementary } = await jobEstimates(wo.id, workshopId);
   const mainDecided = !!main && DECIDED_STATUSES.includes(main.status);
   const kind = wanted || (mainDecided ? 'supplementary' : 'main');
-  const base = { main, technical, kind };
+  // can_supplementary: a refused main estimate says whether a supplementary one could be raised instead.
+  const base = { main, technical, kind, can_supplementary: !openSupplementary };
   if (kind === 'main') {
     if (main && mainDecided) {
       return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_DECIDED',
-        message: `${main.estimate_number} is this job's main estimate and the customer has decided it. Extra work goes on a supplementary estimate, at a fixed cost.` };
+        message: `${main.estimate_number} is this job's main estimate and the customer has decided it. Further work goes on a supplementary estimate, at a fixed cost.` };
     }
-    if (main) return { ...base, ok: false, status: 409, code: 'ESTIMATE_OPEN', message: `Estimate ${main.estimate_number} is already open for this job — edit that one.` };
+    if (main) return { ...base, ok: false, status: 409, code: 'ESTIMATE_OPEN', message: `Estimate ${main.estimate_number} is already open for this job — edit that one, or raise a supplementary estimate for further work.` };
     return { ...base, ok: true };
   }
-  if (!main) {
-    return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_REQUIRED',
-      message: 'A supplementary estimate follows the main estimate — raise the main estimate for this job first.' };
-  }
-  if (!mainDecided) {
-    return { ...base, ok: false, status: 409, code: 'MAIN_ESTIMATE_NOT_DECIDED',
-      message: `A supplementary estimate is raised once the customer has decided the main estimate ${main.estimate_number} (it is ${String(main.status).replace(/_/g, ' ')}).` };
-  }
+  // A supplementary estimate: once the technical inspection is completed
+  // (above), whether or not the main estimate is raised or decided — but one
+  // open at a time (client feedback, 16 Nov 2026).
   if (openSupplementary) {
     return { ...base, ok: false, status: 409, code: 'SUPPLEMENTARY_OPEN', supplementary: openSupplementary,
       message: `Supplementary estimate ${openSupplementary.estimate_number} is still open for this job — edit that one, or wait for the customer's decision.` };
@@ -397,13 +406,70 @@ async function raiseCheck(wo, workshopId, wanted = null) {
   return { ...base, ok: true };
 }
 
-/** The part type a supplementary estimate is priced in unless the advisor picks another: the one the customer approved most on the main estimate, else the first of its preference. */
-async function defaultFixedType(main) {
+/**
+ * The part type a supplementary estimate is priced in unless the advisor
+ * picks another: the one the customer approved most on the main estimate,
+ * else the first of its preference; with no main estimate, the first the
+ * customer asked for on the work order (`wo.parts_preference`), else Genuine.
+ */
+async function defaultFixedType(main, wo = null) {
+  if (!main) {
+    return String(wo?.parts_preference || '').split(',').map(s => s.trim()).find(c => PART_CATEGORIES.includes(c)) || 'genuine';
+  }
   const [top] = await query(
     `SELECT part_option, COUNT(*) AS n FROM estimate_lines
       WHERE estimate_id = ? AND line_type = 'parts' AND customer_status = 'approved' AND part_option IS NOT NULL
       GROUP BY part_option ORDER BY n DESC LIMIT 1`, [main.id]);
   return top?.part_option || partsPreference(main)[0] || 'genuine';
+}
+
+/** A job's name as the estimate lines group it, for matching: trimmed, one space, any case. */
+const jobMatchKey = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/**
+ * The work order's completed technical report as the estimate form ticks it
+ * (client feedback, 16 Nov 2026): { completed_at, completed_by_name, jobs },
+ * each job a service line { key, job, service_type, labour, hours, parts,
+ * on_estimate } — on_estimate: the estimate of this job that already has it
+ * (a line of it, matched by job name, pending or approved, on an estimate
+ * not rejected or expired; the main one first), so the same job is not
+ * billed twice. `exceptEstimateId`: leave that estimate out (the one being
+ * edited). null when the report is not completed.
+ */
+async function reportJobs(workOrderId, workshopId, { exceptEstimateId = null } = {}) {
+  const [ti] = await query(
+    `SELECT ti.service_lines, ti.completed_at, uc.full_name AS completed_by_name
+       FROM technical_inspections ti LEFT JOIN users uc ON uc.id = ti.completed_by
+      WHERE ti.work_order_id = ? AND ti.workshop_id = ? AND ti.status = 'completed'`, [workOrderId, workshopId]);
+  if (!ti) return null;
+  let lines = [];
+  try { const a = typeof ti.service_lines === 'string' ? JSON.parse(ti.service_lines) : ti.service_lines; lines = Array.isArray(a) ? a : []; } catch { lines = []; }
+  const billed = await query(
+    `SELECT l.job_name, l.description, e.id, e.estimate_number, e.kind, e.status
+       FROM estimate_lines l JOIN service_estimates e ON e.id = l.estimate_id
+      WHERE e.workshop_id = ? AND (e.intake_work_order_id = ? OR e.work_order_id = ?) AND e.id <> ?
+        AND e.status NOT IN ('rejected','expired') AND l.line_type IN ('labour','parts')
+        AND l.customer_status IN ('pending','approved')
+      ORDER BY e.kind = 'supplementary', e.id`, [workshopId, workOrderId, workOrderId, Number(exceptEstimateId) || 0]);
+  const on = new Map();
+  for (const b of billed) {
+    const k = jobMatchKey(b.job_name || b.description);
+    if (k && !on.has(k)) on.set(k, { id: b.id, estimate_number: b.estimate_number, kind: b.kind || 'main', status: b.status });
+  }
+  const jobs = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => String(l?.job || '').trim())
+    .map(({ l, i }) => ({
+      key: i,
+      job: String(l.job).trim(),
+      service_type: l.service_type || null,
+      labour: l.labour ? String(l.labour) : null,
+      hours: Number(l.hours) > 0 ? Number(l.hours) : null,
+      parts: (Array.isArray(l.parts) ? l.parts : []).filter(p => String(p?.description || '').trim())
+        .map(p => ({ description: String(p.description).trim(), part_number: p.part_number || null, quantity: Number(p.quantity) > 0 ? Number(p.quantity) : 1 })),
+      on_estimate: on.get(jobMatchKey(l.job)) || null,
+    }));
+  return { completed_at: ti.completed_at, completed_by_name: ti.completed_by_name || null, jobs };
 }
 
 /** estimate_consents.line_ids (JSON) as a list of ids. */
@@ -924,6 +990,7 @@ async function settleEstimate({ estimateId, workshopId, actingUserId = null }) {
 async function notifyEstimateOutcome({ estimateId, workshopId, outcome, workOrderId, wo_number, addedToJob = false, jobCardNumber = null }) {
   const [estimate] = await query(
     `SELECT e.estimate_number, e.kind, e.customer_name, e.advisor_id, e.created_by, e.vehicle_plate, e.intake_work_order_id,
+            e.parent_estimate_id, iwo.customer_approved_at AS job_approved_at,
             c.email AS customer_email, iwo.work_order_number AS intake_number
        FROM service_estimates e LEFT JOIN customers c ON c.id = e.customer_id
        LEFT JOIN work_orders iwo ON iwo.id = e.intake_work_order_id
@@ -952,7 +1019,10 @@ async function notifyEstimateOutcome({ estimateId, workshopId, outcome, workOrde
       },
       rejected: {
         title: `Supplementary estimate ${n} rejected — the extra work will not be done`,
-        body: `${who} rejected the additional work. The approved work on ${job} carries on as before.`,
+        // One raised on its own (no main estimate, nothing agreed yet on the job) has no approved work to carry on with.
+        body: estimate.parent_estimate_id || estimate.job_approved_at
+          ? `${who} rejected the additional work. The approved work on ${job} carries on as before.`
+          : `${who} rejected the additional work on ${job}. It will not be carried out; the job stays open for its main estimate.`,
         type: 'warning', icon: '⚠️',
       },
     }[outcome];
@@ -1131,7 +1201,11 @@ router.get('/', async (req, res) => {
     const rows = await query(
       `SELECT e.*, c.full_name AS customer_full_name, c.customer_class, v.plate_number, v.make, v.model,
               pe.estimate_number AS parent_estimate_number, pe.status AS parent_status,
-              (SELECT COUNT(*) FROM service_estimates s WHERE s.parent_estimate_id = e.id) AS supplementary_count,
+              -- A main estimate's supplementary ones: linked to it, or raised on its job on their own.
+              (SELECT COUNT(*) FROM service_estimates s
+                WHERE s.workshop_id = e.workshop_id AND s.kind = 'supplementary'
+                  AND (s.parent_estimate_id = e.id OR (s.parent_estimate_id IS NULL AND e.kind <> 'supplementary'
+                       AND e.intake_work_order_id IS NOT NULL AND s.intake_work_order_id = e.intake_work_order_id))) AS supplementary_count,
               ${NEEDS_APPROVAL} AS needs_internal_approval,
               (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id) AS line_count,
               (SELECT COUNT(*) FROM estimate_lines l WHERE l.estimate_id = e.id AND l.customer_status = 'approved') AS approved_count,
@@ -1163,15 +1237,19 @@ router.get('/', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // GET /api/estimates/raise-check?work_order_id=&kind= — can an estimate be
 // raised for this work order now, and which kind: { ok, kind, code, message,
-// main, technical_inspection, fixed_type }. The New Estimate form asks first,
-// so it says up front what POST / would refuse (raiseCheck).
+// main, technical_inspection, fixed_type, can_supplementary, report }. The
+// New Estimate form asks first, so it says up front what POST / would
+// refuse (raiseCheck). report (when it can be raised): the technical
+// report's jobs, each with the estimate already carrying it (reportJobs) —
+// the main estimate is pre-filled with the others, a supplementary one
+// ticks them.
 // ══════════════════════════════════════════════════════════════
 router.get('/raise-check', async (req, res) => {
   try {
     const woId = Number(req.query.work_order_id);
     if (!Number.isInteger(woId) || woId <= 0) return res.status(400).json({ success: false, message: 'work_order_id is required' });
     const wanted = ['main', 'supplementary'].includes(req.query.kind) ? req.query.kind : null;
-    const [wo] = await query('SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ?', [woId, req.workshopId]);
+    const [wo] = await query('SELECT id, work_order_number, status, parts_preference FROM work_orders WHERE id = ? AND workshop_id = ?', [woId, req.workshopId]);
     if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
     const r = await raiseCheck(wo, req.workshopId, wanted);
     const kind = r.kind || wanted || 'main';
@@ -1183,8 +1261,11 @@ router.get('/raise-check', async (req, res) => {
         technical_inspection: r.technical || r.technical_inspection || null,
         main: r.main ? { id: r.main.id, estimate_number: r.main.estimate_number, status: r.main.status, preference: partsPreference(r.main) } : null,
         open_supplementary: r.supplementary ? { id: r.supplementary.id, estimate_number: r.supplementary.estimate_number, status: r.supplementary.status } : null,
+        // A main estimate refused (one is open or decided): could a supplementary one be raised instead?
+        can_supplementary: r.can_supplementary === undefined ? null : !!r.can_supplementary,
         // The type a supplementary estimate is priced in unless the advisor picks another.
-        fixed_type: kind === 'supplementary' && r.main ? await defaultFixedType(r.main) : null,
+        fixed_type: kind === 'supplementary' && r.ok ? await defaultFixedType(r.main, wo) : null,
+        report: r.ok ? await reportJobs(wo.id, req.workshopId) : null,
       },
     });
   } catch (err) {
@@ -1196,9 +1277,10 @@ router.get('/raise-check', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // GET /api/estimates/ready-jobs — the open work orders an estimate can be
 // raised for now (their technical inspection completed): a main estimate
-// when they have none, a supplementary one when the customer has decided
-// the main estimate and no supplementary one is open. For the New Estimate
-// form opened without a work order.
+// when they have none, a supplementary one when they have their main
+// estimate (decided or not, client feedback 16 Nov 2026) and no
+// supplementary one is open. For the New Estimate form opened without a
+// work order.
 // ══════════════════════════════════════════════════════════════
 router.get('/ready-jobs', requireCapability('estimate.raise'), async (req, res) => {
   try {
@@ -1218,7 +1300,7 @@ router.get('/ready-jobs', requireCapability('estimate.raise'), async (req, res) 
         ORDER BY ti.completed_at DESC LIMIT 200`, [req.workshopId]);
     const jobs = [];
     for (const r of rows) {
-      const kind = !r.main_id ? 'main' : DECIDED_STATUSES.includes(r.main_status) && !Number(r.open_supplementary) ? 'supplementary' : null;
+      const kind = !r.main_id ? 'main' : !Number(r.open_supplementary) ? 'supplementary' : null;
       if (!kind) continue;
       jobs.push({
         id: r.id, work_order_number: r.work_order_number, status: r.status, customer_id: r.customer_id, customer_name: r.customer_name,
@@ -1272,24 +1354,31 @@ router.get('/:id', async (req, res) => {
     const supplementary = isSupplementary(e);
     const [parent] = supplementary && e.parent_estimate_id
       ? await query('SELECT id, estimate_number, status FROM service_estimates WHERE id = ? AND workshop_id = ?', [e.parent_estimate_id, req.workshopId]) : [];
+    // A main estimate's supplementary ones: linked to it, or raised on its job on their own.
     const supplementaries = supplementary ? [] : await query(
-      `SELECT id, estimate_number, status, total_amount, created_at FROM service_estimates
-        WHERE parent_estimate_id = ? AND workshop_id = ? ORDER BY id`, [e.id, req.workshopId]);
+      `SELECT id, estimate_number, status, total_amount, created_at, parent_estimate_id FROM service_estimates
+        WHERE workshop_id = ? AND kind = 'supplementary'
+          AND (parent_estimate_id = ? OR (parent_estimate_id IS NULL AND ? IS NOT NULL AND intake_work_order_id = ?))
+        ORDER BY id`, [req.workshopId, e.id, e.intake_work_order_id, e.intake_work_order_id]);
     const consents = supplementary ? await query(
       `SELECT ec.id, ec.line_ids, ec.amount, ec.consent_text, ec.consent_name, ec.channel, ec.ip_address, ec.created_at,
               u.full_name AS recorded_by_name
          FROM estimate_consents ec LEFT JOIN users u ON u.id = ec.recorded_by
         WHERE ec.estimate_id = ? ORDER BY ec.id`, [e.id]) : [];
-    // A main estimate the customer has decided: can its supplementary one be raised now?
+    // A main estimate (decided or not — client feedback, 16 Nov 2026): can a supplementary one be raised now?
     let raiseSupplementary = null;
     const jobId = e.intake_work_order_id || e.work_order_id;
-    if (!supplementary && jobId && DECIDED_STATUSES.includes(e.status)) {
+    if (!supplementary && jobId && !['rejected', 'expired'].includes(e.status)) {
       const [job] = await query('SELECT id, work_order_number, status FROM work_orders WHERE id = ? AND workshop_id = ?', [jobId, req.workshopId]);
       if (job) {
         const r = await raiseCheck(job, req.workshopId, 'supplementary');
         raiseSupplementary = { ok: !!r.ok && r.main?.id === e.id, code: r.code || null, message: r.message || null, work_order_id: job.id };
       }
     }
+    // A supplementary estimate still open to edit: the technical report's
+    // jobs for its form to tick (reportJobs), this estimate left out.
+    const report = supplementary && jobId && OPEN_STATUSES.includes(e.status) && !e.work_order_id
+      ? await reportJobs(jobId, req.workshopId, { exceptEstimateId: e.id }) : null;
     res.json({
       success: true,
       estimate: {
@@ -1310,6 +1399,7 @@ router.get('/:id', async (req, res) => {
       supplementaries,
       consents: consents.map(c => ({ ...c, line_ids: parseIds(c.line_ids) })),
       raise_supplementary: raiseSupplementary,
+      report,
     });
   } catch (err) {
     console.error('GET /estimates/:id error:', err);
@@ -1330,9 +1420,13 @@ router.get('/:id', async (req, res) => {
 // inspection is completed (409 TECHNICAL_INSPECTION_REQUIRED, client
 // decision 3 Nov 2026). A quote from an enquiry or for a customer alone has
 // no technical inspection, so it is refused the same way. One main estimate
-// per job; once the customer has decided it, extra work is a supplementary
-// estimate (raiseCheck: MAIN_ESTIMATE_DECIDED, MAIN_ESTIMATE_NOT_DECIDED,
-// SUPPLEMENTARY_OPEN …), linked to it, its parts in one type: a fixed cost.
+// per job (raiseCheck: MAIN_ESTIMATE_DECIDED, ESTIMATE_OPEN …). A
+// supplementary estimate — the technical report's jobs beyond the main
+// estimate, or extra work found later — can be raised once the technical
+// inspection is completed, whether or not the main estimate is raised or
+// decided (client feedback, 16 Nov 2026), one open at a time
+// (SUPPLEMENTARY_OPEN); linked to the main estimate when there is one (else
+// on its own), its parts in one type: a fixed cost.
 // ══════════════════════════════════════════════════════════════
 router.post('/', requireCapability('estimate.raise'), async (req, res) => {
   try {
@@ -1387,21 +1481,24 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
         ...(check.main ? { main_estimate: { id: check.main.id, estimate_number: check.main.estimate_number, status: check.main.status } } : {}),
       });
     }
-    const main = kind === 'supplementary' ? check.main : null;
+    const supplementary = kind === 'supplementary';
+    // The main estimate a supplementary one is linked to — null when it is raised on its own.
+    const main = supplementary ? check.main : null;
     customer_id = customer_id || intakeWo.customer_id;
     vehicle_id = vehicle_id || intakeWo.vehicle_id;
     if (!customer_id && intakeWo.customer_name) req.body.customer_name = intakeWo.customer_name;
 
     // A supplementary estimate's fixed cost: its parts are priced in one type
-    // — as sent, else the type the customer took on the main estimate — and
-    // it is on the main estimate's account.
-    if (main) {
+    // — as sent, else the type the customer took on the main estimate (with
+    // none, the first they asked for on the work order) — and it is on the
+    // main estimate's account (with none, the job's, as below).
+    if (supplementary) {
       if (pref && pref.length !== 1) {
         return res.status(400).json({ success: false, code: 'FIXED_COST_ONE_TYPE',
           message: 'A supplementary estimate has a fixed cost: choose one part type (Genuine, After-Market or Used) for its parts.' });
       }
-      if (!pref) pref = [await defaultFixedType(main)];
-      customer_type = main.customer_type || customer_type;
+      if (!pref) pref = [await defaultFixedType(main, intakeWo)];
+      if (main) customer_type = main.customer_type || customer_type;
     }
 
     if (!customer_id && !req.body.customer_name) {
@@ -1463,7 +1560,7 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
           [req.workshopId, estimate_number, kind, main?.id || null, receiving_form_id || null, customer_id || null,
            vehicle_id || null, customerName, customer_type, vehiclePlate, vehicleVin,
            advisor_id || req.user?.id, valid_until || null, parseFloat(vat_rate),
-           intakeWo.id, main ? null : (enquiry?.id || null), pref.join(','), req.user?.id]
+           intakeWo.id, supplementary ? null : (enquiry?.id || null), pref.join(','), req.user?.id]
         );
       } catch (e) {
         if (e.code !== 'ER_DUP_ENTRY' || !/estimate_number/.test(e.message)) throw e;
@@ -1476,7 +1573,7 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     const estimateId = result.insertId;
     await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user, pref });
     const totals = await recalcEstimateTotals(estimateId);
-    if (enquiry && !main) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
+    if (enquiry && !supplementary) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
 
     // Step 5: the Storekeeper prices the parts.
     const savedLines = await query('SELECT * FROM estimate_lines WHERE estimate_id = ?', [estimateId]);

@@ -58,11 +58,13 @@ const SUBS_BY_CLASS = {
 };
 const ALL_SUBS = ['fleet', 'insurance', 'asset', 'staff', 'walkin'];
 
-// "Include the entity names under Customer Type" (client point 12): an
-// internal account is one of the group's own entities (AMAN TAXI, …), so its
-// customer type reads as that entity, not Retail / Corporate / Other. The
-// client's list of entity names is still to come.
-const entityOf = c => (c?.customer_class === 'internal' ? String(c.company_name || c.full_name || '').trim() || null : null);
+// "Include the entity names under Customer Type" (client point 12, again in
+// the feedback of 16 Nov 2026): an internal account belongs to one of the
+// group's entities (Aman Taxi, Aman Public Transport, … — GET
+// /customers/entities), chosen under Customer Type, and its customer type
+// reads as that entity. Older internal rows not linked yet show their name.
+const entityOf = c => (c?.customer_class === 'internal'
+  ? (c.entity_name || String(c.company_name || c.full_name || '').trim() || null) : null);
 
 // The customer's enquiries in the drawer (GET /customers/:id → enquiries).
 const ENQUIRY_STATUS = {
@@ -87,7 +89,7 @@ const emptyForm = {
   credit_limit:'', notes:'', is_active:true,
   // New customers start as External → Walk-in, the same default the server
   // applies when nothing is sent; the form makes it visible and changeable.
-  customer_class:'external', customer_subcategory:'walkin',
+  customer_class:'external', customer_subcategory:'walkin', entity_id:'',
 };
 const EMPTY_VEHICLE = { make:'', model:'', year:'', plate_number:'', plate_emirate:'', vehicle_type:'', vin:'', color:'', mileage:'', fuel_type:'petrol', transmission:'automatic' };
 // The values the vehicles table accepts (an 'lpg' option could never be saved).
@@ -393,6 +395,10 @@ export default function Customers() {
   const [typeFilter,    setTypeFilter]    = useState('');
   const [classFilter,   setClassFilter]   = useState('');
   const [subFilter,     setSubFilter]     = useState('');
+  // The group's entities (internal accounts belong to one), and adding one (managers).
+  const [entities,      setEntities]      = useState([]);
+  const [entityFilter,  setEntityFilter]  = useState('');
+  const [newEntity,     setNewEntity]     = useState(null); // null = not adding; '' / text = the name being typed
 
   const [statusFilter,  setStatusFilter]  = useState('');
   const [showForm,      setShowForm]      = useState(false);
@@ -480,6 +486,26 @@ export default function Customers() {
   }, []);
   useEffect(() => { fetchStats(); }, [fetchStats]);
 
+  const fetchEntities = useCallback(async () => {
+    const r = await api.get('/customers/entities').catch(() => null);
+    if (r?.success) setEntities(r.data || []);
+  }, []);
+  useEffect(() => { fetchEntities(); }, [fetchEntities]);
+
+  const addEntity = async () => {
+    const name = String(newEntity || '').trim();
+    if (name.length < 2) return;
+    const r = await api.post('/customers/entities', { name });
+    if (r?.success || r?.code === 'ENTITY_EXISTS') {
+      const added = r.data;
+      await fetchEntities();
+      if (added?.id) setForm(f => ({ ...f, entity_id: added.id }));
+      setNewEntity(null);
+    } else {
+      showToast(r?.message || t('customers.entity.add_failed', 'Could not add the entity.'), 'error');
+    }
+  };
+
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({ page, limit: LIMIT });
@@ -487,6 +513,7 @@ export default function Customers() {
     if (typeFilter)    params.set('type',    typeFilter);
     if (classFilter)   params.set('customer_class', classFilter);
     if (subFilter)     params.set('customer_subcategory', subFilter);
+    if (entityFilter)  params.set('entity_id', entityFilter);
     const res = await api.get(`/customers?${params}`);
     if (res.success) {
       let data = res.data || [];
@@ -496,7 +523,7 @@ export default function Customers() {
       setTotal(res.pagination?.total || data.length);
     }
     setLoading(false);
-  }, [search, typeFilter, classFilter, subFilter, statusFilter, page]);
+  }, [search, typeFilter, classFilter, subFilter, entityFilter, statusFilter, page]);
 
   useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
 
@@ -540,7 +567,9 @@ export default function Customers() {
     setPhoneCode(pCode); setPhoneAltCode(paCode);
     setForm({ ...emptyForm, ...c, phone: pNum, phone_alt: paNum,
       customer_class: c.customer_class || 'external',
-      customer_subcategory: c.customer_subcategory || '' });
+      customer_subcategory: c.customer_subcategory || '',
+      entity_id: c.entity_id || '' });
+    setNewEntity(null);
     setFormError(''); setStep(1);
     setShowForm(true);
   };
@@ -565,6 +594,10 @@ export default function Customers() {
       setFormError(t('customers.validation.internal_sub_pick', 'Choose Fleet, Insurance, Asset or Staff for an internal customer.'));
       return false;
     }
+    if (step === 2 && form.customer_class === 'internal' && entities.length && !form.entity_id) {
+      setFormError(t('customers.validation.entity_pick', 'Choose the entity this internal customer belongs to.'));
+      return false;
+    }
     setFormError('');
     return true;
   };
@@ -585,7 +618,10 @@ export default function Customers() {
       customer_class: form.customer_class || 'external',
       // '' means "not set": sent as null, which the server stores as no subcategory.
       customer_subcategory: form.customer_subcategory || null,
+      // The entity is an internal account's only.
+      entity_id: (form.customer_class || 'external') === 'internal' && form.entity_id ? Number(form.entity_id) : null,
     };
+    delete payload.entity_name;
     // The optional vehicle: once started, the details the client requires
     // (2 Nov 2026) — VIN, plate number, emirate and model year — must be there.
     const v = vehicleForm;
@@ -601,6 +637,11 @@ export default function Customers() {
     if (payload.customer_class === 'internal' && !payload.customer_subcategory) {
       setSaving(false); setStep(2);
       setFormError(t('customers.validation.internal_sub_pick', 'Choose Fleet, Insurance, Asset or Staff for an internal customer.'));
+      return;
+    }
+    if (payload.customer_class === 'internal' && entities.length && !payload.entity_id) {
+      setSaving(false); setStep(2);
+      setFormError(t('customers.validation.entity_pick', 'Choose the entity this internal customer belongs to.'));
       return;
     }
     if (selected && !manager) {
@@ -676,6 +717,7 @@ export default function Customers() {
     if (typeFilter)    params.set('type',    typeFilter);
     if (classFilter)   params.set('customer_class', classFilter);
     if (subFilter)     params.set('customer_subcategory', subFilter);
+    if (entityFilter)  params.set('entity_id', entityFilter);
     const res = await api.get(`/customers?${params}`);
     setExporting(false);
     if (!res.success) { showToast(t('customers.toast.export_failed'), 'error'); return; }
@@ -699,8 +741,8 @@ export default function Customers() {
     a.click();
   };
 
-  const clearFilters = () => { setSearch(''); setTypeFilter(''); setClassFilter(''); setSubFilter(''); setStatusFilter(''); setPage(1); };
-  const hasFilters   = search || typeFilter || classFilter || subFilter || statusFilter;
+  const clearFilters = () => { setSearch(''); setTypeFilter(''); setClassFilter(''); setSubFilter(''); setEntityFilter(''); setStatusFilter(''); setPage(1); };
+  const hasFilters   = search || typeFilter || classFilter || subFilter || entityFilter || statusFilter;
   const CL = classLabels(t);
   // Subcategories that exist for the chosen class (all four when no class is picked).
   const subFilterOptions = classFilter ? SUBS_BY_CLASS[classFilter] : ALL_SUBS;
@@ -775,6 +817,7 @@ export default function Customers() {
             const v = e.target.value;
             setClassFilter(v);
             if (v && subFilter && !SUBS_BY_CLASS[v].includes(subFilter)) setSubFilter('');
+            if (v === 'external') setEntityFilter('');
             setPage(1);
           }}
           style={{ ...INPUT, width:150 }}>
@@ -788,6 +831,14 @@ export default function Customers() {
           <option value="">{t('customers.class.all_subs', 'All subcategories')}</option>
           {subFilterOptions.map(sv => <option key={sv} value={sv}>{CL.sub[sv]}</option>)}
         </select>
+        {classFilter !== 'external' && entities.length > 0 && (
+          <select value={entityFilter} aria-label={t('customers.entity.filter', 'Entity')}
+            onChange={e=>{ setEntityFilter(e.target.value); if (e.target.value) setClassFilter('internal'); setPage(1); }}
+            style={{ ...INPUT, width:190 }}>
+            <option value="">{t('customers.entity.all', 'All entities')}</option>
+            {entities.map(en => <option key={en.id} value={en.id}>{en.name}</option>)}
+          </select>
+        )}
 
         <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
           style={{ ...INPUT, width:128 }}>
@@ -1439,13 +1490,56 @@ export default function Customers() {
                           Customer Type <span style={{ color:'#f97316' }}>*</span>
                         </span>
                       </div>
-                      {/* An internal account is listed under Customer Type as its entity (client point 12). */}
-                      {form.customer_class === 'internal' && (
-                        <div style={{ fontSize:12, color:CLASS_META.internal.color, background:CLASS_META.internal.bg, borderRadius:10, padding:'8px 12px', marginBottom:10 }}>
-                          {t('customers.class.entity_hint', 'Internal account: the customer list shows its entity as the Customer Type — {{entity}}.',
-                            { entity: String(form.company_name || form.full_name || '').trim() || '—' })}
-                        </div>
-                      )}
+                      {/* An internal account's Customer Type is the group entity it belongs to
+                          (client point 12, again in the feedback of 16 Nov 2026); an external
+                          customer picks Retail / Corporate / Insurance / Fleet as before. */}
+                      {form.customer_class === 'internal' ? (
+                        <>
+                          <div style={{ fontSize:12, color:CLASS_META.internal.color, background:CLASS_META.internal.bg, borderRadius:10, padding:'8px 12px', marginBottom:10 }}>
+                            {t('customers.entity.type_hint', 'Internal account: its Customer Type is the group entity it belongs to.')}
+                          </div>
+                          <div role="radiogroup" aria-label={t('customers.entity.label_type', 'Customer type — entity')} style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                            {entities.map(en => {
+                              const on = String(form.entity_id || '') === String(en.id);
+                              // Moving an account to another entity is a manager's change.
+                              const locked = !manager && !!selected?.entity_id;
+                              return (
+                                <button type="button" key={en.id} role="radio" aria-checked={on} disabled={locked && !on}
+                                  onClick={() => !locked && set('entity_id', en.id)}
+                                  style={{ padding:'8px 14px', borderRadius:999, cursor: locked ? 'not-allowed' : 'pointer', fontWeight:700, fontSize:13, opacity: locked && !on ? 0.5 : 1,
+                                    border: on ? `2px solid ${CLASS_META.internal.color}` : '2px solid #e2e8f0',
+                                    background: on ? CLASS_META.internal.bg : '#fff', color: on ? CLASS_META.internal.color : '#475569',
+                                    display:'inline-flex', alignItems:'center', gap:6 }}>
+                                  {on && <CheckCircle width={13} height={13} />} {en.name}
+                                </button>
+                              );
+                            })}
+                            {manager && (newEntity === null ? (
+                              <button type="button" onClick={() => setNewEntity('')}
+                                style={{ padding:'8px 14px', borderRadius:999, cursor:'pointer', fontWeight:700, fontSize:13,
+                                  border:'2px dashed #cbd5e1', background:'#fff', color:'#475569' }}>
+                                + {t('customers.entity.add', 'Add entity')}
+                              </button>
+                            ) : (
+                              <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
+                                <input autoFocus value={newEntity} maxLength={150}
+                                  placeholder={t('customers.entity.add_placeholder', 'Entity name')}
+                                  onChange={e => setNewEntity(e.target.value)}
+                                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addEntity(); } if (e.key === 'Escape') setNewEntity(null); }}
+                                  style={{ ...INPUT, width:220, padding:'8px 11px' }} />
+                                <button type="button" onClick={addEntity} disabled={String(newEntity).trim().length < 2}
+                                  style={{ padding:'8px 12px', borderRadius:8, border:'none', background:CLASS_META.internal.color, color:'#fff', fontWeight:700, fontSize:12.5, cursor:'pointer' }}>
+                                  {t('customers.entity.add_btn', 'Add')}
+                                </button>
+                                <button type="button" onClick={() => setNewEntity(null)} aria-label={t('common.cancel', 'Cancel')}
+                                  style={{ padding:'8px 10px', borderRadius:8, border:'1px solid #e2e8f0', background:'#fff', color:'#64748b', fontWeight:700, fontSize:12.5, cursor:'pointer' }}>
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
                       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
                         {Object.entries(TYPE_META).map(([typeKey, meta]) => {
                           const isSelected = form.type === typeKey;
@@ -1475,6 +1569,7 @@ export default function Customers() {
                           );
                         })}
                       </div>
+                      )}
                     </div>
 
                     {/* Company / Organisation name — shown for non-individual types */}

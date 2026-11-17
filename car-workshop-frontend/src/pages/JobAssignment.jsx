@@ -4,7 +4,7 @@ import {
   Refresh, Check, Xmark, WarningTriangle, Clock, Calendar, User, Phone, ArrowRight,
   Search, ScanBarcode, QrCode, Camera, NavArrowDown, Filter as FilterIcon,
   Eye, Copy, Printer, OpenNewWindow, Prohibition, Download, Settings,
-  Wrench, Car, Group, PasteClipboard, Package, MapPin, Notes,
+  Wrench, Car, Group, PasteClipboard, Package, MapPin, Notes, Lock,
 } from 'iconoir-react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
 import api from '../lib/api';
@@ -19,6 +19,8 @@ import { customerStatusUrl, extractStatusToken } from '../lib/customerLink';
 import { buildStatusMessage, shareViaWhatsApp } from '../lib/whatsapp';
 import { hasModule, MODULES } from '../lib/modules';
 import { canDo } from '../lib/permissions';
+import RequestPartsDialog from '../components/workflow/RequestPartsDialog';
+import './JobAssignment.css';
 
 const PART_STATUS_STYLE = {
   ordered:   { bg: '#fffbeb', color: '#f59e0b', label: 'Ordered' },
@@ -472,6 +474,14 @@ export default function JobAssignment() {
   // else). Without it the board is read-only: no select, assign, reassign,
   // unassign, auto-assign or drag.
   const canAssign = canDo(user, 'job.assign');
+  // Point 5 (client feedback, 16 Nov 2026): the parts are requested from the
+  // Store (MRN) here too. A job card whose approved work has parts and no MRN
+  // yet ("Parts to request", backend lib/parts-request.js) cannot be assigned
+  // — select, auto-assign and drag wait for it.
+  const canRequestParts = canDo(user, 'parts.request');
+  const assignable = o => !o.parts_request_needed;
+  const [partsFor, setPartsFor] = useState(null); // the job card whose parts are being requested
+  const [notice, setNotice] = useState('');
   const dialCode = getPhoneCodeForCountry(workshop?.country);
   const [board, setBoard]                 = useState({ unassigned: [], active_deliveries: [], available_mechanics: [], all_mechanics: [] });
   const [loading, setLoading]             = useState(true);
@@ -572,6 +582,12 @@ export default function JobAssignment() {
     // which is *before* their `const` initializers in render order.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(''), 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   /* ── Auto-dismiss errors after 5s ── */
   useEffect(() => {
@@ -906,7 +922,7 @@ export default function JobAssignment() {
     const hit = all.find(o => [o.work_order_number, o.main_job_card_number, o.service_status_token, o.vehicle_plate_number, o.vehicle_vin]
       .some(v => v && String(v).toLowerCase() === code));
     if (hit) {
-      if (canAssign) setSelectedWorkOrders(new Set([hit.id]));
+      if (canAssign && assignable(hit)) setSelectedWorkOrders(new Set([hit.id]));
       setSearchQuery(String(hit.work_order_number || hit.id));
     } else {
       setSearchQuery(code);
@@ -995,7 +1011,8 @@ export default function JobAssignment() {
   // fee, weight, distance or ETA.
   const OrderCard = ({ order, showUnassign }) => {
     const tone = woTone(order);
-    const canDrag = canAssign && !showUnassign;
+    const needsParts = !!order.parts_request_needed;
+    const canDrag = canAssign && !showUnassign && !needsParts;
     const isSelected = selectedWorkOrders.has(order.id);
     const lines = order.items || [];
     const work = lines.length ? lines.map(i => i.name).filter(Boolean) : [];
@@ -1066,6 +1083,21 @@ export default function JobAssignment() {
             )}
           </div>
 
+          {/* Parts to request (MRN) before anyone can be assigned */}
+          {needsParts && (
+            <div className="ja-parts" id={`ja-parts-${order.id}`}>
+              <Package width={14} height={14} aria-hidden="true" />
+              <span><b>{t('jobAssignment.parts_to_request', 'Parts to request')}</b> — {showUnassign
+                ? t('jobAssignment.parts_first_assigned', 'request them from the Store (MRN) before the technician is changed.')
+                : t('jobAssignment.parts_first', 'request them from the Store (MRN), then assign the technician.')}</span>
+              {canRequestParts && (
+                <button type="button" className="ja-parts-btn" onClick={(e) => { e.stopPropagation(); setPartsFor(order); }}>
+                  {t('jobAssignment.request_parts', 'Request parts')}
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Action buttons */}
           <div className="job-assignment-actions" style={{ flexWrap: 'wrap' }}>
             <button
@@ -1082,7 +1114,13 @@ export default function JobAssignment() {
             >
               <Eye width={13} height={13} />
             </button>
-            {canAssign && !showUnassign && (
+            {canAssign && !showUnassign && needsParts && (
+              <button type="button" className="btn-sm btn-sm-outline ja-blocked" disabled aria-describedby={`ja-parts-${order.id}`}
+                title={t('jobAssignment.assign_after_parts', 'Assign opens once the parts are requested (MRN).')}>
+                <Lock width={13} height={13} /> {t('jobAssignment.assign_blocked', 'Assign')}
+              </button>
+            )}
+            {canAssign && !showUnassign && !needsParts && (
               <>
                 <button
                   className={`btn-sm ${isSelected ? 'btn-sm-primary' : 'btn-sm-outline'}`}
@@ -1116,12 +1154,16 @@ export default function JobAssignment() {
               <>
                 <button
                   className="btn-sm"
+                  disabled={needsParts}
+                  aria-describedby={needsParts ? `ja-parts-${order.id}` : undefined}
+                  title={needsParts ? t('jobAssignment.assign_after_parts', 'Assign opens once the parts are requested (MRN).') : undefined}
                   onClick={() => { setReassigningOrder(reassigningOrder === order.id ? null : order.id); setReassignMechanic(''); }}
                   style={{
+                    opacity: needsParts ? 0.45 : 1,
                     background: reassigningOrder === order.id ? '#e0e7ff' : 'linear-gradient(135deg, #3b82f6, #2563eb)',
                     color: reassigningOrder === order.id ? '#3b82f6' : '#fff',
                     border: 'none', fontWeight: 700, fontSize: 12, borderRadius: 8,
-                    minHeight: 44, padding: '6px 12px', cursor: 'pointer',
+                    minHeight: 44, padding: '6px 12px', cursor: needsParts ? 'not-allowed' : 'pointer',
                     display: 'flex', alignItems: 'center', gap: 5, transition: 'all .2s',
                   }}
                 >
@@ -1478,6 +1520,20 @@ export default function JobAssignment() {
 
       {/* ═══════════════ WORK ORDERS BOARD ═══════════════ */}
       <>
+      {notice && (
+        <div className="ja-notice" role="status">
+          <Check width={15} height={15} /> <span>{notice}</span>
+          <button type="button" onClick={() => setNotice('')} aria-label={t('jobAssignment.dismiss', 'Dismiss')}><Xmark width={14} height={14} /></button>
+        </div>
+      )}
+      {partsFor && (
+        <RequestPartsDialog workOrderId={partsFor.id} onClose={() => setPartsFor(null)}
+          onDone={res => {
+            setNotice(t('jobAssignment.parts_sent', '{{jc}}: requisition {{req}} sent to the Store — the job card can be assigned now.', { jc: jcNo(partsFor), req: res.req_number }));
+            setPartsFor(null);
+            fetchBoard();
+          }} />
+      )}
       {error && (
         <div className="alert-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1500,7 +1556,7 @@ export default function JobAssignment() {
             <strong>{selectedWorkOrders.size}</strong> {selectedWorkOrders.size === 1 ? t('job-assignment.order_selected_suffix') : t('job-assignment.orders_selected', 'orders selected')}
           </div>
           <button className="btn-sm btn-sm-outline" style={{ fontSize: 11, padding: '4px 10px' }}
-            onClick={() => { const ids = (filteredUnassigned || []).map(o => o.id); setSelectedWorkOrders(new Set(ids)); }}>
+            onClick={() => { const ids = (filteredUnassigned || []).filter(assignable).map(o => o.id); setSelectedWorkOrders(new Set(ids)); }}>
             {t('job-assignment.select_all', 'Select All')}
           </button>
           <MechanicDropdown
@@ -1538,7 +1594,7 @@ export default function JobAssignment() {
                 <>
                 <button
                   onClick={() => {
-                    const allIds = filteredUnassigned.map(o => o.id);
+                    const allIds = filteredUnassigned.filter(assignable).map(o => o.id);
                     const allSelected = allIds.every(id => selectedWorkOrders.has(id));
                     setSelectedWorkOrders(allSelected ? new Set() : new Set(allIds));
                   }}
@@ -1551,7 +1607,7 @@ export default function JobAssignment() {
                   }}
                 >
                   <Check width={12} height={12} />
-                  {filteredUnassigned.length > 0 && filteredUnassigned.every(o => selectedWorkOrders.has(o.id))
+                  {filteredUnassigned.some(assignable) && filteredUnassigned.filter(assignable).every(o => selectedWorkOrders.has(o.id))
                     ? t('job-assignment.deselect_all', 'Deselect All')
                     : t('job-assignment.select_all', 'Select All')}
                 </button>

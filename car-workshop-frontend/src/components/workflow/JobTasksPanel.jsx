@@ -5,16 +5,22 @@
  *
  * Everything comes from GET /api/job-tasks?work_order_id= (backend
  * lib/job-tasks.js): one row per approved job / service, kept in step with
- * the approved work, with its technician, status and times. The technician
- * scans the job's barcode on the printed job card at the scan station to
- * start and end it; the Team Leader / Supervisor / Foreman (job.assign)
- * assigns each job here — only technicians qualified for its service type
- * are offered; a manager may assign someone else with a reason.
+ * the approved work, with its technician, status and times, and the
+ * technicians to offer with their availability (client feedback, 16 Nov
+ * 2026, point 4). The technician scans the job's barcode on the printed job
+ * card at the scan station to start and end it; the Team Leader /
+ * Supervisor / Foreman (job.assign) assigns each job here with the
+ * technician picker — technicians qualified for its service type first; a
+ * manager may assign someone else with a reason. When the parts have not
+ * been requested yet (MRN, point 18) the panel says so and offers Request
+ * parts (point 5); the Team Board assigns every job of a job in one go.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Printer, User, WarningTriangle, Undo, Refresh } from 'iconoir-react';
+import { Printer, User, WarningTriangle, Undo, Refresh, Package } from 'iconoir-react';
 import api from '../../lib/api';
+import TechnicianPicker from './TechnicianPicker';
+import RequestPartsDialog from './RequestPartsDialog';
 import './JobTasksPanel.css';
 
 const hhmm = s => (s ? String(s).replace('T', ' ').slice(11, 16) : '');
@@ -27,6 +33,7 @@ export default function JobTasksPanel({ workOrderId, closed = false }) {
   const [error, setError] = useState('');
   const [note, setNote] = useState(null); // { tone, text }
   const [busy, setBusy] = useState('');
+  const [parts, setParts] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -52,16 +59,8 @@ export default function JobTasksPanel({ workOrderId, closed = false }) {
     } finally { setBusy(''); }
   };
 
-  const assign = async (task, mechanicId, qualified) => {
-    let body = { mechanic_id: Number(mechanicId) };
-    if (!qualified) {
-      const reason = window.prompt(t('jobTasks.override_prompt',
-        'This technician is not qualified for {{type}}. Assign anyway? Give the reason (recorded on the job):', { type: task.service_type_label || '' }));
-      if (!reason || reason.trim().length < 3) return;
-      body = { ...body, override: true, reason: reason.trim() };
-    }
-    await act(`assign${task.id}`, () => api.patch(`/job-tasks/${task.id}/technician`, body));
-  };
+  const assign = (task, mechanicId, override, reason) => act(`assign${task.id}`, () => api.patch(`/job-tasks/${task.id}/technician`,
+    override ? { mechanic_id: Number(mechanicId), override: true, reason } : { mechanic_id: Number(mechanicId) }));
 
   const printSheet = async () => {
     setBusy('print');
@@ -80,6 +79,8 @@ export default function JobTasksPanel({ workOrderId, closed = false }) {
   const live = tasks.filter(x => x.status !== 'cancelled');
   const cards = new Set(live.map(x => x.job_card_id));
   if (!data && !error) return <div className="jt"><div className="wf-muted sm">{t('jobTasks.loading', 'Loading the jobs…')}</div></div>;
+  const blocked = data?.can_assign && !closed && !data?.closed ? data?.blocked : null;
+  const waiting = live.filter(x => !x.mechanic_id && x.status === 'open').length;
 
   return (
     <section className="jt">
@@ -100,14 +101,32 @@ export default function JobTasksPanel({ workOrderId, closed = false }) {
 
       {error && <p className="wf-bad"><WarningTriangle width={14} height={14} /> {error}</p>}
       {note && <p className={note.tone === 'good' ? 'jt-ok' : 'wf-bad'}>{note.text}</p>}
+      {blocked && live.length > 0 && (
+        <div className="jt-blocked" role="status">
+          <WarningTriangle width={15} height={15} />
+          <span>{blocked.code === 'MRN_REQUIRED'
+            ? t('jobTasks.blocked_mrn', 'Parts to request: the approved work has parts — request them from the Store (MRN) before anyone is assigned.')
+            : blocked.message}</span>
+          {blocked.code === 'MRN_REQUIRED' && data.can_request_parts && (
+            <button type="button" className="wf-btn primary sm" onClick={() => setParts(true)}>
+              <Package width={14} height={14} /> {t('jobTasks.request_parts', 'Request parts')}
+            </button>
+          )}
+        </div>
+      )}
       {data && !live.length && (
         <p className="wf-note">{t('jobTasks.none', 'The jobs appear here once the customer has approved the work.')}</p>
+      )}
+      {data?.can_assign && !blocked && waiting > 0 && live.length > 1 && !closed && (
+        <p className="wf-muted sm">{waiting === 1
+          ? t('jobTasks.waiting_one', '1 job is waiting for a technician.')
+          : t('jobTasks.waiting_n', '{{n}} jobs are waiting for a technician.', { n: waiting })}</p>
       )}
 
       {live.length > 0 && (
         <ol className="jt-list">
           {tasks.map((task, i) => (
-            <TaskRow key={task.id} n={i + 1} task={task} data={data} t={t} closed={closed || data.closed}
+            <TaskRow key={task.id} n={i + 1} task={task} data={data} t={t} closed={closed || data.closed} blocked={!!blocked}
               showCard={cards.size > 1} busy={busy} onAssign={assign}
               onType={type => act(`type${task.id}`, () => api.patch(`/job-tasks/${task.id}/service-type`, { service_type: type }))}
               onReopen={() => act(`reopen${task.id}`, () => api.post(`/job-tasks/${task.id}/reopen`))} />
@@ -117,12 +136,21 @@ export default function JobTasksPanel({ workOrderId, closed = false }) {
       {data?.can_assign && data.team_only && live.length > 0 && (
         <p className="wf-muted sm">{t('jobTasks.team_only', 'You can assign the technicians on your team.')}</p>
       )}
+      {parts && (
+        <RequestPartsDialog workOrderId={workOrderId} onClose={() => setParts(false)}
+          onDone={res => {
+            setParts(false);
+            setNote({ tone: 'good', text: t('jobTasks.parts_sent', 'Requisition {{number}} sent to the Store — the technicians can be assigned now.', { number: res.req_number }) });
+            load();
+          }} />
+      )}
     </section>
   );
 }
 
-function TaskRow({ n, task, data, t, closed, showCard, busy, onAssign, onType, onReopen }) {
-  const [pick, setPick] = useState('');
+function TaskRow({ n, task, data, t, closed, blocked, showCard, busy, onAssign, onType, onReopen }) {
+  const [pick, setPick] = useState(null); // { id, qualified, tech }
+  const [reason, setReason] = useState('');
   const cancelled = task.status === 'cancelled';
   const statusText = {
     open: t('jobTasks.status.open', 'Not started'),
@@ -131,13 +159,19 @@ function TaskRow({ n, task, data, t, closed, showCard, busy, onAssign, onType, o
     done: t('jobTasks.status.done', 'Finished'),
     cancelled: t('jobTasks.status.cancelled', 'No longer approved'),
   }[task.status] || task.status;
-  // Qualified first; the others only for a manager (override with a reason).
   const techs = data.technicians || [];
-  const qualified = techs.filter(m => !task.service_type || (m.skills || []).includes(task.service_type));
-  const others = data.can_override ? techs.filter(m => !qualified.includes(m) && m.id !== task.mechanic_id) : [];
-  const hidden = techs.length - qualified.length;
+  const types = task.service_type ? [task.service_type] : [];
+  const qualifiedCount = techs.filter(m => !task.service_type || (m.skills || []).includes(task.service_type)).length;
   const canChange = data.can_assign && !closed && !cancelled && task.status !== 'done' && !task.running;
   const cardWorkable = ['open', 'parts_requested', 'parts_issued', 'in_progress', 'qc_failed'].includes(task.job_card_status);
+  const changed = pick && (Number(pick.id) !== Number(task.mechanic_id) || task.inherited);
+  const needReason = changed && !pick.qualified;
+  const saving = busy === `assign${task.id}`;
+  const submit = async () => {
+    if (!changed || (needReason && reason.trim().length < 3)) return;
+    const r = await onAssign(task, pick.id, !pick.qualified, reason.trim());
+    if (r?.success) { setPick(null); setReason(''); }
+  };
 
   return (
     <li className={`jt-row${cancelled ? ' is-cancelled' : ''}`}>
@@ -169,33 +203,35 @@ function TaskRow({ n, task, data, t, closed, showCard, busy, onAssign, onType, o
               <WarningTriangle width={11} height={11} /> {t('jobTasks.outside_skills', 'Outside their skills')}{task.override_reason ? `: ${task.override_reason}` : ''}
             </span>
           )}
-          {canChange && (
-            <span className="wf-row tight jt-assign">
-              <select className="wf-input sm" value={pick} onChange={e => setPick(e.target.value)}>
-                <option value="">{task.mechanic_id ? t('jobTasks.reassign', 'Reassign to…') : t('jobTasks.assign_to', 'Assign to…')}</option>
-                {qualified.length > 0 && (
-                  <optgroup label={task.service_type ? t('jobTasks.qualified_for', 'Qualified for {{type}}', { type: task.service_type_label }) : t('jobTasks.technicians', 'Technicians')}>
-                    {qualified.filter(m => m.id !== task.mechanic_id || task.inherited).map(m => <option key={m.id} value={m.id}>{m.full_name}</option>)}
-                  </optgroup>
-                )}
-                {others.length > 0 && (
-                  <optgroup label={t('jobTasks.not_qualified', 'Not qualified — manager override')}>
-                    {others.map(m => <option key={m.id} value={m.id}>⚠ {m.full_name}{m.skills === null ? ` (${t('jobTasks.no_skills', 'skills not recorded')})` : ''}</option>)}
-                  </optgroup>
-                )}
-              </select>
-              <button className="wf-btn primary sm" disabled={!pick || busy === `assign${task.id}`}
-                onClick={() => { const q = qualified.some(m => String(m.id) === pick); onAssign(task, pick, q).then(() => setPick('')); }}>
-                {t('jobTasks.assign', 'Assign')}
-              </button>
-            </span>
-          )}
         </div>
-        {canChange && !qualified.length && (
-          <div className="wf-muted sm">{t('jobTasks.none_qualified', 'No technician is qualified for {{type}} yet — tick their skills on the Technicians page.', { type: task.service_type_label })}</div>
+        {canChange && (
+          <div className="jt-pick">
+            <TechnicianPicker technicians={techs} value={pick?.id ?? null} currentId={task.mechanic_id}
+              serviceTypes={types} serviceLabels={data.service_types} canOverride={data.can_override}
+              preferTeamId={data.prefer_team_leader_id} disabled={blocked || saving}
+              label={t('jobTasks.pick_label', 'Technician for {{job}}', { job: task.job_name })}
+              placeholder={task.mechanic_id ? t('jobTasks.reassign', 'Reassign to…') : t('jobTasks.assign_to', 'Assign to…')}
+              onChange={(id, info) => { setPick({ id, qualified: info.qualified, tech: info.tech }); setReason(''); }} />
+            {changed && (
+              <div className="jt-confirm">
+                {needReason && (
+                  <input className="wf-input sm jt-reason" value={reason} maxLength={255} autoFocus
+                    onChange={e => setReason(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+                    placeholder={t('jobTasks.override_reason', 'Why outside their skills? (recorded on the job)')}
+                    aria-label={t('jobTasks.override_reason', 'Why outside their skills? (recorded on the job)')} />
+                )}
+                <button type="button" className="wf-btn primary sm" disabled={saving || (needReason && reason.trim().length < 3)} onClick={submit}>
+                  {needReason ? t('jobTasks.assign_override', 'Assign anyway') : t('jobTasks.assign', 'Assign')}
+                </button>
+                <button type="button" className="wf-btn ghost sm" disabled={saving} onClick={() => { setPick(null); setReason(''); }}>
+                  {t('jobTasks.cancel', 'Cancel')}
+                </button>
+              </div>
+            )}
+          </div>
         )}
-        {canChange && qualified.length > 0 && hidden > 0 && !data.can_override && (
-          <div className="wf-muted sm">{t('jobTasks.hidden', '{{n}} technician(s) not qualified for this service type are not offered.', { n: hidden })}</div>
+        {canChange && !blocked && task.service_type && !qualifiedCount && techs.length > 0 && (
+          <div className="wf-muted sm">{t('jobTasks.none_qualified', 'No technician is qualified for {{type}} yet — tick their skills on the Technicians page.', { type: task.service_type_label })}</div>
         )}
       </div>
 

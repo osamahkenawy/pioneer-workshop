@@ -141,7 +141,10 @@ export async function buildCustomerStatus({ token, workOrderId, workshopId } = {
 
   // ── Where the job is ──
   const cards = wf.job_cards || [];
-  const estimate = wf.estimate;
+  // The main estimate; on a job with none, a stand-alone supplementary
+  // estimate (raised straight from the technical report) plays its part.
+  const estimate = wf.estimate
+    || (wf.lone_supplementary_id ? (wf.supplementary_estimates || []).find(e => e.id === wf.lone_supplementary_id) || null : null);
   const estimateSent = !!estimate?.sent_to_customer_at;
   const approved = !!w.customer_approved_at
     || (!!estimate && ['approved', 'partially_approved', 'converted'].includes(estimate.status) && !!estimate.customer_approved_at);

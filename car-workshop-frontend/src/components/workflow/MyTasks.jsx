@@ -19,7 +19,7 @@ import './MyTasks.css';
 
 const KIND_TONE = {
   price_parts: 'store', store: 'store', approve_estimate: 'approve', technical_inspection: 'floor', physical_inspection: 'advisor', raise_estimate: 'advisor', send_estimate: 'advisor',
-  record_approval: 'advisor', convert_partial: 'advisor', delivery: 'good', assign: 'floor', assign_sub: 'floor', qc: 'approve', rework: 'bad',
+  record_approval: 'advisor', convert_partial: 'advisor', delivery: 'good', assign: 'floor', assign_new: 'floor', assign_sub: 'floor', qc: 'approve', rework: 'bad',
 };
 
 export default function MyTasks() {
