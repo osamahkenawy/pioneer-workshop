@@ -378,7 +378,7 @@ function BookingRow({ a, t, mayBook, busy, statusLabel, onConfirm, onCheckIn, on
       {(a.enquiry_id || a.estimate_id || a.work_order_id) && (
         <div className="bk-links">
           {a.enquiry_id && (
-            <Link className="bk-ref" to={`/enquiries?id=${a.enquiry_id}`}>
+            <Link className="bk-ref" to={`/customers?enquiry=${a.enquiry_id}`}>
               {t('bookings.enquiry', 'Enquiry')} <span dir="ltr">{a.enquiry_number || `#${a.enquiry_id}`}</span>
             </Link>
           )}

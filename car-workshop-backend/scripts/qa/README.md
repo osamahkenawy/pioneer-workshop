@@ -35,6 +35,7 @@ node scripts/qa/vehicle-board-test.mjs    # Vehicle Status Board: access, tiles,
 node scripts/qa/customer-status-test.mjs  # customer status link + customer portal (/customer/*): whitelist, stages ("Vehicle received" until the acknowledgement), portal access, sign-in, own jobs only, inspection photos, inspection sign-off in the portal opens the job card, estimate (58)
 node scripts/qa/api-v1-test.mjs           # integration API: work orders (job card rule), enquiries → work order (14)
 node scripts/qa/crm-cycle-test.mjs        # CRM cycle: every enquiry gets its work order (staff, website, reminder reply), quote → the same work order, book → check-in on it, lost / rejected → cancelled, convert reuses it, "Vehicle received" for the customer until the acknowledgement, after → service due (38)
+node scripts/qa/feedback-1118-test.mjs     # client feedback 18 Nov: customer list stage filter + enquiry fields, an enquiry logged on a customer, the supplementary estimate's fixed cost (Settings, priced by the server, approved with consent, never a technician job; never on a main estimate), the customer's name on the inspection link, Step 3 "Inspection job card" title (8); puts the two Settings values back
 ```
 
 The job card rule the suites follow (client, 2026-10-29): an external

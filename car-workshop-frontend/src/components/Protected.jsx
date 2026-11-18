@@ -115,7 +115,9 @@ export default function Protected({ children, module, managersOnly = false }) {
     const wo = pathname.match(WORK_ORDER_PAGE);
     if (wo || pathname === '/work-orders') return <Navigate to={wo ? `/job-cards/${wo[1]}${search}` : '/job-cards'} replace />;
   }
-  if ((needs && !hasModule(user, needs)) || (managersOnly && !isManager(user))) {
+  // Enquiries and customers are one page (18 Nov 2026, point 2): either key opens it.
+  const oneOfCustomers = needs === 'customers' && hasModule(user, 'enquiries');
+  if ((needs && !hasModule(user, needs) && !oneOfCustomers) || (managersOnly && !isManager(user))) {
     return <Layout><NotAvailable home={homeFor(user)} /></Layout>;
   }
   return <Layout>{children}</Layout>;

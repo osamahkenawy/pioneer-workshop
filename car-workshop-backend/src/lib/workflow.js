@@ -245,7 +245,7 @@ export async function announceMainJobCard({ workOrderId, workshopId, userId = nu
     const complaint = shortText(wo.description, 120);
     await notifyGroups(workshopId, FLOOR, {
       title: `New request ${wo.work_order_number}${vehicle}`,
-      body: `Job card ${wo.job_card_number} opened for ${wo.customer_name || 'a customer'}${complaint ? ` — ${complaint}` : ''}${complaint.endsWith('…') ? ' ' : '. '}Technical inspection is next.`,
+      body: `Inspection job card ${wo.job_card_number} opened for ${wo.customer_name || 'a customer'}${complaint ? ` — ${complaint}` : ''}${complaint.endsWith('…') ? ' ' : '. '}Technical inspection is next.`,
       link: `/work-orders/${wo.id}`, orderId: wo.id, icon: '📋', type: 'workflow_request_raised',
       exceptUserId: userId,
     });
@@ -565,7 +565,7 @@ export async function buildWorkflow(workOrderId, workshopId) {
       // opened (before the rule, a manager's override) — the first check
       // then says what did not happen. title_key: the screen's
       // workflow.steps.* key for this title (the key stays 'job_card').
-      n: 3, key: 'job_card', title_key: 'physical_inspection', title: 'Physical inspection & job card',
+      n: 3, key: 'job_card', title_key: 'physical_inspection', title: 'Physical inspection & Inspection job card',
       ...sumOf(main
         ? (cards.length > 1 ? L('sum.jc_with_subs', `${main.job_card_number} + ${cards.length - 1} sub-job card(s)`, { jc: main.job_card_number, n: cards.length - 1 })
                             : L('sum.raw', main.job_card_number, { v: main.job_card_number }))
@@ -977,13 +977,13 @@ function nextAction(c) {
       // Say what is missing, not just "the intake" (C7).
       const list = c.intakeMissing.length ? c.intakeMissing : ['the vehicle', 'the reported issue'];
       const missing = list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list.at(-1)}` : list[0];
-      return N('service_advisor', 'Service Advisor', 'intake_missing', `Record ${missing} on the job card.`, 'edit', { missing });
+      return N('service_advisor', 'Service Advisor', 'intake_missing', `Record ${missing} on the work order.`, 'edit', { missing });
     }
     case 'job_card': {
       // An external customer's job card waits for their acknowledgement of
       // the physical inspection (lib/physical-inspection.js), which opens it.
       const p = c.physical;
-      if (!p.needed || p.acknowledged || p.override) return N('service_advisor', 'Service Advisor', 'open_job_card', 'Open the main job card.', 'open_job_card');
+      if (!p.needed || p.acknowledged || p.override) return N('service_advisor', 'Service Advisor', 'open_job_card', 'Open the Inspection job card.', 'open_job_card');
       if (p.status === 'none') return N('service_advisor', 'Service Advisor', 'physical_inspection',
         'Do the physical inspection with the customer: the vehicle\'s condition, damage and photos, and their signature. The job card opens when they sign.', 'inspect');
       if (p.status === 'draft') return N('service_advisor', 'Service Advisor', 'finish_physical_inspection',

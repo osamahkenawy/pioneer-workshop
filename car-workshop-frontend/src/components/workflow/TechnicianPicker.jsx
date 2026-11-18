@@ -28,6 +28,8 @@
  *   serviceTypes   the service type keys the choice must cover (null / [] = any)
  *   serviceLabels  key → label (GET /api/job-tasks service_types)
  *   canOverride    a manager: technicians not qualified can be picked (override)
+ *   canLearn       anyone who assigns: technicians not qualified can be picked, and the
+ *                  screen then records the skill on them (client feedback 18 Nov, point 8)
  *   preferTeamId   the team leader whose technicians come first
  *   onChange(id, { qualified, tech })
  *   placeholder, disabled, label (accessible name), autoOpen
@@ -114,7 +116,7 @@ export function StateBadge({ tech }) {
 }
 
 export default function TechnicianPicker({
-  technicians = [], value = null, currentId = null, serviceTypes = null, serviceLabels = {}, canOverride = false,
+  technicians = [], value = null, currentId = null, serviceTypes = null, serviceLabels = {}, canOverride = false, canLearn = false,
   preferTeamId = null, onChange, placeholder, disabled = false, label, autoOpen = false,
 }) {
   const { t } = useTranslation();
@@ -144,14 +146,14 @@ export default function TechnicianPicker({
   const some = matches.filter(x => fits(x) === 'some');
   const none = matches.filter(x => fits(x) === 'none');
   // Not qualified: a manager's override; greyed for everyone else (folded while not searching).
-  const othersOpen = canOverride || showOthers || !!needle;
+  const othersOpen = canOverride || canLearn || showOthers || !!needle;
   const groups = [
     { key: 'good', items: good, title: types.length ? t('techPicker.group_qualified', 'Qualified for {{type}}', { type: typeText }) : t('techPicker.group_all', 'Technicians') },
     { key: 'some', items: some, title: t('techPicker.group_some', 'Qualified for some of these jobs') },
-    { key: 'none', items: othersOpen ? none : [], title: canOverride ? t('techPicker.group_override', 'Not qualified — manager override, with a reason') : t('techPicker.group_not_qualified', 'Not qualified — a manager can override') },
+    { key: 'none', items: othersOpen ? none : [], title: canLearn ? t('techPicker.group_learn', 'Skill not on file yet — picking one adds the skill to their record') : canOverride ? t('techPicker.group_override', 'Not qualified — manager override, with a reason') : t('techPicker.group_not_qualified', 'Not qualified — a manager can override') },
   ].filter(g => g.items.length);
   // 'some' (several jobs): it goes to the jobs they are qualified for — the caller says which.
-  const pickable = x => x.available !== false && (fits(x) !== 'none' || canOverride);
+  const pickable = x => x.available !== false && (fits(x) !== 'none' || canOverride || canLearn);
   const flat = groups.flatMap(g => g.items);
   const enabled = flat.filter(pickable);
 

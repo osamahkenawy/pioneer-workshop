@@ -1,17 +1,12 @@
-import { useState, useEffect, useCallback, useMemo, useContext, useRef } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { Navigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Search, Plus, Xmark, WarningTriangle, CheckCircle, Phone, Clock,
-  StatsUpSquare, Group, ArrowRight, EditPencil, Trash, Calendar,
+  Xmark, CheckCircle, Phone, Clock, StatsUpSquare, Group, ArrowRight,
 } from 'iconoir-react';
 import api from '../lib/api';
-import { AuthContext } from '../context/AuthContext';
-import { canDo } from '../lib/permissions';
-import { hasModule } from '../lib/modules';
 import { PART_CATEGORIES, prefList } from '../lib/intakeOptions';
 import { MakeSelect, ModelSelect } from '../components/MakeModelSelect';
-import CustomersTabs from '../components/CustomersTabs';
 
 /**
  * Enquiries — journey stages 01-02.
@@ -70,10 +65,6 @@ const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ra
 // Still shown on enquiries recorded as not converted (and in the stats).
 const LOST_REASONS = { price: 'Price', timing: 'Timing / lead time', location: 'Location', went_elsewhere: 'Went elsewhere', no_response: 'No response', not_needed: 'No longer needed', other: 'Other' };
 
-const fmt = (n, cur = 'AED') => `${cur} ${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtDate = (d) => d ? new Date(String(d).replace(' ', 'T')).toLocaleDateString('en-AE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-// The customer complaint on one line, for the list (it may run to 5,000 characters over several lines).
-const oneLine = (s, max = 300) => { const v = String(s || '').replace(/\s+/g, ' ').trim(); return v.length > max ? `${v.slice(0, max - 1)}…` : v; };
 const COMPLAINT_MAX = 5000;
 // The car's model year: 4 digits, 1950 to next year (as the server checks).
 const YEAR_MIN = 1950;
@@ -107,152 +98,67 @@ function Field({ label, children, hint }) {
   );
 }
 
+/**
+ * /enquiries — old address. Enquiries and customers are one module (client
+ * feedback 18 Nov 2026, point 2): the Customers page lists everyone with
+ * their enquiry. Links from Bookings, Tasks and notifications land there,
+ * filtered to open enquiries; ?id=<enquiry> opens that enquiry.
+ */
 export default function Enquiries() {
-  const [rows, setRows] = useState([]);
+  const [params] = useSearchParams();
+  const id = params.get('id');
+  const qs = new URLSearchParams({ stage: params.get('due') === 'true' ? 'due' : 'enquiry' });
+  if (id) qs.set('enquiry', id);
+  return <Navigate to={`/customers?${qs.toString()}`} replace />;
+}
+
+/**
+ * The enquiry numbers, on the Customers page (collapsed by default): totals,
+ * the funnel from enquiry to completed job, conversion by channel and why
+ * enquiries did not convert. GET /enquiries/stats.
+ */
+export function EnquiryInsights() {
   const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [channelFilter, setChannelFilter] = useState('');
-  const [emirateFilter, setEmirateFilter] = useState('');
-  const [dueOnly, setDueOnly] = useState(false);
-
-  const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [convertFor, setConvertFor] = useState(null);
-  const navigate = useNavigate();
-  const { t: tr } = useTranslation();
-  const { user } = useContext(AuthContext) || {};
-  const mayBook = canDo(user, 'job.open');
-  // An enquiry's customer opens on the Customers tab (client point 12), for a
-  // role that has that tab.
-  const mayCustomers = hasModule(user, 'customers');
-  // No "Quote" here any more (client point 9): the estimate is raised on the
-  // work order once its technical inspection is completed.
-
-  const fetchRows = useCallback(async () => {
-    try {
-      const p = new URLSearchParams();
-      if (statusFilter) p.set('status', statusFilter);
-      if (channelFilter) p.set('source_channel', channelFilter);
-      if (emirateFilter) p.set('emirate', emirateFilter);
-      if (search.trim()) p.set('search', search.trim());
-      if (dueOnly) p.set('due', 'true');
-      const qs = p.toString();
-      const res = await api.get(`/enquiries${qs ? `?${qs}` : ''}`);
-      if (res.success) setRows(res.data || []);
-      else setError(res.message || 'Failed to load enquiries');
-    } catch { setError('Network error loading enquiries'); }
-  }, [statusFilter, channelFilter, emirateFilter, search, dueOnly]);
-
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await api.get('/enquiries/stats');
-      if (res.success) setStats(res.data);
-    } catch { /* stats are non-critical */ }
-  }, []);
-
-  const refresh = useCallback(async () => {
-    setLoading(true); setError('');
-    await Promise.all([fetchRows(), fetchStats()]);
-    setLoading(false);
-  }, [fetchRows, fetchStats]);
-
-  useEffect(() => { refresh(); }, [refresh]);
-
-  // ?id=<enquiry> (links from Bookings, Tasks) opens that enquiry.
-  const [params, setParams] = useSearchParams();
   useEffect(() => {
-    const id = params.get('id');
-    if (!id) return;
-    const next = new URLSearchParams(params); next.delete('id'); setParams(next, { replace: true });
-    (async () => {
-      try {
-        const res = await api.get(`/enquiries/${encodeURIComponent(id)}`);
-        if (res.success && res.data) { setEditing(res.data); setShowForm(true); }
-      } catch { /* the list is still there */ }
-    })();
-  }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
-
+    let live = true;
+    api.get('/enquiries/stats').then(r => { if (live && r?.success) setStats(r.data); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   const t = stats?.totals || {};
   const pending = (Number(t.new_count) || 0) + (Number(t.quoted) || 0);
-  const conversionRate = useMemo(() => {
-    const total = Number(t.total) || 0;
-    const conv = Number(t.converted) || 0;
-    return total > 0 ? Math.round((conv / total) * 100) : 0;
-  }, [t]);
-
-  const remove = async (row) => {
-    if (!window.confirm(row.work_order_number && row.work_order_status !== 'cancelled'
-      ? tr('enquiries.confirm_delete_wo', 'Delete enquiry {{n}}? Its work order {{wo}} is cancelled with it.', { n: row.enquiry_number, wo: row.work_order_number })
-      : `Delete enquiry ${row.enquiry_number}?`)) return;
-    try {
-      const res = await api.delete(`/enquiries/${row.id}`);
-      if (res.success) refresh();
-      else setError(res.message || 'Could not delete enquiry');
-    } catch { setError('Network error deleting enquiry'); }
-  };
-
+  const total = Number(t.total) || 0;
+  const conversionRate = total > 0 ? Math.round(((Number(t.converted) || 0) / total) * 100) : 0;
+  if (!stats) return <div style={{ color: '#94a3b8', fontSize: 13, padding: '8px 0' }}>Loading…</div>;
+  const f = stats.funnel?.total;
+  const steps = f ? [['Enquiries', f.enquiries], ['Quoted', f.quoted], ['Booked', f.booked], ['Job opened', f.jobs], ['Completed', f.completed]] : [];
   return (
-    <div style={{ padding: '0 0 40px' }}>
-      <CustomersTabs />
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, color: NAVY, margin: 0 }}>Enquiries</h1>
-          <p style={{ fontSize: 13.5, color: '#64748b', margin: '4px 0 0' }}>
-            Every enquiry and where it came from — so conversion can be measured by channel
-          </p>
-        </div>
-        <button onClick={() => { setEditing(null); setShowForm(true); }} style={st.primaryBtn}>
-          <Plus width={16} height={16} /> New Enquiry
-        </button>
-      </div>
-
-      {error && (
-        <div style={st.errorBar}>
-          <WarningTriangle width={16} height={16} /> {error}
-          <button onClick={() => setError('')} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626' }}>
-            <Xmark width={14} height={14} />
-          </button>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 14, marginBottom: 18, flexWrap: 'wrap' }}>
+    <div>
+      <div style={{ display: 'flex', gap: 14, marginBottom: 14, flexWrap: 'wrap' }}>
         <KPICard icon={Group} label="Total enquiries" value={t.total ?? 0} color={NAVY} />
         <KPICard icon={Phone} label="Pending" value={pending} sub="New + Quoted" color="#B77900" />
         <KPICard icon={CheckCircle} label="Converted" value={t.converted ?? 0} sub={`${conversionRate}% conversion`} color="#16a34a" />
         <KPICard icon={Clock} label="In nurture" value={t.nurture ?? 0} sub="Re-offer scheduled" color="#7c3aed" />
       </div>
-
-      {/* The cycle as a funnel: enquiry → quoted → booked → job → completed */}
-      {stats?.funnel?.total?.enquiries > 0 && (() => {
-        const f = stats.funnel.total;
-        const steps = [['Enquiries', f.enquiries], ['Quoted', f.quoted], ['Booked', f.booked], ['Job opened', f.jobs], ['Completed', f.completed]];
-        return (
-          <div style={{ background: '#fff', borderRadius: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', padding: '16px 18px', marginBottom: 18 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-              <ArrowRight width={18} height={18} color={ORANGE} />
-              <h3 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: '#1e293b' }}>From enquiry to completed job</h3>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: 10 }}>
-              {steps.map(([label, n], i) => (
-                <div key={label} style={{ background: i === 0 ? '#eef2f9' : '#f8fafc', borderRadius: 12, padding: '10px 12px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748b' }}>{label}</div>
-                  <div style={{ fontSize: 20, fontWeight: 900, color: NAVY }}>{Number(n) || 0}</div>
-                  {i > 0 && <div style={{ fontSize: 11, color: '#94a3b8' }}>{f.enquiries ? Math.round(100 * (Number(n) || 0) / f.enquiries) : 0}% of enquiries</div>}
-                </div>
-              ))}
-            </div>
+      {f?.enquiries > 0 && (
+        <div style={{ background: '#fff', borderRadius: 16, border: '1px solid #f1f5f9', padding: '14px 16px', marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <ArrowRight width={18} height={18} color={ORANGE} />
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: '#1e293b' }}>From enquiry to completed job</h3>
           </div>
-        );
-      })()}
-
-      {/* Conversion by channel — the reason source is captured at all */}
-      {stats?.by_channel?.length > 0 && (
-        <div style={{ background: '#fff', borderRadius: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', padding: '16px 18px', marginBottom: 18 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: 10 }}>
+            {steps.map(([label, n], i) => (
+              <div key={label} style={{ background: i === 0 ? '#eef2f9' : '#f8fafc', borderRadius: 12, padding: '10px 12px', border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748b' }}>{label}</div>
+                <div style={{ fontSize: 20, fontWeight: 900, color: NAVY }}>{Number(n) || 0}</div>
+                {i > 0 && <div style={{ fontSize: 11, color: '#94a3b8' }}>{f.enquiries ? Math.round(100 * (Number(n) || 0) / f.enquiries) : 0}% of enquiries</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {stats.by_channel?.length > 0 && (
+        <div style={{ background: '#fff', borderRadius: 16, border: '1px solid #f1f5f9', padding: '14px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <StatsUpSquare width={18} height={18} color={ORANGE} />
             <h3 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: '#1e293b' }}>Conversion by channel</h3>
           </div>
@@ -274,189 +180,41 @@ export default function Enquiries() {
               );
             })}
           </div>
-
           {stats.lost_reasons?.length > 0 && (
-            <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #f1f5f9' }}>
-              <div style={{ fontSize: 11.5, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
-                Why enquiries didn't convert
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {stats.lost_reasons.map(r => (
-                  <span key={r.lost_reason} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 20, padding: '5px 12px', fontSize: 12.5, color: '#475569' }}>
-                    {LOST_REASONS[r.lost_reason] || r.lost_reason}
-                    <strong style={{ marginLeft: 6, color: '#1e293b' }}>{r.count}</strong>
-                    {Number(r.in_nurture) > 0 && (
-                      <span style={{ marginLeft: 6, fontSize: 11, color: '#7c3aed' }}>({r.in_nurture} in nurture)</span>
-                    )}
-                  </span>
-                ))}
-              </div>
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #f1f5f9', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Why enquiries didn't convert</span>
+              {stats.lost_reasons.map(r => (
+                <span key={r.lost_reason} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 20, padding: '5px 12px', fontSize: 12.5, color: '#475569' }}>
+                  {LOST_REASONS[r.lost_reason] || r.lost_reason}<strong style={{ marginLeft: 6, color: '#1e293b' }}>{r.count}</strong>
+                </span>
+              ))}
             </div>
           )}
         </div>
       )}
-
-      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={st.searchWrap}>
-          <Search width={16} height={16} style={{ color: '#94a3b8' }} />
-          <input style={st.searchInput} placeholder="Search name, phone, enquiry no…" value={search} onChange={e => setSearch(e.target.value)} />
-        </div>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={st.filterSelect}>
-          <option value="">All statuses</option>
-          {Object.entries(STATUS_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
-        </select>
-        <select value={channelFilter} onChange={e => setChannelFilter(e.target.value)} style={st.filterSelect}>
-          <option value="">All channels</option>
-          {Object.entries(CHANNELS).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
-        </select>
-        <select value={emirateFilter} onChange={e => setEmirateFilter(e.target.value)} style={st.filterSelect}
-          aria-label={tr('enquiries.filter_emirate', 'Emirate')}>
-          <option value="">{tr('enquiries.all_emirates', 'All emirates')}</option>
-          {EMIRATES.map(e => <option key={e} value={e}>{e}</option>)}
-        </select>
-        <button onClick={() => setDueOnly(v => !v)}
-          style={{ ...st.filterSelect, cursor: 'pointer', fontWeight: 700,
-            background: dueOnly ? '#fff7ed' : '#fff', color: dueOnly ? ORANGE : '#334155',
-            borderColor: dueOnly ? ORANGE : '#e2e8f0' }}>
-          Follow-ups due
-        </button>
-      </div>
-
-      <div style={{ background: '#fff', borderRadius: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 900 }}>
-            <thead>
-              <tr style={{ background: '#f8fafc', borderBottom: '1px solid #eef2f7' }}>
-                {['Enquiry', 'Contact', tr('enquiries.col_emirate', 'Emirate'), 'Channel', 'Tier / payer', 'Quoted', 'Status', 'Follow-up', ''].map(h => (
-                  <th key={h} style={st.th}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading && <tr><td colSpan={9} style={st.emptyCell}>Loading enquiries…</td></tr>}
-              {!loading && rows.length === 0 && (
-                <tr><td colSpan={9} style={st.emptyCell}>
-                  <Phone width={32} height={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
-                  <div>No enquiries yet. Log one to start measuring conversion by channel.</div>
-                </td></tr>
-              )}
-              {!loading && rows.map(r => {
-                const ch = CHANNELS[r.source_channel] || { label: r.source_channel, color: '#64748b', bg: '#f1f5f9' };
-                const sm = STATUS_META[r.status] || STATUS_META.new;
-                const overdue = r.follow_up_at && new Date(String(r.follow_up_at).replace(' ', 'T')) <= new Date()
-                  && ['new', 'quoted', 'nurture'].includes(r.status);
-                return (
-                  <tr key={r.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                    <td style={st.td}>
-                      <div style={{ fontWeight: 700, color: '#1e293b' }}>{r.enquiry_number}</div>
-                      <div style={{ fontSize: 11.5, color: '#94a3b8', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                        title={r.description ? oneLine(r.description) : undefined}>
-                        {CONTACT_METHODS[r.contact_method] || r.contact_method}
-                        {r.description && <span style={{ color: '#64748b' }}> · {oneLine(r.description, 120)}</span>}
-                      </div>
-                    </td>
-                    <td style={st.td}>
-                      {r.customer_id && mayCustomers ? (
-                        <Link to={`/customers?highlight=${r.customer_id}`} style={{ fontWeight: 600, color: '#1d4ed8', textDecoration: 'none' }}
-                          title={tr('enquiries.open_customer', 'Open the customer: {{name}}', { name: r.customer_full_name || r.contact_name })}>
-                          {r.contact_name}
-                        </Link>
-                      ) : (
-                        <div style={{ fontWeight: 600, color: '#1e293b' }}>{r.contact_name}</div>
-                      )}
-                      <div style={{ fontSize: 11.5, color: '#94a3b8' }}>{r.contact_phone}</div>
-                    </td>
-                    <td style={{ ...st.td, whiteSpace: 'nowrap' }}>{r.emirate || '—'}</td>
-                    <td style={st.td}>
-                      <span style={{ ...st.pill, background: ch.bg, color: ch.color }}>{ch.label}</span>
-                      {r.source_detail && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{r.source_detail}</div>}
-                    </td>
-                    <td style={st.td}>
-                      <div style={{ fontSize: 12.5 }}>{r.service_tier ? TIERS[r.service_tier] : '—'}</div>
-                      <div style={{ fontSize: 11.5, color: '#94a3b8' }}>{PAYERS[r.payer_type] || r.payer_type}</div>
-                    </td>
-                    <td style={{ ...st.td, fontWeight: 700 }}>{r.quoted_amount != null ? fmt(r.quoted_amount) : '—'}</td>
-                    <td style={st.td}>
-                      <span style={{ ...st.pill, background: sm.bg, color: sm.color }}>{sm.label}</span>
-                      {r.work_order_number && (
-                        <Link to={`/work-orders/${r.converted_work_order_id || r.work_order_id}`}
-                          style={{ display: 'block', fontSize: 11, marginTop: 3, textDecoration: r.work_order_status === 'cancelled' ? 'line-through' : 'none',
-                            color: r.work_order_status === 'cancelled' ? '#94a3b8' : r.converted_work_order_id ? '#16a34a' : '#1d4ed8' }}
-                          title={r.work_order_status === 'cancelled' ? tr('enquiries.wo_cancelled', 'Work order cancelled') : tr('enquiries.wo_open', 'Open the work order')}>
-                          {r.work_order_number}
-                        </Link>
-                      )}
-                      {r.lost_reason && r.status !== 'converted' && (
-                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{LOST_REASONS[r.lost_reason] || r.lost_reason}</div>
-                      )}
-                    </td>
-                    <td style={st.td}>
-                      {r.follow_up_at ? (
-                        <span style={{ fontSize: 12.5, fontWeight: overdue ? 700 : 500, color: overdue ? '#dc2626' : '#475569' }}>
-                          {fmtDate(r.follow_up_at)}{overdue ? ' · due' : ''}
-                        </span>
-                      ) : '—'}
-                    </td>
-                    <td style={st.td}>
-                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                        {r.status !== 'converted' && (
-                          <>
-                            {mayBook && (
-                              <button onClick={() => navigate(`/appointments?new=1&enquiry=${r.id}`)} style={{ ...st.smallBtn, background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }} title="Book a visit">
-                                <Calendar width={13} height={13} /> Book
-                              </button>
-                            )}
-                            <button onClick={() => setConvertFor(r)} style={{ ...st.smallBtn, background: '#f0fdf4', color: '#16a34a', borderColor: '#bbf7d0' }} title="Convert to work order">
-                              <ArrowRight width={13} height={13} /> Convert
-                            </button>
-                          </>
-                        )}
-                        <button onClick={() => { setEditing(r); setShowForm(true); }} style={st.iconBtn} title="Edit">
-                          <EditPencil width={14} height={14} />
-                        </button>
-                        <button onClick={() => remove(r)}
-                          style={{ ...st.iconBtn, color: r.converted_work_order_id ? '#cbd5e1' : '#dc2626', cursor: r.converted_work_order_id ? 'not-allowed' : 'pointer' }}
-                          title={r.converted_work_order_id ? 'Converted enquiries cannot be deleted'
-                            : r.work_order_id ? tr('enquiries.delete_with_wo', 'Delete — its work order is cancelled too, if nothing has happened on it') : 'Delete'}>
-                          <Trash width={14} height={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {showForm && (
-        <EnquiryModal
-          enquiry={editing}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSaved={() => { setShowForm(false); setEditing(null); refresh(); }}
-        />
-      )}
-      {convertFor && (
-        <ConvertModal enquiry={convertFor} onClose={() => setConvertFor(null)} onSaved={() => { setConvertFor(null); refresh(); }} />
-      )}
     </div>
   );
 }
+
+/** An enquiry's status as a pill (the Customers list and drawer). */
+export function EnquiryStatusPill({ status }) {
+  const sm = STATUS_META[status] || STATUS_META.new;
+  return <span style={{ ...st.pill, background: sm.bg, color: sm.color }}>{sm.label}</span>;
+}
+export const enquiryChannelLabel = k => CHANNELS[k]?.label || k || '';
 
 /* ── Create / edit enquiry ── */
 // The enquiry type is no longer asked: the column keeps its value ('service'
 // on a new enquiry), and the job types are ticked later on the work order.
 // The car is make, model and year only (3 Nov 2026): the free-text vehicle
 // and plate are not sent, so an older enquiry keeps them (shown read-only).
-function EnquiryModal({ enquiry, onClose, onSaved }) {
-  const { t } = useTranslation();
-  const isEdit = !!enquiry;
-  const [f, setF] = useState({
-    contact_name: enquiry?.contact_name || '',
-    contact_phone: enquiry?.contact_phone || '',
-    contact_email: enquiry?.contact_email || '',
-    emirate: enquiry?.emirate || '',
+/** An enquiry's form values: the one being edited, or a new one (with the customer's contact details). */
+export function enquiryForm(enquiry, customer = null) {
+  return {
+    contact_name: enquiry?.contact_name || customer?.full_name || '',
+    contact_phone: enquiry?.contact_phone || customer?.phone || '',
+    contact_email: enquiry?.contact_email || customer?.email || '',
+    emirate: enquiry?.emirate || customer?.emirate || '',
     vehicle_make: enquiry?.vehicle_make || '',
     vehicle_model: enquiry?.vehicle_model || '',
     vehicle_year: enquiry?.vehicle_year ? String(enquiry.vehicle_year) : '',
@@ -473,84 +231,52 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
     payer_type: enquiry?.payer_type || 'self_pay',
     status: enquiry?.status || 'new',
     follow_up_at: enquiry?.follow_up_at ? String(enquiry.follow_up_at).replace(' ', 'T').slice(0, 16) : '',
-  });
+  };
+}
+
+/** What is wrong with the enquiry's own details (not the contact), or ''. */
+export function enquiryProblem(f, t) {
+  if (f.vehicle_year && (!/^\d{4}$/.test(f.vehicle_year) || Number(f.vehicle_year) < YEAR_MIN || Number(f.vehicle_year) > yearMax())) {
+    return t('enquiries.year_invalid', 'The vehicle year must be 4 digits, {{min}} to {{max}}.', { min: YEAR_MIN, max: yearMax() });
+  }
+  if (!f.source_channel) return 'Select how this enquiry reached you — it is what makes conversion measurable.';
+  if (f.description.trim().length > COMPLAINT_MAX) return t('enquiries.complaint_too_long', 'The customer complaint is longer than 5,000 characters — shorten it.');
+  if (!f.parts_preference.length) return t('enquiries.parts_required', 'Tick at least one — ask the customer which parts they accept.');
+  return '';
+}
+
+/** The body POST / PUT /enquiries takes. */
+export function enquiryPayload(f) {
+  return {
+    ...f,
+    quoted_amount: f.quoted_amount === '' ? null : Number(f.quoted_amount),
+    service_tier: f.service_tier || null,
+    vehicle_make: f.vehicle_make.trim() || null,
+    vehicle_model: f.vehicle_model.trim() || null,
+    vehicle_year: f.vehicle_year ? Number(f.vehicle_year) : null,
+    follow_up_at: f.follow_up_at ? f.follow_up_at.replace('T', ' ') + ':00' : null,
+  };
+}
+
+/**
+ * The enquiry's own fields — the car (make, model, year), how it reached us,
+ * tier and payer, the complaint, the parts accepted, quote and follow-up.
+ * Used by the enquiry dialog and by the New Customer form's Enquiry step, so
+ * one form captures a customer and their enquiry (18 Nov, point 2).
+ */
+export function EnquiryDetails({ f, setF, prefError = false, onPart, prefRef = null, isEdit = false, enquiry = null }) {
+  const { t } = useTranslation();
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-  // "Tick at least one" shows once a save was tried or the last box unticked.
-  const [prefTouched, setPrefTouched] = useState(false);
-  const prefRef = useRef(null);
-  const prefError = prefTouched && f.parts_preference.length === 0;
   const togglePart = c => {
-    setPrefTouched(true);
+    onPart?.();
     setF(p => ({ ...p, parts_preference: prefList(p.parts_preference.includes(c) ? p.parts_preference.filter(x => x !== c) : [...p.parts_preference, c]) }));
   };
-
-  // What an older enquiry was logged with, before make / model / year.
   const loggedCar = enquiry && !enquiry.vehicle_make && !enquiry.vehicle_model && !enquiry.vehicle_year
     ? String(enquiry.vehicle_description || '').trim() : '';
   const loggedPlate = String(enquiry?.vehicle_plate || '').trim();
-
-  const submit = async () => {
-    setPrefTouched(true);
-    if (!f.contact_name.trim()) { setErr('Contact name is required.'); return; }
-    if (!String(f.contact_phone || '').trim() && !String(f.contact_email || '').trim()) { setErr('A phone number or an e-mail is required.'); return; }
-    if (!f.emirate) { setErr(t('enquiries.emirate_required', 'Select the emirate the customer is in — it decides which team the enquiry goes to.')); return; }
-    if (f.vehicle_year && (!/^\d{4}$/.test(f.vehicle_year) || Number(f.vehicle_year) < YEAR_MIN || Number(f.vehicle_year) > yearMax())) {
-      setErr(t('enquiries.year_invalid', 'The vehicle year must be 4 digits, {{min}} to {{max}}.', { min: YEAR_MIN, max: yearMax() })); return;
-    }
-    if (!f.source_channel) { setErr('Select how this enquiry reached you — it is what makes conversion measurable.'); return; }
-    if (f.description.trim().length > COMPLAINT_MAX) { setErr(t('enquiries.complaint_too_long', 'The customer complaint is longer than 5,000 characters — shorten it.')); return; }
-    if (!f.parts_preference.length) {
-      // The error is under the boxes; bring them into view.
-      setErr('');
-      prefRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      prefRef.current?.querySelector('input')?.focus({ preventScroll: true });
-      return;
-    }
-    setSaving(true); setErr('');
-    try {
-      const payload = {
-        ...f,
-        quoted_amount: f.quoted_amount === '' ? null : Number(f.quoted_amount),
-        service_tier: f.service_tier || null,
-        vehicle_make: f.vehicle_make.trim() || null,
-        vehicle_model: f.vehicle_model.trim() || null,
-        vehicle_year: f.vehicle_year ? Number(f.vehicle_year) : null,
-        follow_up_at: f.follow_up_at ? f.follow_up_at.replace('T', ' ') + ':00' : null,
-      };
-      const res = isEdit ? await api.put(`/enquiries/${enquiry.id}`, payload) : await api.post('/enquiries', payload);
-      if (res.success) onSaved();
-      else setErr(res.message || 'Could not save enquiry.');
-    } catch { setErr('Network error saving enquiry.'); }
-    finally { setSaving(false); }
-  };
-
   const details = SOURCE_DETAILS[f.source_channel] || [];
-
   return (
-    <div style={st.overlay} onClick={onClose}>
-      <div style={st.modal} onClick={e => e.stopPropagation()}>
-        <div style={st.modalHeader}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: NAVY }}>{isEdit ? 'Edit Enquiry' : 'New Enquiry'}</h2>
-          <button onClick={onClose} style={st.closeBtn}><Xmark width={18} height={18} /></button>
-        </div>
-        <div style={{ padding: '4px 24px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {err && <div style={st.errorBar}>{err}</div>}
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Field label="Contact name *"><input style={st.input} value={f.contact_name} onChange={e => set('contact_name', e.target.value)} placeholder="Full name" /></Field>
-            <Field label="Phone"><input style={st.input} value={f.contact_phone || ''} onChange={e => set('contact_phone', e.target.value)} placeholder="+971 50 000 0000" /></Field>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Field label="Email"><input style={st.input} value={f.contact_email} onChange={e => set('contact_email', e.target.value)} placeholder="Optional" /></Field>
-            <Field label={`${t('enquiries.emirate_label', 'Emirate')} *`} hint={t('enquiries.emirate_hint', 'Where the customer is — the enquiry goes to that team')}>
-              <select style={st.input} value={f.emirate} onChange={e => set('emirate', e.target.value)}>
-                <option value="">{t('enquiries.select_emirate', 'Select emirate…')}</option>
-                {EMIRATES.map(e => <option key={e} value={e}>{e}</option>)}
-              </select>
-            </Field>
-          </div>
+    <>
           {/* The car: make, model and year only — the rest is taken when it comes in. */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 110px', gap: 12 }}>
             <Field label={t('vehicles.make', 'Make')}>
@@ -661,6 +387,75 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
               </select>
             </Field>
           )}
+
+    </>
+  );
+}
+
+export function EnquiryModal({ enquiry, customer = null, onClose, onSaved }) {
+  const { t } = useTranslation();
+  const isEdit = !!enquiry;
+  const [f, setF] = useState(() => enquiryForm(enquiry, customer));
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  // "Tick at least one" shows once a save was tried or the last box unticked.
+  const [prefTouched, setPrefTouched] = useState(false);
+  const prefRef = useRef(null);
+  const prefError = prefTouched && f.parts_preference.length === 0;
+
+
+  const submit = async () => {
+    setPrefTouched(true);
+    if (!f.contact_name.trim()) { setErr('Contact name is required.'); return; }
+    if (!String(f.contact_phone || '').trim() && !String(f.contact_email || '').trim()) { setErr('A phone number or an e-mail is required.'); return; }
+    if (!f.emirate) { setErr(t('enquiries.emirate_required', 'Select the emirate the customer is in — it decides which team the enquiry goes to.')); return; }
+    const problem = enquiryProblem(f, t);
+    if (problem) {
+      if (!f.parts_preference.length) {
+        // The error is under the boxes; bring them into view.
+        setErr('');
+        prefRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        prefRef.current?.querySelector('input')?.focus({ preventScroll: true });
+      } else setErr(problem);
+      return;
+    }
+    setSaving(true); setErr('');
+    try {
+      // Logged from a customer's record: it is that customer's enquiry.
+      const payload = { ...enquiryPayload(f), ...(customer?.id && !isEdit ? { customer_id: customer.id } : {}) };
+      const res = isEdit ? await api.put(`/enquiries/${enquiry.id}`, payload) : await api.post('/enquiries', payload);
+      if (res.success) onSaved();
+      else setErr(res.message || 'Could not save enquiry.');
+    } catch { setErr('Network error saving enquiry.'); }
+    finally { setSaving(false); }
+  };
+
+
+  return (
+    <div style={st.overlay} onClick={onClose}>
+      <div style={st.modal} onClick={e => e.stopPropagation()}>
+        <div style={st.modalHeader}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: NAVY }}>{isEdit ? `Enquiry ${enquiry.enquiry_number || ''}` : customer ? `New enquiry · ${customer.full_name}` : 'New Enquiry'}</h2>
+          <button onClick={onClose} style={st.closeBtn}><Xmark width={18} height={18} /></button>
+        </div>
+        <div style={{ padding: '4px 24px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {err && <div style={st.errorBar}>{err}</div>}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Field label="Contact name *"><input style={st.input} value={f.contact_name} onChange={e => set('contact_name', e.target.value)} placeholder="Full name" /></Field>
+            <Field label="Phone"><input style={st.input} value={f.contact_phone || ''} onChange={e => set('contact_phone', e.target.value)} placeholder="+971 50 000 0000" /></Field>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Field label="Email"><input style={st.input} value={f.contact_email} onChange={e => set('contact_email', e.target.value)} placeholder="Optional" /></Field>
+            <Field label={`${t('enquiries.emirate_label', 'Emirate')} *`} hint={t('enquiries.emirate_hint', 'Where the customer is — the enquiry goes to that team')}>
+              <select style={st.input} value={f.emirate} onChange={e => set('emirate', e.target.value)}>
+                <option value="">{t('enquiries.select_emirate', 'Select emirate…')}</option>
+                {EMIRATES.map(e => <option key={e} value={e}>{e}</option>)}
+              </select>
+            </Field>
+          </div>
+          <EnquiryDetails f={f} setF={setF} prefError={prefError} onPart={() => setPrefTouched(true)} prefRef={prefRef} isEdit={isEdit} enquiry={enquiry} />
         </div>
         <div style={st.footer}>
           <button onClick={onClose} style={st.ghostBtn}>Cancel</button>
@@ -674,7 +469,7 @@ function EnquiryModal({ enquiry, onClose, onSaved }) {
 }
 
 /* ── Convert to work order ── */
-function ConvertModal({ enquiry, onClose, onSaved }) {
+export function ConvertModal({ enquiry, onClose, onSaved }) {
   const { t } = useTranslation();
   // The work order opened with the enquiry, while it is open.
   const ownWo = enquiry.work_order_number && enquiry.work_order_status && !['cancelled', 'completed'].includes(enquiry.work_order_status)

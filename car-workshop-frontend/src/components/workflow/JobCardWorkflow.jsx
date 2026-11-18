@@ -22,6 +22,7 @@ import { customerStatusUrl } from '../../lib/customerLink';
 import { hasModule } from '../../lib/modules';
 import { JOB_TYPES, jobTypeLabel } from '../../lib/intakeOptions';
 import JobTasksPanel from './JobTasksPanel';
+import { VehicleFormFields, EMPTY_VEHICLE } from '../NewWorkOrderModal';
 import './JobCardWorkflow.css';
 
 const STEP_ICONS = { classification: User, intake: Car, job_card: Page, inspection_pricing: Search, estimate: Mail, work: Wrench, closure: ShieldCheck };
@@ -436,7 +437,7 @@ function ClassifyBody({ data, t, closed, mayOpen, manager, openClassify, onEditW
         <>
           <p className="wf-note">{t('workflow.no_customer', 'This job has no customer record to classify.')}</p>
           {!closed && mayOpen && (
-            <button className="wf-btn ghost" onClick={onEditWizard}><User width={15} height={15} /> {t('workflow.attach_customer', 'Choose the customer (edit the job card)')}</button>
+            <button className="wf-btn ghost" onClick={onEditWizard}><User width={15} height={15} /> {t('workflow.attach_customer_wo', 'Choose the customer (edit the work order)')}</button>
           )}
         </>
       )}
@@ -622,9 +623,143 @@ function IntakeFix({ t, wo, full, missing, lastKm, mayFix, onEditWizard, onSaved
         </>
       )}
       {mayFix && missing.vehicle && (
-        <button className="wf-btn ghost" onClick={onEditWizard}><Car width={15} height={15} /> {t('workflow.edit_to_add_vehicle', 'Edit the job card to add the vehicle')}</button>
+        <VehicleInline t={t} wo={wo} full={full} needIssue={missing.issue} onEditWizard={onEditWizard} onSaved={onSaved} />
       )}
       {!mayFix && <p className="wf-muted sm">{t('workflow.intake_by_sa', 'The Service Advisor records these.')}</p>}
+    </div>
+  );
+}
+
+/**
+ * Step 2, no vehicle yet (client feedback 18 Nov 2026, point 5): pick one of
+ * the customer's cars or add a new one right here, with today's odometer
+ * and — when missing — the reported issue. POST /vehicles (a new car), then
+ * PUT /work-orders/:id { vehicle_id, odometer_in, description }.
+ */
+function VehicleInline({ t, wo, full, needIssue, onEditWizard, onSaved }) {
+  const [cars, setCars] = useState(null);
+  const [pick, setPick] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [car, setCar] = useState({ ...EMPTY_VEHICLE });
+  const [odo, setOdo] = useState('');
+  const [issue, setIssue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [badField, setBadField] = useState('');
+  useEffect(() => {
+    let live = true;
+    if (!wo.customer_id) { setCars([]); setAdding(true); return undefined; }
+    api.get(`/vehicles?customer_id=${encodeURIComponent(wo.customer_id)}&limit=50&page=1`).then(r => {
+      if (!live) return;
+      const list = r?.success ? r.data || [] : [];
+      setCars(list);
+      if (!list.length) setAdding(true);
+    }).catch(() => { if (live) { setCars([]); setAdding(true); } });
+    return () => { live = false; };
+  }, [wo.customer_id]);
+
+  const picked = cars?.find(v => String(v.id) === pick) || null;
+  const lastKm = picked?.mileage != null && picked.mileage !== '' ? Number(picked.mileage) : null;
+  const km = normKm(odo);
+  const bad = k => badField === k;
+  const badCls = k => (badField === k ? 'nwo-invalid' : undefined);
+
+  const save = async () => {
+    setErr(''); setBadField('');
+    if (!wo.customer_id) return setErr(t('workflow.veh_no_customer', 'Choose the customer first (edit the work order).'));
+    if (!adding && !picked) return setErr(t('workflow.veh_pick', 'Choose the vehicle, or add a new one.'));
+    if (adding) {
+      const need = [['make', car.make], ['model', car.model], ['plate', car.plate_number], ['emirate', car.plate_emirate], ['year', car.year], ['vin', car.vin]];
+      const miss = need.find(([, v]) => !String(v || '').trim());
+      if (miss) { setBadField(miss[0]); return setErr(t('workflow.veh_fill', 'Fill in the make, model, plate, emirate, year and VIN.')); }
+    }
+    if (!km) { setBadField('odometer'); return setErr(t('workflow.veh_odo', 'Enter the odometer reading from the dashboard.')); }
+    if (!/^\d{1,7}$/.test(km)) { setBadField('odometer'); return setErr(t('workflow.err_km', 'Enter the odometer in whole kilometres, digits only.')); }
+    if (!adding && lastKm != null && Number(km) < lastKm) {
+      setBadField('odometer');
+      return setErr(t('workflow.km_low', 'Lower than the last reading ({{km}} km) — check it.', { km: lastKm.toLocaleString('en-US') }));
+    }
+    if (needIssue && !issue.trim()) return setErr(t('workflow.veh_issue', 'Enter the reported issue.'));
+    if (!full?.updated_at) return setErr(t('workflow.failed', 'That did not work.'));
+    setBusy(true);
+    try {
+      let vehicleId = picked?.id;
+      if (adding) {
+        const r = await api.post('/vehicles', {
+          customer_id: wo.customer_id,
+          make: car.make.trim(), model: car.model.trim(), year: car.year ? Number(car.year) : null,
+          plate_number: car.plate_number.trim().replace(/\s+/g, ' ').toUpperCase(),
+          plate_code: car.plate_code.trim().toUpperCase() || null, plate_emirate: car.plate_emirate || null,
+          vehicle_type: car.vehicle_type || null, vin: normVin(car.vin),
+          engine_no: car.engine_no.trim() || null, fleet_code: car.fleet_code.trim() || null, color: car.color.trim() || null,
+          fuel_type: car.fuel_type, transmission: car.transmission, mileage: Number(km),
+        });
+        if (!r?.success) {
+          setBadField({ VIN_INVALID: 'vin', VIN_REQUIRED: 'vin', VIN_DUPLICATE: 'vin', YEAR_INVALID: 'year', EMIRATE_INVALID: 'emirate' }[r?.code] || '');
+          return setErr(r?.message || t('workflow.failed', 'That did not work.'));
+        }
+        vehicleId = r.data?.id ?? r.data?.vehicle_id ?? r.id;
+        // Shown in the list if the work order save below fails, so it is not added twice.
+        setCars(c => [...(c || []), { ...r.data, id: vehicleId }]); setAdding(false); setPick(String(vehicleId)); setCar({ ...EMPTY_VEHICLE });
+      }
+      const body = { expected_updated_at: full.updated_at, vehicle_id: vehicleId, odometer_in: Number(km) };
+      if (needIssue) body.description = issue.trim();
+      const r = await api.put(`/work-orders/${wo.id}`, body);
+      if (!r?.success) {
+        if (r?.code === 'STALE_EDIT') onSaved?.(null, true);
+        return setErr(r?.code === 'STALE_EDIT'
+          ? t('workflow.err_stale', 'Someone else changed this job card just now. It has been reloaded — check it and save again.')
+          : (r?.message || t('workflow.failed', 'That did not work.')));
+      }
+      onSaved?.(t('workflow.vehicle_saved', 'Vehicle added to the work order'));
+    } catch {
+      setErr(t('workflow.network', 'Network error — check the connection.'));
+    } finally { setBusy(false); }
+  };
+
+  if (cars === null) return <p className="wf-muted sm">{t('workflow.veh_loading', 'Loading the customer\'s vehicles…')}</p>;
+  return (
+    <div className="wf-veh-inline">
+      {!adding ? (
+        <>
+          <label className="wf-label">{t('workflow.veh_choose', 'Vehicle')}
+            <select className="wf-input" value={pick} onChange={e => setPick(e.target.value)}>
+              <option value="">{t('workflow.veh_choose_ph', 'Choose one of the customer\'s vehicles…')}</option>
+              {cars.map(v => (
+                <option key={v.id} value={v.id}>{[[v.plate_number, v.plate_code].filter(Boolean).join(' '), [v.make, v.model, v.year].filter(Boolean).join(' ')].filter(Boolean).join(' · ')}</option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="wf-btn ghost" onClick={() => { setAdding(true); setPick(''); }}>
+            <Car width={15} height={15} /> {t('workflow.veh_add_new', 'Add a new vehicle')}
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="wf-inline-title" style={{ color: '#0f172a' }}>{t('workflow.veh_new_title', 'New vehicle')}</div>
+          <VehicleFormFields newVehicle={car} setNewVehicle={setCar} badCls={badCls} bad={bad} />
+          {cars.length > 0 && (
+            <button type="button" className="wf-btn ghost" onClick={() => setAdding(false)}>{t('workflow.veh_pick_existing', 'Choose an existing vehicle instead')}</button>
+          )}
+        </>
+      )}
+      <div className="wf-grid2">
+        <label className="wf-label">{t('workflow.odometer_in', 'Odometer at arrival (km)')}
+          <input className={`wf-input${badField === 'odometer' ? ' nwo-invalid' : ''}`} inputMode="numeric" dir="ltr" value={odo} onChange={e => setOdo(e.target.value)}
+            placeholder={t('workflow.odometer_ph', 'Today\'s reading')} />
+          {lastKm != null && <span className="wf-muted sm">{t('workflow.km_last', 'Last reading: {{km}} km', { km: lastKm.toLocaleString('en-US') })}</span>}
+        </label>
+      </div>
+      {needIssue && (
+        <label className="wf-label">{t('workflow.reported_issue', 'Reported issue')}
+          <textarea className="wf-input" rows={2} maxLength={5000} value={issue} onChange={e => setIssue(e.target.value)} />
+        </label>
+      )}
+      {err && <p className="wf-bad" role="alert">{err}</p>}
+      <div className="wf-row">
+        <button className="wf-btn primary" disabled={busy} onClick={save}><Check width={15} height={15} /> {t('workflow.veh_save', 'Save the vehicle')}</button>
+        <button type="button" className="wf-btn ghost" onClick={onEditWizard}>{t('workflow.edit_wo', 'Edit the whole work order')}</button>
+      </div>
     </div>
   );
 }

@@ -2109,6 +2109,51 @@ function UsageCard({ label, current = 0, max = 0, pct = 0, color }) {
  * but there is no WhatsApp sender in the backend, so offering it as a live
  * option would mean a toggle that silently sends nothing.
  */
+/**
+ * Estimates (client feedback 18 Nov 2026, point 4): the fixed cost a
+ * supplementary estimate adds with its tick box — e.g. sharing the technical
+ * report when the main estimate is empty. Amount before VAT, and its wording
+ * on the estimate. 0 / empty: the tick box says it is not set up.
+ */
+function EstimatesTab({ data, setData, onSave, saving }) {
+  const { t } = useTranslation();
+  const s = data.settings || {};
+  const set = (k, v) => setData(d => ({ ...d, settings: { ...d.settings, [k]: v } }));
+  const amount = s.supplementary_fixed_cost ?? '';
+  return (
+    <form onSubmit={onSave} className="stg-content">
+      <div className="stg-save-bar" style={{ marginBottom: 16 }}>
+        <button type="submit" className="stg-btn-primary" disabled={saving}>
+          {saving ? <><span className="stg-spin"/>{t('settings.saving')}</> : <><CheckCircle width={16} height={16}/>{t('settings.save_changes')}</>}
+        </button>
+      </div>
+      <div className="stg-section">
+        <div className="stg-section-head">
+          <div className="stg-section-icon purple"><Page width={18} height={18}/></div>
+          <div>
+            <div className="stg-section-title">{t('settings.estimates.fixed_title', 'Supplementary estimate — fixed cost')}</div>
+            <div className="stg-section-sub">{t('settings.estimates.fixed_sub', 'A tick box on every supplementary estimate adds this as one line for the customer to approve (with their consent) — for example to share the technical report when the main estimate is empty. It is a charge, not a technician job.')}</div>
+          </div>
+        </div>
+        <div className="stg-grid">
+          <div className="stg-field">
+            <label htmlFor="stg-fixed-amount">{t('settings.estimates.fixed_amount', 'Amount (AED, before VAT)')}</label>
+            <input id="stg-fixed-amount" type="number" min="0" step="0.01" inputMode="decimal" dir="ltr" value={amount}
+              onChange={e => set('supplementary_fixed_cost', e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0))} placeholder="0.00" />
+            <div style={{fontSize:11,color:'#94A3B8',marginTop:4}}>{t('settings.estimates.fixed_amount_hint', 'Leave at 0 to switch the tick box off.')}</div>
+          </div>
+          <div className="stg-field">
+            <label htmlFor="stg-fixed-label">{t('settings.estimates.fixed_label', 'Wording on the estimate')}</label>
+            <input id="stg-fixed-label" maxLength={200} value={s.supplementary_fixed_cost_label ?? ''}
+              onChange={e => set('supplementary_fixed_cost_label', e.target.value)}
+              placeholder={t('settings.estimates.fixed_label_ph', 'Technical inspection report')} />
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+}
+
 function SurveysTab({ data, setData, onSave, saving }) {
   const { t } = useTranslation();
   const s = data.settings || {};
@@ -2201,6 +2246,7 @@ const TABS = [
   { id:'labels',        icon: Printer,       color:'#ea580c' },
   { id:'notifications', icon: Bell,          color:'#8b5cf6' },
   { id:'surveys',       icon: EmojiSatisfied, color:'#0ea5e9' },
+  { id:'estimates',     icon: Page,          color:'#ea580c' },
   { id:'categories',    icon: Tag,           color:'#0d9488' },
   { id:'roles',         icon: ShieldCheck,   color:'#7c3aed' },
   { id:'users',         icon: User,          color:'#f43f5e' },
@@ -2306,6 +2352,7 @@ export default function Settings() {
             {tab==='labels'        && <ShippingLabelsTab data={data} setData={setData} onSave={handleSave} saving={saving}/>}
             {tab==='notifications' && <NotificationsTab data={data} setData={setData} onSave={handleSave} saving={saving}/>}
             {tab==='surveys'       && <SurveysTab       data={data} setData={setData} onSave={handleSave} saving={saving}/>}
+            {tab==='estimates'     && <EstimatesTab     data={data} setData={setData} onSave={handleSave} saving={saving}/>}
             {tab==='categories'    && <CategoriesTab    toast={toast}/>}
             {tab==='roles'         && <RolesTab         toast={toast}/>}
             {tab==='users'         && <UsersTab         toast={toast}/>}

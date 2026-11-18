@@ -284,3 +284,8 @@ textarea.wf-input { height: auto; padding: 8px 10px; resize: vertical; }
 
 /* Supplementary estimates under the main one (SEST-…). */
 .wf-sest { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e2e8f0; }
+
+/* Step 2: pick or add the vehicle in place (client feedback 18 Nov 2026, point 5). */
+.wf-veh-inline { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.wf-veh-inline > .wf-btn { align-self: flex-start; }
+.wf-veh-inline .nwo-invalid { border-color: #dc2626 !important; box-shadow: 0 0 0 3px rgba(220, 38, 38, .12); }

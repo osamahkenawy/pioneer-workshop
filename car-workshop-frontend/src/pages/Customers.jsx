@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { AuthContext } from '../context/AuthContext';
 import { canDo } from '../lib/permissions';
 import { hasModule } from '../lib/modules';
-import CustomersTabs from '../components/CustomersTabs';
+import { EnquiryModal, ConvertModal, EnquiryInsights, EnquiryStatusPill, EnquiryDetails, enquiryForm, enquiryProblem, enquiryPayload, enquiryChannelLabel } from './Enquiries';
 import { downloadCsv, toCsv, csvCell } from '../utils/csv';
 import { woLabel, woTone } from '../lib/statusLabels';
 import { VEHICLE_TYPES } from '../lib/intakeOptions';
@@ -370,6 +370,33 @@ function LocationPickerMap({ lat, lng, onPick }) {
 }
 
 /* ── Main component ── */
+/**
+ * The list's Stage column (18 Nov, point 2): the open enquiry — its status,
+ * channel and follow-up (red once due) — else the last enquiry's outcome,
+ * else a plain customer.
+ */
+function StageCell({ c, t, mayEnquiries }) {
+  const plain = <span style={{ fontSize:12, fontWeight:700, color:'#475569', background:'#f1f5f9', padding:'4px 10px', borderRadius:20 }}>{t('customers.stage.customer_pill', 'Customer')}</span>;
+  if (!c.enquiry_id || !mayEnquiries) return plain;
+  const open = Number(c.open_enquiries) > 0;
+  const fu = c.enquiry_follow_up_at ? new Date(String(c.enquiry_follow_up_at).replace(' ', 'T')) : null;
+  const due = open && fu && fu <= new Date();
+  return (
+    <div style={{ cursor:'pointer' }} title={t('customers.drawer.open_enquiry', 'Open the enquiry')}>
+      {open ? <EnquiryStatusPill status={c.enquiry_status} /> : plain}
+      <div style={{ fontSize:11.5, color:'#64748b', marginTop:4, whiteSpace:'nowrap' }}>
+        {c.enquiry_number}{open && c.enquiry_channel ? ` · ${enquiryChannelLabel(c.enquiry_channel)}` : ''}
+        {!open && ` · ${t(`customers.enquiry_status.${c.enquiry_status}`, c.enquiry_status)}`}
+      </div>
+      {open && fu && (
+        <div style={{ fontSize:11.5, marginTop:2, fontWeight: due ? 700 : 500, color: due ? '#dc2626' : '#64748b', whiteSpace:'nowrap' }}>
+          {t('customers.stage.follow_up', 'Follow-up {{d}}', { d: fu.toLocaleDateString('en-AE', { day:'2-digit', month:'short' }) })}{due ? ` · ${t('customers.stage.due_short', 'due')}` : ''}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Customers() {
   const { t, i18n } = useTranslation();
   const isRTL = i18n.language === 'ar';
@@ -401,6 +428,20 @@ export default function Customers() {
   const [newEntity,     setNewEntity]     = useState(null); // null = not adding; '' / text = the name being typed
 
   const [statusFilter,  setStatusFilter]  = useState('');
+  // One module with Enquiries (client feedback 18 Nov 2026, point 2): the
+  // list's stage filter — '' all, 'enquiry' open enquiries, 'due' follow-ups
+  // due, 'customer' no open enquiry — and the enquiry dialogs on this page.
+  const [stageFilter,   setStageFilter]   = useState(() => {
+    const v = new URLSearchParams(window.location.search).get('stage');
+    return ['enquiry', 'due', 'customer'].includes(v) ? v : '';
+  });
+  const [enqDialog,     setEnqDialog]     = useState(null); // { enquiry } to edit, or { customer } for a new one
+  const [convertFor,    setConvertFor]    = useState(null);
+  const [showInsights,  setShowInsights]  = useState(false);
+  // New Customer form, last step: log their enquiry with them.
+  const [enqOn,         setEnqOn]         = useState(false);
+  const [enqForm,       setEnqForm]       = useState(() => enquiryForm(null));
+  const [enqPrefTouched, setEnqPrefTouched] = useState(false);
   const [showForm,      setShowForm]      = useState(false);
   const [step,          setStep]          = useState(1);
   const [selected,      setSelected]      = useState(null);
@@ -461,7 +502,7 @@ export default function Customers() {
   /* ── Steps ── */
   // Vehicle step only makes sense on creation — editing an existing customer
   // already has vehicles managed from the Vehicles page / a work order.
-  const STEPS = selected ? [
+  const STEPS_BASE = selected ? [
     { num:1, title: 'Basic Info',     desc: 'Name & contact details' },
     { num:2, title: 'Business Info',  desc: 'Customer type & account details' },
     { num:3, title: 'Address & Limit',desc: 'Location, credit limit & notes' },
@@ -471,6 +512,8 @@ export default function Customers() {
     { num:3, title: 'Address & Limit',desc: 'Location, credit limit & notes' },
     { num:4, title: 'Vehicle',        desc: 'Optional — add their vehicle now' },
   ];
+  // One form for a customer and their enquiry (client feedback 18 Nov, point 2).
+  const STEPS = selected ? STEPS_BASE : [...STEPS_BASE, { num:5, title: 'Enquiry', desc: 'Optional — what they are asking for' }];
 
   /* ── ServiceBays ── */
   const [service_bays, setServiceBays] = useState([]);
@@ -514,6 +557,7 @@ export default function Customers() {
     if (classFilter)   params.set('customer_class', classFilter);
     if (subFilter)     params.set('customer_subcategory', subFilter);
     if (entityFilter)  params.set('entity_id', entityFilter);
+    if (stageFilter)   params.set('stage', stageFilter);
     const res = await api.get(`/customers?${params}`);
     if (res.success) {
       let data = res.data || [];
@@ -523,7 +567,7 @@ export default function Customers() {
       setTotal(res.pagination?.total || data.length);
     }
     setLoading(false);
-  }, [search, typeFilter, classFilter, subFilter, entityFilter, statusFilter, page]);
+  }, [search, typeFilter, classFilter, subFilter, entityFilter, statusFilter, stageFilter, page]);
 
   useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
 
@@ -539,6 +583,29 @@ export default function Customers() {
 
   // ?highlight=<customer> (links from Enquiries and Vehicles) opens that customer.
   const [params, setParams] = useSearchParams();
+  // ?enquiry=<id> (old /enquiries links, Bookings, Tasks) opens that enquiry here;
+  // ?stage= is read once into the filter.
+  useEffect(() => {
+    const enq = params.get('enquiry');
+    if (!enq && !params.get('stage')) return;
+    const next = new URLSearchParams(params); next.delete('enquiry'); next.delete('stage'); setParams(next, { replace: true });
+    if (enq) {
+      api.get(`/enquiries/${encodeURIComponent(enq)}`)
+        .then(r => { if (r?.success && r.data) setEnqDialog({ enquiry: r.data }); })
+        .catch(() => { /* the list is still there */ });
+    }
+  }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
+  const openEnquiry = async (id) => {
+    const r = await api.get(`/enquiries/${encodeURIComponent(id)}`).catch(() => null);
+    if (r?.success && r.data) setEnqDialog({ enquiry: r.data });
+    else showToast(r?.message || t('customers.enquiry.load_failed', 'Could not open the enquiry.'), 'error');
+  };
+  const afterEnquiry = () => {
+    setEnqDialog(null); setConvertFor(null);
+    fetchCustomers(); fetchStats();
+    if (drawer?.id) openDrawer(drawer);
+  };
+
   useEffect(() => {
     const id = params.get('highlight');
     if (!id) return;
@@ -578,12 +645,23 @@ export default function Customers() {
     setSelected(null); setForm(emptyForm);
     setPhoneCode('+971'); setPhoneAltCode('+971');
     setVehicleForm({ ...EMPTY_VEHICLE });
+    setEnqOn(stageFilter === 'enquiry' || stageFilter === 'due'); setEnqForm(enquiryForm(null)); setEnqPrefTouched(false);
     setFormError(''); setStep(1);
     setShowForm(true);
+  };
+  /** The enquiry step's problem, or '' (only when "log an enquiry" is ticked). */
+  const enquiryStepProblem = () => {
+    if (selected || !enqOn) return '';
+    if (!(enqForm.emirate || form.emirate)) return t('enquiries.emirate_required', 'Select the emirate the customer is in — it decides which team the enquiry goes to.');
+    return enquiryProblem(enqForm, t);
   };
 
   /* validate current step before going next */
   const validateStep = () => {
+    if (step === 5) {
+      const pr = enquiryStepProblem();
+      if (pr) { setEnqPrefTouched(true); setFormError(pr); return false; }
+    }
     if (step === 1) {
       if (!form.full_name.trim()) { setFormError(t('customers.validation.full_name_required')); return false; }
       if (!form.phone.trim())     { setFormError(t('customers.validation.phone_required')); return false; }
@@ -634,6 +712,8 @@ export default function Customers() {
         return;
       }
     }
+    const enqProblem = enquiryStepProblem();
+    if (enqProblem) { setSaving(false); setStep(STEPS.length); setEnqPrefTouched(true); setFormError(enqProblem); return; }
     if (payload.customer_class === 'internal' && !payload.customer_subcategory) {
       setSaving(false); setStep(2);
       setFormError(t('customers.validation.internal_sub_pick', 'Choose Fleet, Insurance, Asset or Staff for an internal customer.'));
@@ -665,6 +745,17 @@ export default function Customers() {
           });
           if (!vRes.success) showToast(t('customers.toast.created') + ' — vehicle could not be saved: ' + (vRes.message || ''), 'error');
         } catch { showToast(t('customers.toast.created') + ' — vehicle could not be saved (network error).', 'error'); }
+      }
+      // Their enquiry, on the new customer (it opens its work order, as every enquiry does).
+      if (!selected && enqOn) {
+        try {
+          const eRes = await api.post('/enquiries', {
+            ...enquiryPayload(enqForm), customer_id: res.data.id,
+            contact_name: form.full_name, contact_phone: payload.phone, contact_email: form.email || '',
+            emirate: enqForm.emirate || form.emirate,
+          });
+          if (!eRes.success) showToast(t('customers.toast.created') + ' — ' + t('customers.enquiry.save_failed', 'the enquiry could not be saved: {{m}}', { m: eRes.message || '' }), 'error');
+        } catch { showToast(t('customers.toast.created') + ' — ' + t('customers.enquiry.save_failed_net', 'the enquiry could not be saved (network error).'), 'error'); }
       }
       showToast(selected ? t('customers.toast.updated') : t('customers.toast.created'));
       setShowForm(false); setSelected(null);
@@ -718,6 +809,7 @@ export default function Customers() {
     if (classFilter)   params.set('customer_class', classFilter);
     if (subFilter)     params.set('customer_subcategory', subFilter);
     if (entityFilter)  params.set('entity_id', entityFilter);
+    if (stageFilter)   params.set('stage', stageFilter);
     const res = await api.get(`/customers?${params}`);
     setExporting(false);
     if (!res.success) { showToast(t('customers.toast.export_failed'), 'error'); return; }
@@ -759,7 +851,11 @@ export default function Customers() {
   /* ── Render ── */
   return (
     <div className="page-container">
-      <CustomersTabs />
+      {enqDialog && (
+        <EnquiryModal key={enqDialog.enquiry?.id || `new-${enqDialog.customer?.id}`} enquiry={enqDialog.enquiry || null} customer={enqDialog.customer || null}
+          onClose={() => setEnqDialog(null)} onSaved={afterEnquiry} />
+      )}
+      {convertFor && <ConvertModal enquiry={convertFor} onClose={() => setConvertFor(null)} onSaved={afterEnquiry} />}
 
       {/* Page Header */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:24, flexWrap:'wrap', gap:12 }}>
@@ -769,9 +865,17 @@ export default function Customers() {
           </h2>
           <p style={{ margin:'5px 0 0', color:'#64748b', fontSize:14 }}>
             {t('customers.page.subtitle', { total: Number(total).toLocaleString('en-AE'), activeCount: Number(stats.active || 0).toLocaleString('en-AE') })}
+            {' · '}{t('customers.page.one_module', 'Enquiries and customers in one list')}
           </p>
         </div>
-        <div style={{ display:'flex', gap:10 }}>
+        <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+          {mayEnquiries && (
+            <button onClick={() => setShowInsights(v => !v)} aria-expanded={showInsights}
+              style={{ padding:'10px 18px', borderRadius:10, border:'1px solid #e2e8f0', background: showInsights ? '#fff7ed' : '#fff',
+                cursor:'pointer', fontWeight:600, fontSize:13, color: showInsights ? '#c2410c' : '#475569', display:'flex', alignItems:'center', gap:7 }}>
+              <StatsUpSquare width={15} height={15} /> {t('customers.button.enquiry_insights', 'Enquiry insights')}
+            </button>
+          )}
           <button onClick={exportCSV} disabled={exporting}
             style={{ padding:'10px 18px', borderRadius:10, border:'1px solid #e2e8f0', background:'#fff',
               cursor:exporting?'not-allowed':'pointer', fontWeight:600, fontSize:13, color:'#475569',
@@ -794,6 +898,34 @@ export default function Customers() {
         <KPICard icon={Package}        label={t('customers.kpi.total_orders')}    value={stats.total_work_orders || 0}                                                    sub={t('customers.kpi.all_time')}                                    color="#3b82f6" />
         <KPICard icon={Building}       label="Business"                           value={stats.business || 0}                                                             sub="Company / corporate accounts"                                   color="#8b5cf6" />
         <KPICard icon={Car}            label="Fleet"                              value={stats.fleet || 0}                                                                sub="Managed fleet accounts"                                         color="#10b981" />
+      </div>
+
+      {showInsights && mayEnquiries && (
+        <div style={{ background:'#fff', borderRadius:14, padding:'16px 18px', boxShadow:'0 1px 3px rgba(0,0,0,0.07)', marginBottom:20 }}>
+          <EnquiryInsights />
+        </div>
+      )}
+
+      {/* Stage: one list for enquiries and customers (18 Nov, point 2). */}
+      <div role="group" aria-label={t('customers.stage.label', 'Show')} style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginBottom:12 }}>
+        {[
+          ['', t('customers.stage.all', 'Everyone'), null],
+          ...(mayEnquiries ? [
+            ['enquiry', t('customers.stage.enquiry', 'Open enquiries'), stats.open_enquiries],
+            ['due', t('customers.stage.due', 'Follow-ups due'), stats.followups_due],
+          ] : []),
+          ['customer', t('customers.stage.customer', 'No open enquiry'), null],
+        ].map(([k, label, n]) => {
+          const on = stageFilter === k;
+          return (
+            <button key={k || 'all'} type="button" aria-pressed={on} onClick={() => { setStageFilter(k); setPage(1); }}
+              style={{ padding:'7px 14px', borderRadius:20, border:`1.5px solid ${on ? '#f97316' : '#e2e8f0'}`, background:on ? '#fff7ed' : '#fff',
+                color:on ? '#c2410c' : '#475569', fontWeight:700, fontSize:13, cursor:'pointer', display:'flex', alignItems:'center', gap:6 }}>
+              {label}
+              {n != null && <span style={{ background: k === 'due' && n ? '#fee2e2' : '#f1f5f9', color: k === 'due' && n ? '#b91c1c' : '#64748b', borderRadius:20, padding:'0 7px', fontSize:11.5 }}>{Number(n).toLocaleString('en-AE')}</span>}
+            </button>
+          );
+        })}
       </div>
 
       {/* Filter Bar */}
@@ -899,7 +1031,7 @@ export default function Customers() {
               <table style={{ width:'100%', borderCollapse:'collapse', minWidth:860 }}>
                 <thead>
                   <tr style={{ background:'#f8fafc', borderBottom:'2px solid #f1f5f9' }}>
-                    {[t('customers.table.customer'), t('customers.table.type'), t('customers.table.contact'), t('customers.table.location'), t('customers.table.orders'), t('customers.table.credit_limit'), t('customers.table.status'), ''].map(h => (
+                    {[t('customers.table.customer'), t('customers.table.stage', 'Stage'), t('customers.table.type'), t('customers.table.contact'), t('customers.table.location'), t('customers.table.orders'), t('customers.table.credit_limit'), t('customers.table.status'), ''].map(h => (
                       <th key={h} style={{ padding:'10px 16px', textAlign: isRTL ? 'right' : 'left', fontSize:11,
                         fontWeight:700, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'0.06em' }}>{h}</th>
                     ))}
@@ -929,6 +1061,9 @@ export default function Customers() {
                               )}
                             </div>
                           </div>
+                        </td>
+                        <td style={{ padding:'13px 16px' }} onClick={e => { if (customer.enquiry_id && mayEnquiries) { e.stopPropagation(); openEnquiry(customer.enquiry_id); } }}>
+                          <StageCell c={customer} t={t} mayEnquiries={mayEnquiries} />
                         </td>
                         <td style={{ padding:'13px 16px' }}>
                           {entityOf(customer)
@@ -1231,7 +1366,7 @@ export default function Customers() {
                   )}
 
                   {/* Their enquiries — the Enquiries tab, one module with this one (client point 12). */}
-                  {mayEnquiries && drawer.enquiries?.length > 0 && (
+                  {mayEnquiries && (
                     <div style={{ background:'#fff', borderRadius:14, padding:18, marginTop:16,
                       boxShadow:'0 1px 3px rgba(0,0,0,0.07)' }}>
                       <div style={{ fontWeight:700, fontSize:13, marginBottom:13, color:'#374151',
@@ -1240,15 +1375,26 @@ export default function Customers() {
                         <span style={{ display:'flex', alignItems:'center', gap:7 }}>
                           <Megaphone width={15} height={15} color="#f97316" /> {t('customers.drawer.enquiries', 'Enquiries')}
                         </span>
-                        <span style={{ color:'#94a3b8', fontSize:12, fontWeight:400, textTransform:'none' }}>{drawer.enquiries.length}</span>
+                        {mayEdit && (
+                          <button type="button" onClick={() => setEnqDialog({ customer: drawer })}
+                            style={{ padding:'5px 10px', borderRadius:8, border:'1px solid #fed7aa', background:'#fff7ed', color:'#c2410c',
+                              cursor:'pointer', fontSize:12, fontWeight:700, textTransform:'none', letterSpacing:0, display:'flex', alignItems:'center', gap:4 }}>
+                            <Plus width={13} height={13} /> {t('customers.drawer.new_enquiry', 'New enquiry')}
+                          </button>
+                        )}
                       </div>
-                      {drawer.enquiries.map(e => {
+                      {!(drawer.enquiries || []).length && (
+                        <div style={{ fontSize:12.5, color:'#94a3b8' }}>{t('customers.drawer.no_enquiries', 'No enquiries yet.')}</div>
+                      )}
+                      {(drawer.enquiries || []).map(e => {
                         const sm = ENQUIRY_STATUS[e.status] || ENQUIRY_STATUS.new;
+                        const open = ['new', 'quoted', 'nurture'].includes(e.status);
                         return (
-                          <Link key={e.id} to={`/enquiries?id=${e.id}`}
+                          <div key={e.id} style={{ borderBottom:'1px solid #f8fafc', padding:'9px 0' }}>
+                          <button type="button" onClick={() => openEnquiry(e.id)}
                             title={t('customers.drawer.open_enquiry', 'Open the enquiry')}
-                            style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10,
-                              padding:'9px 0', borderBottom:'1px solid #f8fafc', textDecoration:'none' }}>
+                            style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10, width:'100%',
+                              padding:0, border:0, background:'none', cursor:'pointer', textAlign:'inherit' }}>
                             <div style={{ minWidth:0 }}>
                               <div style={{ fontWeight:700, fontSize:13, color:'#1e293b' }}>{e.enquiry_number}</div>
                               <div style={{ fontSize:11, color:'#94a3b8', marginTop:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
@@ -1258,7 +1404,20 @@ export default function Customers() {
                             <span style={{ background:sm.bg, color:sm.color, padding:'3px 9px', borderRadius:20, fontSize:11, fontWeight:700, flexShrink:0 }}>
                               {t(`customers.enquiry_status.${e.status}`, sm.label)}
                             </span>
-                          </Link>
+                          </button>
+                          {open && mayEdit && (
+                            <div style={{ display:'flex', gap:6, marginTop:6 }}>
+                              <button type="button" onClick={() => navigate(`/appointments?new=1&enquiry=${e.id}`)}
+                                style={{ padding:'4px 9px', borderRadius:7, border:'1px solid #bfdbfe', background:'#eff6ff', color:'#1d4ed8', cursor:'pointer', fontSize:11.5, fontWeight:700 }}>
+                                {t('customers.drawer.book', 'Book')}
+                              </button>
+                              <button type="button" onClick={async () => { const r = await api.get(`/enquiries/${e.id}`).catch(() => null); if (r?.success) setConvertFor(r.data); }}
+                                style={{ padding:'4px 9px', borderRadius:7, border:'1px solid #bbf7d0', background:'#f0fdf4', color:'#16a34a', cursor:'pointer', fontSize:11.5, fontWeight:700 }}>
+                                {t('customers.drawer.convert', 'Convert')}
+                              </button>
+                            </div>
+                          )}
+                          </div>
                         );
                       })}
                     </div>
@@ -1871,6 +2030,39 @@ export default function Customers() {
                         {FUEL_TYPES.map(f => <option key={f} value={f}>{t(`vehicles.fuel_${f}`, FUEL_LABELS[f])}</option>)}
                       </select>
                     </div>
+                  </div>
+                )}
+                {step === 5 && !selected && (
+                  <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                    <label style={{ display:'flex', gap:10, alignItems:'flex-start', padding:'12px 14px', borderRadius:12,
+                      border:`1.5px solid ${enqOn ? '#f97316' : '#e2e8f0'}`, background: enqOn ? '#fff7ed' : '#fff', cursor:'pointer' }}>
+                      <input type="checkbox" checked={enqOn} style={{ marginTop:3, accentColor:'#f97316' }}
+                        onChange={e => {
+                          const on = e.target.checked; setEnqOn(on); setFormError('');
+                          // The car from the Vehicle step, the emirate from the address — unless already typed.
+                          if (on) setEnqForm(f => ({ ...f,
+                            emirate: f.emirate || form.emirate || '',
+                            vehicle_make: f.vehicle_make || vehicleForm.make || '', vehicle_model: f.vehicle_model || vehicleForm.model || '',
+                            vehicle_year: f.vehicle_year || (vehicleForm.year ? String(vehicleForm.year) : '') }));
+                        }} />
+                      <span>
+                        <span style={{ display:'block', fontWeight:700, color:'#1e293b' }}>{t('customers.enquiry.log', 'They are enquiring about a service — log the enquiry')}</span>
+                        <span style={{ display:'block', fontSize:12.5, color:'#64748b', marginTop:2 }}>{t('customers.enquiry.log_hint', 'Saved with the customer: how they reached us, what they need, their car and the follow-up. It opens its work order, as every enquiry does.')}</span>
+                      </span>
+                    </label>
+                    {enqOn && (
+                      <>
+                        <div>
+                          <label style={LABEL}>{t('enquiries.emirate_label', 'Emirate')} *</label>
+                          <select value={enqForm.emirate || form.emirate || ''} onChange={e => setEnqForm(f => ({ ...f, emirate: e.target.value }))} style={INPUT}>
+                            <option value="">{t('enquiries.select_emirate', 'Select emirate…')}</option>
+                            {EMIRATES.map(em => <option key={em} value={em}>{em}</option>)}
+                          </select>
+                        </div>
+                        <EnquiryDetails f={enqForm} setF={setEnqForm} onPart={() => setEnqPrefTouched(true)}
+                          prefError={enqPrefTouched && !enqForm.parts_preference.length} />
+                      </>
+                    )}
                   </div>
                 )}
               </div>

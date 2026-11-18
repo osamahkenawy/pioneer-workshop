@@ -2434,7 +2434,7 @@
     "cash_amount_label": "Halaga ng Cash",
     "color": "Kulay",
     "email": "Email",
-    "no_vehicle": "Walang sasakyang naka-link sa job card na ito.",
+    "no_vehicle": "Wala pang sasakyan sa work order — idagdag ito sa Hakbang 2.",
     "vehicle_make_model": "Make / Model",
     "copy_customer_link": "Link ng customer",
     "copy_link_hint": "Kopyahin ang link na ginagamit ng customer para subaybayan ang job na ito",
@@ -3300,7 +3300,8 @@
       "roles": "Mga Tungkulin",
       "users": "Mga User",
       "subscription": "Subscription",
-      "surveys": "Mga Survey"
+      "surveys": "Mga Survey",
+      "estimates": "Estimates"
     },
     "tab_descriptions": {
       "general": "Info ng kumpanya, branding at mga regional na kagustuhan",
@@ -3311,7 +3312,8 @@
       "roles": "Tukuyin ang mga tungkulin at i-configure ang mga pahintulot ng module",
       "users": "Pamahalaan ang mga miyembro ng team at ang kanilang mga tungkulin",
       "subscription": "Tingnan ang kasalukuyang plano, mga limitasyon sa paggamit at mga opsyon sa pag-upgrade",
-      "surveys": "Awtomatikong survey kapag natapos ang trabaho"
+      "surveys": "Awtomatikong survey kapag natapos ang trabaho",
+      "estimates": "Fixed cost sa supplementary estimates"
     },
     "general": {
       "company_info": "Impormasyon ng Kumpanya",
@@ -4831,14 +4833,14 @@
     "internal": "Internal",
     "issue_gatepass": "Mag-issue ng gate pass",
     "issued": "Na-issue",
-    "jc_opened": "Nabuksan ang main job card",
+    "jc_opened": "Nabuksan ang inspection job card",
     "job": "Job",
     "job_done": "Tapos na ang job",
     "labour": "Labor",
     "later": "I-assign mamaya",
     "load_failed": "Hindi ma-load ang workflow.",
     "log_call": "Itala ang tawag",
-    "main": "Main job card",
+    "main": "Inspection job card",
     "method": "Paraan",
     "move_items": "Ilipat sa card na ito ang inaprubahang trabaho",
     "network": "Error sa network — suriin ang koneksyon.",
@@ -4846,7 +4848,7 @@
     "no_customer": "Walang customer record ang job na ito na maaaring i-classify.",
     "no_invoice": "Awtomatikong ginagawa ang invoice; lalabas ito dito.",
     "no_parts": "Walang hiniling na piyesa.",
-    "no_vehicle": "Walang naka-link na sasakyan — i-edit ang job card para idagdag ito.",
+    "no_vehicle": "Wala pang sasakyan sa work order — idagdag ito sa Hakbang 2.",
     "not_available": "Hindi available",
     "not_on_shelf": "Wala sa shelf",
     "not_started": "Hindi pa nasisimulan",
@@ -4857,7 +4859,7 @@
     "on_account": "Sinisingil sa account (internal / credit na customer).",
     "on_shelf": "Nasa shelf — i-issue",
     "open_estimate": "Buksan ang estimate",
-    "open_jc": "Buksan ang main job card",
+    "open_jc": "Buksan ang inspection job card",
     "paid": "Naitala ang bayad",
     "part_desc": "Paglalarawan ng piyesa",
     "part_no": "Part no.",
@@ -4924,11 +4926,12 @@
     "steps": {
       "classification": "Klasipikasyon ng customer",
       "intake": "Impormasyon ng sasakyan at problema",
-      "job_card": "Job card (JC)",
+      "job_card": "Physical inspection at inspection job card",
       "inspection_pricing": "Inspeksyon at pagpepresyo",
       "estimate": "Estimate para sa customer",
       "work": "Desisyon ng customer at trabaho",
-      "closure": "Quality check, pagkuha at pagsasara"
+      "closure": "Quality check, pagkuha at pagsasara",
+      "physical_inspection": "Physical inspection at inspection job card"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4972,7 +4975,7 @@
       "reported_issue": "Iniulat na problema",
       "odometer": "Odometer",
       "received_via": "Natanggap sa pamamagitan ng",
-      "main_jc_opened": "Nabuksan ang main job card",
+      "main_jc_opened": "Nabuksan ang inspection job card",
       "floor_notified": "Naabisuhan ang Supervisor, Foreman at Team Leader",
       "technical_inspection": "Teknikal na inspeksyon",
       "parts_priced": "Napresyuhan ng Storekeeper ang mga piyesa (Genuine / After-Market)",
@@ -4990,7 +4993,8 @@
       "pickup_contacted": "Nakontak ang customer para sa pagkuha",
       "payment": "Bayad at invoice",
       "gate_pass": "Huling gate pass",
-      "job_closed": "Sarado ang job"
+      "job_closed": "Sarado ang job",
+      "inspection_jc_opened": "Nabuksan ang inspection job card"
     },
     "val": {
       "class_internal": "Internal",
@@ -5038,7 +5042,7 @@
       "rejected_all": "Tinanggihan ng customer ang estimate. Naipadala na ang email ng paumanhin — itala ang kanilang dahilan at isara ang job.",
       "classify": "I-classify ang customer: Internal o External, pagkatapos ay Fleet, Insurance, Asset o Walk-in.",
       "intake": "Itala ang sasakyan at ang iniulat na problema.",
-      "open_job_card": "Buksan ang main job card.",
+      "open_job_card": "Buksan ang inspection job card.",
       "create_estimate": "Isagawa ang teknikal na inspeksyon at gumawa ng estimate batay sa mga natuklasan.",
       "price_parts": "Presyuhan ang mga piyesa — Genuine at After-Market, o markahan ang isang uri bilang N/A.",
       "price_labour": "Presyuhan ang labor sa estimate.",
@@ -5117,7 +5121,10 @@
       "title": "Mga gawain mo"
     },
     "time_by_floor": "Ang technician ang nagbu-book ng oras (o ang Team Leader / Supervisor / Foreman).",
-    "your_turn": "Ikaw na"
+    "your_turn": "Ikaw na",
+    "inspection_card": "Inspection job card",
+    "job_card": "Job card",
+    "inspection_card_opened": "Nabuksan ang inspection job card"
   },
   "bookings": {
     "err_load": "Hindi ma-load ang mga booking.",

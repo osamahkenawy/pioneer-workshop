@@ -34,6 +34,7 @@ import authRouter from './routes/auth.js';
 import workshopsRouter from './routes/workshops.js';
 import mechanicsRouter from './routes/mechanics.js';
 import customersRouter from './routes/customers.js';
+import { logSchemaCheck } from './lib/schema-check.js';
 import enquiriesRouter from './routes/enquiries.js';
 import serviceBaysRouter from './routes/service-bays.js';
 import vehiclesRouter from './routes/vehicles.js';
@@ -415,6 +416,8 @@ if (process.env.DISABLE_CRON_JOBS !== 'true') {
 ensurePushTable()
   .then(() => console.log('✅ Notification tables ensured'))
   .catch(e => console.error('ensurePushTable failed:', e.message));
+// Says which migrations this code needs are missing (client feedback 18 Nov).
+logSchemaCheck();
 
 httpServer.listen(config.port, () => {
   console.log(`Car Workshop Platform API listening on port ${config.port} (${config.env})`);

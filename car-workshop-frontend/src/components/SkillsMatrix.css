@@ -1,0 +1,29 @@
+/* Skills matrix (Technicians → Skills). Client feedback 18 Nov 2026, point 8. */
+.sm-overlay { position: fixed; inset: 0; z-index: 1200; background: rgba(15, 23, 42, .45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.sm-dialog { background: #fff; border-radius: 16px; width: min(920px, 100%); max-height: calc(100vh - 32px); display: flex; flex-direction: column; box-shadow: 0 24px 60px rgba(15, 23, 42, .25); }
+.sm-head { display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; padding: 18px 20px 10px; }
+.sm-head h3 { margin: 0; font-size: 17px; color: #1e3a5f; }
+.sm-head p { margin: 4px 0 0; font-size: 12.5px; color: #64748b; max-width: 640px; }
+.sm-x { border: 0; background: #f1f5f9; border-radius: 10px; width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer; color: #334155; }
+.sm-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; padding: 0 20px 10px; }
+.sm-search { display: flex; align-items: center; gap: 6px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px 10px; color: #94a3b8; min-width: 220px; }
+.sm-search input { border: 0; outline: 0; font-size: 13px; color: #0f172a; width: 100%; background: transparent; }
+.sm-badge { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #dcfce7; color: #166534; }
+.sm-badge.warn { background: #fef3c7; color: #92400e; }
+.sm-scroll { overflow: auto; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; }
+.sm-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sm-table th, .sm-table td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; text-align: center; }
+.sm-table thead th { position: sticky; top: 0; background: #f8fafc; z-index: 1; font-size: 12px; color: #475569; white-space: nowrap; }
+.sm-table thead th:first-child, .sm-table tbody th { text-align: start; }
+.sm-table tbody th { font-weight: 600; color: #0f172a; }
+.sm-table tbody tr.is-dirty { background: #fff7ed; }
+.sm-table input[type=checkbox] { width: 17px; height: 17px; accent-color: #ea580c; cursor: pointer; }
+.sm-col { border: 0; background: none; font: inherit; font-weight: 700; color: #1e3a5f; cursor: pointer; padding: 0; text-decoration: underline dotted; }
+.sm-count { display: block; font-size: 11px; font-weight: 500; color: #94a3b8; }
+.sm-name { display: block; }
+.sm-spec { display: block; font-size: 11.5px; font-weight: 400; color: #64748b; }
+.sm-empty { color: #94a3b8; padding: 18px; }
+.sm-foot { display: flex; gap: 10px; align-items: center; justify-content: flex-end; padding: 12px 20px; flex-wrap: wrap; }
+.sm-ok { color: #166534; font-size: 12.5px; margin-inline-end: auto; }
+.sm-bad { color: #b91c1c; font-size: 12.5px; margin-inline-end: auto; }
+@media (max-width: 600px) { .sm-head, .sm-tools, .sm-foot { padding-inline: 14px; } }

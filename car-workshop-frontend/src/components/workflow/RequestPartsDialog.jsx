@@ -111,7 +111,7 @@ export default function RequestPartsDialog({ workOrderId, onClose, onDone }) {
           <div className="rpd-titles">
             <h2 id={`${id}-h`}>{t('requestParts.title', 'Request parts')}{data?.work_order ? ` · ${data.work_order.work_order_number}` : ''}</h2>
             <p>{card
-              ? t('requestParts.sub', 'A material requisition (MRN) to the Store on the Inspection job card {{jc}}. The technician can be assigned once it is sent.', { jc: card.job_card_number })
+              ? t('requestParts.sub_jc', 'A material requisition (MRN) to the Store on job card {{jc}}. The technician can be assigned once it is sent.', { jc: card.job_card_number })
               : t('requestParts.sub_plain', 'A material requisition (MRN) to the Store.')}</p>
           </div>
           <button type="button" className="rpd-x" aria-label={t('requestParts.close', 'Close')} onClick={onClose} disabled={saving}><Xmark width={18} height={18} /></button>
@@ -122,7 +122,7 @@ export default function RequestPartsDialog({ workOrderId, onClose, onDone }) {
             : !data ? <div className="rpd-skel" aria-busy="true"><span /><span /><span /></div>
               : (
                 <>
-                  {!card && <p className="rpd-err" role="alert"><WarningTriangle width={15} height={15} /> {t('requestParts.no_card', 'This job has no Inspection job card yet, so there is nothing to request parts on.')}</p>}
+                  {!card && <p className="rpd-err" role="alert"><WarningTriangle width={15} height={15} /> {t('requestParts.no_jc', 'This job has no job card yet, so there is nothing to request parts on.')}</p>}
                   {data.can_request === false && <p className="rpd-note"><InfoCircle width={15} height={15} /> {t('requestParts.no_right', 'Parts are requested by the Team Leader, Supervisor, Foreman or Service Advisor.')}</p>}
                   {reqs.length > 0 && (
                     <p className="rpd-note">

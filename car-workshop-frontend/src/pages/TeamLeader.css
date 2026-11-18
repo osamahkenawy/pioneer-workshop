@@ -709,3 +709,9 @@ i.tb-faint { font-style: italic; }
 @media (prefers-reduced-motion: reduce) {
   .tb *, .tb *::before, .tb *::after, .tb-layer *, .tb-layer *::before, .tb-layer *::after { animation: none !important; transition: none !important; }
 }
+
+/* Point 8 (18 Nov): record the missing skill, or a manager's one-off with a reason. */
+.tb-skillfix { margin: 0; }
+.tb-skillfix legend { padding: 0 4px; font-weight: 700; }
+.tb-radio { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; color: #78350f; cursor: pointer; }
+.tb-radio input { margin-top: 2px; accent-color: #ea580c; }

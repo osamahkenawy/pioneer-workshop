@@ -853,7 +853,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, canParts, busy, error, cla
         </div>
         <div className="tb-l2">{woLink()} {vehicleLine}</div>
         <div className={`tb-l3${main ? '' : ' warn'}`}>
-          {main ? t('teamBoard.inspection_tech', 'Inspection job card: {{name}}', { name: main }) : t('teamBoard.inspection_tech_none', 'Inspection job card: not assigned')}
+          {main ? t('teamBoard.jc_tech', 'Job card: {{name}}', { name: main }) : t('teamBoard.jc_tech_none', 'Job card: not assigned')}
         </div>
       </>
     );
@@ -864,7 +864,7 @@ function QueueRow({ kind, row, done, noTeam, canTime, canParts, busy, error, cla
       <>
         <div className="tb-l1">
           <bdi className="tb-mono b" id={labelId}>{row.job_card_number}</bdi>
-          <span className="tb-title sm">{row.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${row.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}</span>
+          <span className="tb-title sm">{row.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${row.title || ''}` : t('workflow.job_card', 'Job card')}</span>
           {woLink()}
         </div>
         <div className="tb-l2">{vehicleLine}</div>
@@ -1331,6 +1331,10 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
   const [allPick, setAllPick] = useState(null);
   const [allSkipped, setAllSkipped] = useState({ name: '', ids: [] }); // jobs "same for all" could not fill
   const [reason, setReason] = useState('');
+  // Client feedback (18 Nov 2026), point 8: a job given to someone without the
+  // skill on file records the skill on the technician (the user-to-skill
+  // mapping, done as you go) — or, for a manager, a one-off with a reason.
+  const [learn, setLearn] = useState(true);
   const [windowOn, setWindowOn] = useState(true);
   const [win, setWin] = useState(null);
   const [edited, setEdited] = useState(false);
@@ -1399,10 +1403,7 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
   };
   const pickAll = (id, info) => {
     const next = { ...picks }, skipped = [];
-    for (const task of allTargets) {
-      if (fitFor(id, task) !== 'all' && !jt.can_override) { skipped.push(task.id); delete next[task.id]; continue; }
-      next[task.id] = id;
-    }
+    for (const task of allTargets) next[task.id] = id; // outside their skills: recorded below (or a manager's override)
     setPicks(next); setAllPick(id); setTouched(true); setErr(''); setJobErrors({});
     setAllSkipped({ name: splitName(info?.tech?.full_name).name, ids: skipped });
   };
@@ -1415,7 +1416,8 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
   const submit = async e => {
     e.preventDefault();
     if (!changes.length) { setErr(t('teamBoard.err_pick_jobs', 'Choose a technician for at least one job.')); return; }
-    if (needReason && reason.trim().length < 3) {
+    const oneOff = needReason && (!learn && jt.can_override);
+    if (oneOff && reason.trim().length < 3) {
       setErr(t('teamBoard.err_reason', 'Say why the job goes to someone outside their skills (recorded on the job).'));
       reasonRef.current?.focus();
       return;
@@ -1423,15 +1425,29 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
     if (bookWindow && !validWindow) { setErr(t('teamBoard.err_window', 'The end of the window must be after its start.')); return; }
     setSaving(true); setErr(''); setJobErrors({});
     try {
+      if (needReason && !oneOff) {
+        // Record each missing skill on its technician first; the jobs then go to qualified people.
+        const add = new Map();
+        for (const x of overrides) {
+          const id = Number(picks[x.id]);
+          if (!x.service_type) continue;
+          const cur = add.get(id) || new Set(techById.get(id)?.skills || []);
+          cur.add(x.service_type); add.set(id, cur);
+        }
+        for (const [id, set] of add) {
+          const r = await api.patch(`/mechanics/${id}/skills`, { skills: [...set] });
+          if (!r?.success) { setErr(r?.message || t('teamBoard.skills_failed', 'Could not record the skills.')); setSaving(false); return; }
+        }
+      }
       const res = await api.post('/job-tasks/assign', {
         work_order_id: row.id,
         assignments: changes.map(x => ({
           task_id: x.id, mechanic_id: Number(picks[x.id]),
           // The dialog says who it saw on the job: another leader assigning it meanwhile gets a 409, not a silent swap.
           expected_mechanic_id: x.mechanic_id || null,
-          ...(fitFor(picks[x.id], x) !== 'all' ? { override: true } : {}),
+          ...(oneOff && fitFor(picks[x.id], x) !== 'all' ? { override: true } : {}),
         })),
-        ...(needReason ? { reason: reason.trim() } : {}),
+        ...(oneOff ? { reason: reason.trim() } : {}),
         ...(bookWindow ? { scheduled_start_at: toSql(win.start), scheduled_end_at: toSql(win.end) } : {}),
       });
       if (!res.success) {
@@ -1511,7 +1527,7 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
                 <span>{t('teamBoard.same_for_all_hint', 'One pick fills every job below; you can still change any of them.')}</span>
               </div>
               <TechnicianPicker technicians={techs} value={allPick} serviceTypes={typesOf(allTargets)} serviceLabels={jt.service_types}
-                canOverride={jt.can_override} preferTeamId={jt.prefer_team_leader_id} disabled={saving}
+                canOverride={jt.can_override} canLearn preferTeamId={jt.prefer_team_leader_id} disabled={saving}
                 label={t('teamBoard.same_for_all_label', 'Technician for every job')}
                 placeholder={t('teamBoard.choose_for_all', 'Choose one technician for all…')} onChange={pickAll} />
               {allNote && <p className="tb-allbox-note"><InfoCircle width={13} height={13} /> {allNote}</p>}
@@ -1549,7 +1565,7 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
                   {can ? (
                     <TechnicianPicker technicians={techs} value={picks[x.id] ?? null} currentId={x.mechanic_id}
                       serviceTypes={x.service_type ? [x.service_type] : []} serviceLabels={jt.service_types}
-                      canOverride={jt.can_override} preferTeamId={jt.prefer_team_leader_id} disabled={saving}
+                      canOverride={jt.can_override} canLearn preferTeamId={jt.prefer_team_leader_id} disabled={saving}
                       label={t('jobTasks.pick_label', 'Technician for {{job}}', { job: x.job_name })}
                       placeholder={x.mechanic_id ? t('teamBoard.keep_or_change', 'Keep, or choose another…') : t('techPicker.choose', 'Choose a technician…')}
                       onChange={id => pickOne(x, id)} />
@@ -1575,13 +1591,27 @@ function JobsAssignDialog({ row, team, bookings, canParts, onClose, onDone, onFa
           </ol>
 
           {needReason && (
-            <label className="tb-override">
-              <span>{overrides.length === 1
-                ? t('teamBoard.override_reason_one', 'Reason for assigning 1 job outside the technician\'s skills (recorded on the job)')
-                : t('teamBoard.override_reason_n', 'Reason for assigning {{n}} jobs outside the technicians\' skills (recorded on each job)', { n: overrides.length })}</span>
-              <input ref={reasonRef} className="tb-input" value={reason} maxLength={255} onChange={e => { setReason(e.target.value); setTouched(true); }}
-                placeholder={t('teamBoard.override_ph', 'e.g. the body technician is off today')} />
-            </label>
+            <fieldset className="tb-override tb-skillfix">
+              <legend>{t('teamBoard.skill_missing', 'Not on file as their skill: {{list}}', {
+                list: overrides.map(x => `${x.job_name} → ${splitName(techById.get(Number(picks[x.id]))?.full_name).name}${x.service_type_label ? ` (${x.service_type_label})` : ''}`).join(', '),
+              })}</legend>
+              <label className="tb-radio">
+                <input type="radio" name="tb-skillfix" checked={learn || !jt.can_override} onChange={() => { setLearn(true); setTouched(true); setErr(''); }} />
+                <span><b>{t('teamBoard.skill_learn', 'Add the skill to the technician\'s record')}</b>
+                  {' '}{t('teamBoard.skill_learn_hint', '— they are qualified from now on; no reason needed.')}</span>
+              </label>
+              {jt.can_override && (
+                <label className="tb-radio">
+                  <input type="radio" name="tb-skillfix" checked={!learn} onChange={() => { setLearn(false); setTouched(true); setErr(''); }} />
+                  <span><b>{t('teamBoard.skill_oneoff', 'Just this once')}</b> {t('teamBoard.skill_oneoff_hint', '— assign outside their skills, with a reason recorded on the job.')}</span>
+                </label>
+              )}
+              {!learn && jt.can_override && (
+                <input ref={reasonRef} className="tb-input" value={reason} maxLength={255} onChange={e => { setReason(e.target.value); setTouched(true); }}
+                  aria-label={t('teamBoard.override_reason_label', 'Reason (recorded on the job)')}
+                  placeholder={t('teamBoard.override_ph', 'e.g. the body technician is off today')} />
+              )}
+            </fieldset>
           )}
 
           {windowAllowed && soleTech && win && (
@@ -1997,7 +2027,7 @@ function CardsPanel({ data, panelRef, tech, onClearTech }) {
                   <td className="c-job">
                     <Link to={`/job-cards/${c.work_order_id}`} className="tb-mono b"><bdi>{c.job_card_number}</bdi></Link>
                     <span className="tb-sub">
-                      {c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${c.title || ''}` : t('workflow.inspection_card', 'Inspection job card')}
+                      {c.parent_job_card_id ? `${t('workflow.sub', 'Sub-job card')} · ${c.title || ''}` : t('workflow.job_card', 'Job card')}
                       {c.department && c.department !== 'mechanical' && <> · {deptLabel(t, c.department)}</>}
                     </span>
                   </td>

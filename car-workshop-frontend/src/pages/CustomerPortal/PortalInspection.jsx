@@ -12,11 +12,12 @@
  * POST /customer-portal/inspections/:id/sign. Once only — the server refuses
  * a second signature (409) and this then shows the one that won.
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EditPencil, Check, WarningTriangle, Page } from 'iconoir-react';
 import CarDamageDiagram, { DAMAGE_COLORS, MARK_COLOR, damageCodeOf, damageLabel, viewLabel } from '../../components/CarDamageDiagram';
 import api from '../../lib/customerApi';
+import { CustomerAuthContext } from '../../context/CustomerAuthContext';
 import { fmtWhen } from '../../components/service-status/ServiceStatusCard';
 import './PortalInspection.css';
 
@@ -217,7 +218,9 @@ function SignForm({ inspection, autoFocus, onSigned }) {
   const nameRef = useRef(null);
   const drawing = useRef(false);
   const [hasInk, setHasInk] = useState(false);
-  const [name, setName] = useState('');
+  // The signed-in customer's name, filled in (client feedback 18 Nov, point 6); they can change it.
+  const auth = useContext(CustomerAuthContext);
+  const [name, setName] = useState(() => String(auth?.user?.full_name || inspection.customer_name || '').trim());
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');

@@ -2201,7 +2201,7 @@
     "cash_amount_label": "Nakit Tutarı",
     "color": "Renk",
     "email": "E-posta",
-    "no_vehicle": "Bu iş kartına bağlı araç yok.",
+    "no_vehicle": "İş emrinde henüz araç yok — 2. adımda ekleyin.",
     "vehicle_make_model": "Marka / Model",
     "copy_customer_link": "Müşteri bağlantısı",
     "copy_link_hint": "Müşterinin bu işi takip etmek için kullandığı bağlantıyı kopyalayın",
@@ -3435,7 +3435,8 @@
       "roles": "Rolleri tanımlayın ve modül düzeyinde izinleri yapılandırın",
       "subscription": "Mevcut planınızı, kullanım limitlerini ve yükseltme seçeneklerini görüntüleyin",
       "users": "Kullanicilar",
-      "surveys": "İş kapanışında otomatik anket"
+      "surveys": "İş kapanışında otomatik anket",
+      "estimates": "Ek tekliflerde sabit ücret"
     },
     "tabs": {
       "categories": "Kategoriler",
@@ -3446,7 +3447,8 @@
       "roles": "Roller",
       "subscription": "Abonelik",
       "users": "Kullanicilar",
-      "surveys": "Anketler"
+      "surveys": "Anketler",
+      "estimates": "Teklifler"
     },
     "tax": {
       "apply_on_delivery": "Servis Ücretine KDV Uygula",
@@ -4829,14 +4831,14 @@
     "internal": "Kurum İçi",
     "issue_gatepass": "Çıkış belgesi düzenle",
     "issued": "Verildi",
-    "jc_opened": "Ana iş kartı açıldı",
+    "jc_opened": "Muayene iş kartı açıldı",
     "job": "İş",
     "job_done": "İş bitti",
     "labour": "İşçilik",
     "later": "Sonra ata",
     "load_failed": "İş akışı yüklenemedi.",
     "log_call": "Aramayı kaydet",
-    "main": "Ana iş kartı",
+    "main": "Muayene iş kartı",
     "method": "Yöntem",
     "move_items": "Onaylanan çalışmayı bu karta taşı",
     "network": "Ağ hatası — bağlantıyı kontrol edin.",
@@ -4844,7 +4846,7 @@
     "no_customer": "Bu işin sınıflandırılacak müşteri kaydı yok.",
     "no_invoice": "Fatura otomatik olarak oluşturulur; burada görünecek.",
     "no_parts": "Parça talep edilmedi.",
-    "no_vehicle": "Bağlı araç yok — eklemek için iş kartını düzenleyin.",
+    "no_vehicle": "İş emrinde henüz araç yok — 2. adımda ekleyin.",
     "not_available": "Mevcut değil",
     "not_on_shelf": "Rafta yok",
     "not_started": "Başlamadı",
@@ -4855,7 +4857,7 @@
     "on_account": "Hesaba faturalandı (kurum içi / kredili müşteri).",
     "on_shelf": "Rafta — ver",
     "open_estimate": "Fiyat teklifini aç",
-    "open_jc": "Ana iş kartını aç",
+    "open_jc": "Muayene iş kartını aç",
     "paid": "Ödeme kaydedildi",
     "part_desc": "Parça açıklaması",
     "part_no": "Parça no.",
@@ -4922,11 +4924,12 @@
     "steps": {
       "classification": "Müşteri sınıflandırması",
       "intake": "Araç bilgileri ve sorun",
-      "job_card": "İş kartı (JC)",
+      "job_card": "Fiziksel muayene ve muayene iş kartı",
       "inspection_pricing": "Muayene ve fiyatlandırma",
       "estimate": "Müşteriye fiyat teklifi",
       "work": "Müşteri kararı ve çalışma",
-      "closure": "Kalite kontrol, teslim alma ve kapanış"
+      "closure": "Kalite kontrol, teslim alma ve kapanış",
+      "physical_inspection": "Fiziksel muayene ve muayene iş kartı"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4970,7 +4973,7 @@
       "reported_issue": "Bildirilen sorun",
       "odometer": "Kilometre sayacı",
       "received_via": "Alındığı kanal",
-      "main_jc_opened": "Ana iş kartı açıldı",
+      "main_jc_opened": "Muayene iş kartı açıldı",
       "floor_notified": "Süpervizör, atölye şefi ve ekip liderine bildirildi",
       "technical_inspection": "Teknik muayene",
       "parts_priced": "Parçalar depo sorumlusu tarafından fiyatlandırıldı (Orijinal / Yan Sanayi)",
@@ -4988,7 +4991,8 @@
       "pickup_contacted": "Teslim alma için müşteriyle iletişime geçildi",
       "payment": "Ödeme ve fatura",
       "gate_pass": "Nihai çıkış belgesi",
-      "job_closed": "İş kapatıldı"
+      "job_closed": "İş kapatıldı",
+      "inspection_jc_opened": "Muayene iş kartı açıldı"
     },
     "val": {
       "class_internal": "Kurum İçi",
@@ -5036,7 +5040,7 @@
       "rejected_all": "Müşteri fiyat teklifini reddetti. Özür e-postası gönderildi — nedenini kaydedin ve işi kapatın.",
       "classify": "Müşteriyi sınıflandırın: Kurum İçi veya Kurum Dışı, ardından Filo, Sigorta, Varlık veya Bireysel Müşteri.",
       "intake": "Aracı ve bildirilen sorunu kaydedin.",
-      "open_job_card": "Ana iş kartını açın.",
+      "open_job_card": "Muayene iş kartını aç.",
       "create_estimate": "Teknik muayeneyi yapın ve bulgularla fiyat teklifini oluşturun.",
       "price_parts": "Parçaları fiyatlandırın — Orijinal ve Yan Sanayi ya da bir türü N/A olarak işaretleyin.",
       "price_labour": "Fiyat teklifindeki işçiliği fiyatlandırın.",
@@ -5115,7 +5119,10 @@
       "title": "Görevleriniz"
     },
     "time_by_floor": "Süreyi teknisyen kaydeder (veya ekip lideri / süpervizör / atölye şefi).",
-    "your_turn": "Sıra sizde"
+    "your_turn": "Sıra sizde",
+    "inspection_card": "Muayene iş kartı",
+    "job_card": "İş kartı",
+    "inspection_card_opened": "Muayene iş kartı açıldı"
   },
   "bookings": {
     "err_load": "Randevular yüklenemedi.",

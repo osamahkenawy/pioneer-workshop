@@ -3,7 +3,7 @@
  * this technician today (GET /job-cards/mine `bookings_today`). Shown only
  * when there is at least one.
  *
- *   09:00–11:30 · A 12345 Toyota Camry · Inspection job card · [Now|Next|Late|Done]
+ *   09:00–11:30 · A 12345 Toyota Camry · Job card · [Now|Next|Late|Done]
  */
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -39,7 +39,7 @@ export default function TodaySchedule({ bookings }) {
                   {[b.make, b.model].filter(Boolean).length > 0 && <span> {[b.make, b.model].filter(Boolean).join(' ')}</span>}
                 </span>
                 <span className="tk-booking-kind">
-                  {b.is_main ? t('technician.main_card', 'Inspection job card') : t('technician.sub_short', { dept, defaultValue: 'Sub · {{dept}}' })}
+                  {b.is_main ? t('workflow.job_card', 'Job card') : t('technician.sub_short', { dept, defaultValue: 'Sub · {{dept}}' })}
                 </span>
                 <span className={`tk-pill tk-pill--${b.state || 'later'}`}>{t(key, def)}</span>
               </Link>

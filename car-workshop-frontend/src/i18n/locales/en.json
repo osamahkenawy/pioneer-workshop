@@ -2459,7 +2459,7 @@
     "busy_mechanic_confirm": "Yes, Assign Anyway",
     "color": "Color",
     "email": "Email",
-    "no_vehicle": "No vehicle linked to this job card.",
+    "no_vehicle": "No vehicle on this work order yet — add it in Step 2.",
     "vehicle_make_model": "Make / Model",
     "copy_customer_link": "Customer link",
     "copy_link_hint": "Copy the link the customer uses to follow this job",
@@ -3274,7 +3274,8 @@
       "roles": "Roles",
       "users": "Users",
       "subscription": "Subscription",
-      "surveys": "Surveys"
+      "surveys": "Surveys",
+      "estimates": "Estimates"
     },
     "tab_descriptions": {
       "general": "Company info, branding and regional preferences",
@@ -3285,7 +3286,8 @@
       "roles": "Define roles and configure module-level permissions",
       "users": "Manage team members and their roles",
       "subscription": "View your current plan, usage limits and upgrade options",
-      "surveys": "Automatic survey on job closure"
+      "surveys": "Automatic survey on job closure",
+      "estimates": "Fixed cost on supplementary estimates"
     },
     "general": {
       "company_info": "Company Information",
@@ -4805,14 +4807,14 @@
     "internal": "Internal",
     "issue_gatepass": "Issue gate pass",
     "issued": "Issued",
-    "jc_opened": "Main job card opened",
+    "jc_opened": "Inspection job card opened",
     "job": "Job",
     "job_done": "Job done",
     "labour": "Labour",
     "later": "Assign later",
     "load_failed": "Could not load the workflow.",
     "log_call": "Log the call",
-    "main": "Main job card",
+    "main": "Inspection job card",
     "method": "Method",
     "move_items": "Move approved work to this card",
     "network": "Network error — check the connection.",
@@ -4820,7 +4822,7 @@
     "no_customer": "This job has no customer record to classify.",
     "no_invoice": "The invoice is raised automatically; it will appear here.",
     "no_parts": "No parts requested.",
-    "no_vehicle": "No vehicle linked — edit the job card to add it.",
+    "no_vehicle": "No vehicle on the work order yet — add it in Step 2.",
     "not_available": "Not available",
     "not_on_shelf": "Not on the shelf",
     "not_started": "Not started",
@@ -4831,7 +4833,7 @@
     "on_account": "Billed on account (internal / credit customer).",
     "on_shelf": "On shelf — issue",
     "open_estimate": "Open estimate",
-    "open_jc": "Open the main job card",
+    "open_jc": "Open the Inspection job card",
     "paid": "Payment recorded",
     "part_desc": "Part description",
     "part_no": "Part no.",
@@ -4898,11 +4900,12 @@
     "steps": {
       "classification": "Customer classification",
       "intake": "Vehicle information & issue",
-      "job_card": "Job card (JC)",
+      "job_card": "Physical inspection & Inspection job card",
       "inspection_pricing": "Inspection & pricing",
       "estimate": "Estimate to customer",
       "work": "Customer decision & work",
-      "closure": "Quality check, collection & closure"
+      "closure": "Quality check, collection & closure",
+      "physical_inspection": "Physical inspection & Inspection job card"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4946,7 +4949,7 @@
       "reported_issue": "Reported issue",
       "odometer": "Odometer",
       "received_via": "Received via",
-      "main_jc_opened": "Main job card opened",
+      "main_jc_opened": "Inspection job card opened",
       "floor_notified": "Supervisor, Foreman and Team Leader notified",
       "technical_inspection": "Technical inspection",
       "parts_priced": "Parts priced by the Storekeeper (Genuine / After-Market)",
@@ -4964,7 +4967,8 @@
       "pickup_contacted": "Customer called to arrange collection",
       "payment": "Payment & invoice",
       "gate_pass": "Final gate pass",
-      "job_closed": "Job closed"
+      "job_closed": "Job closed",
+      "inspection_jc_opened": "Inspection job card opened"
     },
     "val": {
       "class_internal": "Internal",
@@ -5012,7 +5016,7 @@
       "rejected_all": "The customer rejected the estimate. The regret email has gone out — record their reason and close the job.",
       "classify": "Classify the customer: Internal or External, then Fleet, Insurance, Asset or Walk-in.",
       "intake": "Record the vehicle and the reported issue.",
-      "open_job_card": "Open the main job card.",
+      "open_job_card": "Open the Inspection job card.",
       "create_estimate": "Carry out the technical inspection and raise the estimate with the findings.",
       "price_parts": "Price the parts — Genuine and After-Market, or mark a type N/A.",
       "price_labour": "Price the labour on the estimate.",
@@ -5091,7 +5095,10 @@
       "title": "Your tasks"
     },
     "time_by_floor": "Time is booked by the technician (or the Team Leader / Supervisor / Foreman).",
-    "your_turn": "Your turn"
+    "your_turn": "Your turn",
+    "inspection_card": "Inspection job card",
+    "job_card": "Job card",
+    "inspection_card_opened": "Inspection job card opened"
   },
   "bookings": {
     "err_load": "Could not load bookings.",

@@ -172,6 +172,20 @@ function TaskRow({ n, task, data, t, closed, blocked, showCard, busy, onAssign, 
     const r = await onAssign(task, pick.id, !pick.qualified, reason.trim());
     if (r?.success) { setPick(null); setReason(''); }
   };
+  // Client feedback (18 Nov 2026), point 8: record the job's service type as
+  // the technician's skill (the user-to-skill mapping), then assign — no reason.
+  const [learnErr, setLearnErr] = useState('');
+  const learnAndAssign = async () => {
+    if (!changed || !task.service_type) return;
+    setLearnErr('');
+    const tech = pick.tech || techs.find(m => Number(m.id) === Number(pick.id));
+    const skills = [...new Set([...(tech?.skills || []), task.service_type])];
+    const s = await api.patch(`/mechanics/${pick.id}/skills`, { skills }).catch(() => null);
+    if (!s?.success) { setLearnErr(s?.message || t('jobTasks.skills_failed', 'Could not record the skill.')); return; }
+    const r = await onAssign(task, pick.id, false, '');
+    if (r?.success) { setPick(null); setReason(''); }
+  };
+  const pickName = (pick?.tech?.full_name || techs.find(m => Number(m.id) === Number(pick?.id))?.full_name || '').split(' ')[0];
 
   return (
     <li className={`jt-row${cancelled ? ' is-cancelled' : ''}`}>
@@ -207,12 +221,25 @@ function TaskRow({ n, task, data, t, closed, blocked, showCard, busy, onAssign, 
         {canChange && (
           <div className="jt-pick">
             <TechnicianPicker technicians={techs} value={pick?.id ?? null} currentId={task.mechanic_id}
-              serviceTypes={types} serviceLabels={data.service_types} canOverride={data.can_override}
+              serviceTypes={types} serviceLabels={data.service_types} canOverride={data.can_override} canLearn
               preferTeamId={data.prefer_team_leader_id} disabled={blocked || saving}
               label={t('jobTasks.pick_label', 'Technician for {{job}}', { job: task.job_name })}
               placeholder={task.mechanic_id ? t('jobTasks.reassign', 'Reassign to…') : t('jobTasks.assign_to', 'Assign to…')}
               onChange={(id, info) => { setPick({ id, qualified: info.qualified, tech: info.tech }); setReason(''); }} />
-            {changed && (
+            {changed && needReason && task.service_type && (
+              <div className="jt-confirm">
+                <button type="button" className="wf-btn primary sm" disabled={saving} onClick={learnAndAssign}>
+                  {t('jobTasks.learn_assign', 'Add {{type}} to {{name}}\'s skills & assign', { type: task.service_type_label || task.service_type, name: pickName || t('jobTasks.tech', 'the technician') })}
+                </button>
+                {!data.can_override && (
+                  <button type="button" className="wf-btn ghost sm" disabled={saving} onClick={() => { setPick(null); setReason(''); setLearnErr(''); }}>
+                    {t('jobTasks.cancel', 'Cancel')}
+                  </button>
+                )}
+                {learnErr && <span className="wf-bad sm" role="alert">{learnErr}</span>}
+              </div>
+            )}
+            {changed && (!needReason || data.can_override || !task.service_type) && (
               <div className="jt-confirm">
                 {needReason && (
                   <input className="wf-input sm jt-reason" value={reason} maxLength={255} autoFocus
@@ -221,7 +248,7 @@ function TaskRow({ n, task, data, t, closed, blocked, showCard, busy, onAssign, 
                     aria-label={t('jobTasks.override_reason', 'Why outside their skills? (recorded on the job)')} />
                 )}
                 <button type="button" className="wf-btn primary sm" disabled={saving || (needReason && reason.trim().length < 3)} onClick={submit}>
-                  {needReason ? t('jobTasks.assign_override', 'Assign anyway') : t('jobTasks.assign', 'Assign')}
+                  {needReason ? t('jobTasks.assign_override_once', 'Just this once, with a reason') : t('jobTasks.assign', 'Assign')}
                 </button>
                 <button type="button" className="wf-btn ghost sm" disabled={saving} onClick={() => { setPick(null); setReason(''); }}>
                   {t('jobTasks.cancel', 'Cancel')}
@@ -231,7 +258,7 @@ function TaskRow({ n, task, data, t, closed, blocked, showCard, busy, onAssign, 
           </div>
         )}
         {canChange && !blocked && task.service_type && !qualifiedCount && techs.length > 0 && (
-          <div className="wf-muted sm">{t('jobTasks.none_qualified', 'No technician is qualified for {{type}} yet — tick their skills on the Technicians page.', { type: task.service_type_label })}</div>
+          <div className="wf-muted sm">{t('jobTasks.none_qualified_learn', 'No technician has {{type}} on file yet — pick one and their skill is recorded as you assign (or tick skills for everyone on Technicians → Skills).', { type: task.service_type_label })}</div>
         )}
       </div>
 

@@ -44,6 +44,24 @@ function parseSub(v) {
 // have none.
 const ENTITY_NAME_SQL = '(SELECT e.name FROM customer_entities e WHERE e.id = c.entity_id) AS entity_name';
 
+/*
+ * Enquiries and customers are one module (client feedback 18 Nov 2026, point
+ * 2; meeting of 3 Nov, point 12): the customer list carries each customer's
+ * enquiry — the open one, else the latest — and filters by stage. An open
+ * enquiry is new, quoted or in nurture (not converted, not lost).
+ */
+const OPEN_ENQ = "('new','quoted','nurture')";
+const HAS_OPEN_ENQ = `EXISTS (SELECT 1 FROM enquiries oe WHERE oe.customer_id = c.id AND oe.workshop_id = c.workshop_id AND oe.status IN ${OPEN_ENQ})`;
+const ENQ_DUE = `EXISTS (SELECT 1 FROM enquiries oe WHERE oe.customer_id = c.id AND oe.workshop_id = c.workshop_id AND oe.status IN ${OPEN_ENQ} AND oe.follow_up_at IS NOT NULL AND oe.follow_up_at <= NOW())`;
+const ENQ_JOIN = `LEFT JOIN enquiries le ON le.id = (
+    SELECT e2.id FROM enquiries e2 WHERE e2.customer_id = c.id AND e2.workshop_id = c.workshop_id
+     ORDER BY (e2.status IN ${OPEN_ENQ}) DESC, e2.created_at DESC, e2.id DESC LIMIT 1)`;
+const ENQ_FIELDS = `ANY_VALUE(le.id) AS enquiry_id, ANY_VALUE(le.enquiry_number) AS enquiry_number,
+              ANY_VALUE(le.status) AS enquiry_status, ANY_VALUE(le.source_channel) AS enquiry_channel,
+              ANY_VALUE(le.follow_up_at) AS enquiry_follow_up_at, ANY_VALUE(le.created_at) AS enquiry_created_at,
+              ANY_VALUE(le.converted_work_order_id) AS enquiry_converted_work_order_id,
+              (SELECT COUNT(*) FROM enquiries oe WHERE oe.customer_id = c.id AND oe.workshop_id = c.workshop_id AND oe.status IN ${OPEN_ENQ}) AS open_enquiries`;
+
 /** A sent entity_id: undefined when not sent, null when cleared, an id, or false when invalid. */
 function parseEntityId(v) {
   if (v === undefined) return undefined;
@@ -202,7 +220,7 @@ router.get('/', async (req, res) => {
   try {
     const {
       search, type, emirate, page = 1, limit = 50, sort,
-      customer_class, customer_subcategory, active_only, include_inactive, entity_id,
+      customer_class, customer_subcategory, active_only, include_inactive, entity_id, stage,
     } = req.query;
     const pg = parseInt(page, 10) || 1;
     const lim = parseInt(limit, 10) || 50;
@@ -237,6 +255,12 @@ router.get('/', async (req, res) => {
       if (!eid) return res.status(400).json({ success: false, message: 'entity_id must be an entity id' });
       where += ' AND c.entity_id = ?';
       params.push(eid);
+    }
+    // Stage (one module with Enquiries): enquiry = an open enquiry, due = its
+    // follow-up has come, customer = no open enquiry.
+    if (stage) {
+      if (!['enquiry', 'due', 'customer'].includes(stage)) return res.status(400).json({ success: false, message: 'stage must be enquiry, due or customer' });
+      where += stage === 'enquiry' ? ` AND ${HAS_OPEN_ENQ}` : stage === 'due' ? ` AND ${ENQ_DUE}` : ` AND NOT ${HAS_OPEN_ENQ}`;
     }
     // The wizard must not offer a deactivated account to raise a job card
     // against; the Customers screen still wants to list them. A search
@@ -303,7 +327,7 @@ router.get('/', async (req, res) => {
 
     const [{ total }] = await query(`SELECT COUNT(*) as total FROM customers c ${where}`, params);
     const customers = await query(
-      `SELECT c.*, ${ENTITY_NAME_SQL},
+      `SELECT c.*, ${ENTITY_NAME_SQL}, ${ENQ_FIELDS},
               COUNT(o.id) as total_work_orders,
               SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as completed_work_orders,
               MAX(o.completed_at) AS last_visit_at,
@@ -313,15 +337,27 @@ router.get('/', async (req, res) => {
                     ELSE 0 END), 0) AS lifetime_value
        FROM customers c
        LEFT JOIN work_orders o ON o.customer_id = c.id
+       ${ENQ_JOIN}
        ${where} GROUP BY c.id ORDER BY ${orderBy} LIMIT ${lim} OFFSET ${offset}`,
       params
     );
     // `total` at the top level as well: the wizard shows "50 of 143" from it.
     return res.json({ success: true, data: customers.map(withoutSecrets), total, pagination: { total, page: pg, limit: lim } });
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch customers' });
+    // Logged: a missing migration (e.g. customer_entities) made this fail
+    // silently on a server, and the work order form showed no customers.
+    console.error('[Customers] list error:', err.message);
+    return res.status(500).json({ success: false, message: 'The customer list could not be loaded. Please tell the system administrator.' });
   }
 });
+
+/** The stage filter's counts: active customers with an open enquiry, and those whose follow-up is due. */
+async function stageCounts(workshopId) {
+  const [r] = await query(
+    `SELECT SUM(${HAS_OPEN_ENQ}) AS open_enquiries, SUM(${ENQ_DUE}) AS followups_due
+       FROM customers c WHERE c.workshop_id = ? AND c.is_active = 1`, [workshopId]);
+  return { open_enquiries: Number(r?.open_enquiries) || 0, followups_due: Number(r?.followups_due) || 0 };
+}
 
 // GET /api/customers/stats  — aggregate KPIs for the workshop
 router.get('/stats', async (req, res) => {
@@ -400,7 +436,7 @@ router.get('/stats', async (req, res) => {
     );
     return res.json({
       success: true,
-      data: { ...counts, ...workOrderStats, top_customers: topCustomers, period: periodStats },
+      data: { ...counts, ...workOrderStats, top_customers: topCustomers, period: periodStats, ...(await stageCounts(req.workshopId)) },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch stats' });

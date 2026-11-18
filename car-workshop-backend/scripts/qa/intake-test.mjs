@@ -265,8 +265,8 @@ try {
   // ── C7 workflow ────────────────────────────────────────────────────
   section = 'C7 workflow';
   let d = await wf(advisor, pf.id);
-  expect('new external job: Steps 1–2 done; Step 3 "Physical inspection & job card" current, the acknowledgement open',
-    d.steps.slice(0, 2).every(s => s.state === 'done') && d.current_step === 3 && d.steps[2].title === 'Physical inspection & job card' && chk(d, 3, 'physical_ack')?.done === false
+  expect('new external job: Steps 1–2 done; Step 3 "Physical inspection & Inspection job card" current, the acknowledgement open',
+    d.steps.slice(0, 2).every(s => s.state === 'done') && d.current_step === 3 && d.steps[2].title === 'Physical inspection & Inspection job card' && chk(d, 3, 'physical_ack')?.done === false
     && d.steps[3].title === 'Technical inspection & pricing' && d.next?.key === 'physical_inspection', `${d.steps.map(s => `${s.n}:${s.state}`).join(' ')} next ${d.next?.key}`);
   d = await wf(advisor, w2.id);
   expect('acknowledged on paper: Steps 1–3 done (snapshot, complaint + odometer + VIN, "Paper form uploaded")',

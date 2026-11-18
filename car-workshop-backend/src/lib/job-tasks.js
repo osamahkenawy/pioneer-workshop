@@ -116,11 +116,13 @@ async function serviceTypesByJob(workOrderId, workshopId) {
  */
 async function approvedJobs(workOrderId) {
   const items = await query(
-    `SELECT i.id, i.name, i.item_type, i.job_card_id, el.job_name
+    `SELECT i.id, i.name, i.item_type, i.job_card_id, el.job_name, el.is_fixed_fee
        FROM work_order_items i LEFT JOIN estimate_lines el ON el.id = i.estimate_line_id
       WHERE i.work_order_id = ? ORDER BY i.id`, [workOrderId]);
   const jobs = new Map();
   for (const i of items) {
+    // A supplementary estimate's fixed cost (18 Nov, point 4) is a charge, not work: no job, no technician.
+    if (Number(i.is_fixed_fee) === 1) continue;
     const name = String(i.job_name || '').trim() || (['labour', 'sublet'].includes(i.item_type) ? String(i.name || '').trim() : '');
     const key = jobKey(name);
     if (!key) continue;

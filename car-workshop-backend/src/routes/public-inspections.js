@@ -41,10 +41,12 @@ export const photosOf = row => (row.entry_mode === 'document' ? [] : readPhotos(
 async function loadByToken(token, res) {
   const [row] = TOKEN_RE.test(token || '') ? await query(
     `SELECT vi.*, wo.work_order_number, wo.status AS wo_status,
+            COALESCE(NULLIF(TRIM(c.full_name), ''), NULLIF(TRIM(wo.customer_name), '')) AS customer_display_name,
             w.name AS workshop_name, w.phone AS workshop_phone, w.logo_url AS workshop_logo, w.settings AS workshop_settings
        FROM vehicle_inspections vi
        JOIN work_orders wo ON wo.id = vi.work_order_id AND wo.workshop_id = vi.workshop_id
        JOIN workshops w ON w.id = vi.workshop_id
+       LEFT JOIN customers c ON c.id = wo.customer_id AND c.workshop_id = wo.workshop_id
       WHERE vi.share_token = ?`,
     [token]
   ) : [];
@@ -107,6 +109,9 @@ export function publicView(row) {
       documents: docsOf(row).map(d => ({ id: d.id, name: d.name, type: d.type })),
       photos: photosOf(row).map(p => ({ id: p.id, name: p.name, type: p.type })),
       signature: signatureOf(row),
+      // Client feedback (18 Nov 2026), point 6: the sign form starts with the
+      // name on file; the customer can still change it.
+      customer_name: row.customer_display_name || null,
       can_sign: canSign(row),
       job_closed: row.wo_status === 'completed',
     },

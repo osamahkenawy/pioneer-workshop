@@ -2201,7 +2201,7 @@
     "cash_amount_label": "现金金额",
     "color": "颜色",
     "email": "邮箱",
-    "no_vehicle": "此作业卡未关联车辆。",
+    "no_vehicle": "工单尚未关联车辆 — 请在第 2 步添加。",
     "vehicle_make_model": "品牌 / 车型",
     "copy_customer_link": "客户链接",
     "copy_link_hint": "复制客户用于跟踪此作业进度的链接",
@@ -3435,7 +3435,8 @@
       "roles": "角色管理",
       "subscription": "订阅",
       "users": "用户管理",
-      "surveys": "作业关闭时自动发送问卷"
+      "surveys": "作业关闭时自动发送问卷",
+      "estimates": "补充报价的固定费用"
     },
     "tabs": {
       "categories": "分类",
@@ -3446,7 +3447,8 @@
       "roles": "角色管理",
       "subscription": "订阅",
       "users": "用户管理",
-      "surveys": "问卷调查"
+      "surveys": "问卷调查",
+      "estimates": "报价"
     },
     "tax": {
       "apply_on_delivery": "服务费加收增值税",
@@ -4829,14 +4831,14 @@
     "internal": "内部",
     "issue_gatepass": "开具出门证",
     "issued": "已发放",
-    "jc_opened": "主作业卡已开立",
+    "jc_opened": "检验作业卡已开立",
     "job": "作业",
     "job_done": "作业完成",
     "labour": "工时费",
     "later": "稍后分配",
     "load_failed": "无法加载流程。",
     "log_call": "记录通话",
-    "main": "主作业卡",
+    "main": "检验作业卡",
     "method": "方式",
     "move_items": "将已批准的工作移至此作业卡",
     "network": "网络错误 — 请检查网络连接。",
@@ -4844,7 +4846,7 @@
     "no_customer": "此作业没有可分类的客户记录。",
     "no_invoice": "发票将自动生成，并显示在这里。",
     "no_parts": "未申请配件。",
-    "no_vehicle": "未关联车辆 — 请编辑作业卡进行添加。",
+    "no_vehicle": "工单尚未关联车辆 — 请在第 2 步添加。",
     "not_available": "无货",
     "not_on_shelf": "货架无货",
     "not_started": "未开始",
@@ -4855,7 +4857,7 @@
     "on_account": "记账结算（内部 / 信用客户）。",
     "on_shelf": "货架有货 — 发放",
     "open_estimate": "打开报价单",
-    "open_jc": "开立主作业卡",
+    "open_jc": "开立检验作业卡",
     "paid": "已记录付款",
     "part_desc": "配件描述",
     "part_no": "配件编号",
@@ -4922,11 +4924,12 @@
     "steps": {
       "classification": "客户分类",
       "intake": "车辆信息与故障",
-      "job_card": "作业卡（JC）",
+      "job_card": "实车检验与检验作业卡",
       "inspection_pricing": "检查与定价",
       "estimate": "向客户报价",
       "work": "客户决定与施工",
-      "closure": "质检、取车与关闭"
+      "closure": "质检、取车与关闭",
+      "physical_inspection": "实车检验与检验作业卡"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4970,7 +4973,7 @@
       "reported_issue": "报修问题",
       "odometer": "里程表读数",
       "received_via": "接收方式",
-      "main_jc_opened": "主作业卡已开立",
+      "main_jc_opened": "检验作业卡已开立",
       "floor_notified": "已通知主管、车间主任和组长",
       "technical_inspection": "技术检查",
       "parts_priced": "仓管员已为配件定价（原厂件 / 副厂件）",
@@ -4988,7 +4991,8 @@
       "pickup_contacted": "已联系客户取车",
       "payment": "付款与发票",
       "gate_pass": "最终出门证",
-      "job_closed": "作业已关闭"
+      "job_closed": "作业已关闭",
+      "inspection_jc_opened": "检验作业卡已开立"
     },
     "val": {
       "class_internal": "内部",
@@ -5036,7 +5040,7 @@
       "rejected_all": "客户已拒绝报价单。致歉邮件已发出 — 请记录客户的理由并关闭作业。",
       "classify": "请为客户分类：内部或外部，然后选择车队、保险、资产或散客。",
       "intake": "请记录车辆和报修问题。",
-      "open_job_card": "请开立主作业卡。",
+      "open_job_card": "开立检验作业卡。",
       "create_estimate": "请进行技术检查，并根据检查结果创建报价单。",
       "price_parts": "请为配件定价 — 原厂件和副厂件，或将某一类型标记为 N/A。",
       "price_labour": "请为报价单上的工时费定价。",
@@ -5115,7 +5119,10 @@
       "title": "我的任务"
     },
     "time_by_floor": "工时由技师登记（或由组长 / 主管 / 车间主任登记）。",
-    "your_turn": "轮到您"
+    "your_turn": "轮到您",
+    "inspection_card": "检验作业卡",
+    "job_card": "作业卡",
+    "inspection_card_opened": "检验作业卡已开立"
   },
   "bookings": {
     "err_load": "无法加载预约。",

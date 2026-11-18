@@ -504,6 +504,13 @@ export default function VehicleInspection() {
   const signed = !!inspection?.signature_url;
   const notPresent = !locked && form.customer_present === false;
   const padOpen = mayRecord && mode === 'form' && (!signed || (resign && !isCompleted)) && !notPresent;
+  // Client feedback (18 Nov 2026), point 6: the signer's name starts as the
+  // customer's name on the job card; staff change it when someone else signs.
+  useEffect(() => {
+    if (padOpen && !String(form.signed_by_name || '').trim() && String(form.customer_name || '').trim()) {
+      setForm(f => (String(f.signed_by_name || '').trim() ? f : { ...f, signed_by_name: f.customer_name }));
+    }
+  }, [padOpen, form.customer_name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startDraw = (e) => {
     if (!padOpen) return;

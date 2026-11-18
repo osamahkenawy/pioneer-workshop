@@ -372,6 +372,9 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const manager = isManager(user);
   const [jobs, setJobs] = useState(() => [blankJob()]);
   const [extras, setExtras] = useState([]);
+  // Client feedback (18 Nov 2026), point 4: a supplementary estimate's tick box
+  // for the workshop's fixed cost (Settings), one line the customer approves.
+  const [fixedOn, setFixedOn] = useState(false);
   // The customer's parts preference: which categories the Store prices and the customer chooses from.
   // A supplementary estimate has one: its fixed type.
   const [prefState, setPref] = useState(DEFAULT_PREFERENCE);
@@ -397,8 +400,9 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     const fromEnquiry = !editE ? PART_CATEGORIES.filter(c => String(enquiry?.parts_preference || '').split(',').includes(c)) : [];
     setAskedPref(fromEnquiry.length ? fromEnquiry : null);
     setPref(editE ? preferenceOf(editE) : fromEnquiry.length ? fromEnquiry : DEFAULT_PREFERENCE);
+    setFixedOn(!!editEstimate?.lines?.some(l => Number(l.is_fixed_fee) === 1));
     if (editEstimate?.lines) {
-      const r = jobsFromLines(editEstimate.lines);
+      const r = jobsFromLines(editEstimate.lines.filter(l => Number(l.is_fixed_fee) !== 1));
       // A supplementary estimate's jobs that are the report's show ticked (GET /estimates/:id `report`).
       setJobs(editE?.kind === 'supplementary' ? linkReport(r.jobs, editEstimate.report) : r.jobs); setExtras(r.extras);
     } else {
@@ -516,7 +520,10 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
   const filled = rows => rows.filter(r => r.description.trim());
   const allLabour = jobs.flatMap(j => filled(j.labour));
   const allParts = jobs.flatMap(j => filled(j.parts));
-  const labourTotal = allLabour.reduce((s, r) => s + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0), 0);
+  // The fixed cost set up in Settings (GET /raise-check, or GET /estimates/:id when editing).
+  const fixedFee = supp ? (isEdit ? editE?.fixed_fee : check?.fixed_fee) || null : null;
+  const fixedAmount = fixedOn && fixedFee?.amount > 0 ? Number(fixedFee.amount) : 0;
+  const labourTotal = allLabour.reduce((s, r) => s + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0), 0) + fixedAmount;
   // Parts per category of the preference — no fallback to another category.
   const partsByCat = summarisePricing(allParts.map(r => ({ ...rowAsPart(r, pref, canParts), quantity: Number(r.quantity) || 0, job_name: 'all' })), pref);
   const catParts = c => partsByCat.jobs[0]?.parts[c] || 0;
@@ -562,6 +569,11 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
         out.push(line);
       }
     }
+    // The fixed cost: priced and worded by the server from Settings.
+    if (fixedAmount > 0) {
+      const old = editEstimate?.lines?.find(l => Number(l.is_fixed_fee) === 1);
+      out.push({ ...(old ? { id: old.id } : {}), is_fixed_fee: true, line_type: 'labour', job_name: fixedFee.label, description: fixedFee.label, quantity: 1, unit_price: fixedAmount, unit_cost: 0, urgency: 'now' });
+    }
     // Sublet / consumable / discount lines this form doesn't show — sent back as they are.
     for (const x of extras) {
       out.push({
@@ -581,7 +593,7 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
     if (!isEdit && !supp && !manager && effectiveType === 'internal_fleet' && klass?.cls !== 'internal') {
       return t('estimates.err_internal_manager', 'This customer is External: only a manager can raise the estimate as Internal.');
     }
-    if (!allLabour.length && !allParts.length) {
+    if (!allLabour.length && !allParts.length && !fixedAmount) {
       return report?.jobs?.length
         ? t('estimates.err_no_lines_report', 'Tick a job from the technical report, or add a labour or part line with a description.')
         : t('estimates.err_no_lines', 'Add at least one labour or part line with a description.');
@@ -838,6 +850,11 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
                 </div>
               )}
 
+              {supp && (
+                <FixedFeeBox t={t} fee={fixedFee} on={fixedOn} onChange={setFixedOn} money={money} vatRate={vatRate}
+                  mainEmpty={!isEdit && check?.main_empty === true} manager={manager} />
+              )}
+
               {supp && report && (
                 <ReportPicker t={t} report={report} jobs={jobs} onToggle={toggleReportJob} />
               )}
@@ -862,7 +879,8 @@ export default function NewEstimateModal({ open, onClose, onSent, onSaved, intak
               )}
 
               <div style={st.totalsBox}>
-                <Row label={t('estimates.labour', 'Labour')} value={money(labourTotal)} />
+                <Row label={t('estimates.labour', 'Labour')} value={money(labourTotal - fixedAmount)} />
+                {fixedAmount > 0 && <Row label={t('estimates.fixed_fee_row', 'Fixed cost — {{label}}', { label: fixedFee.label })} value={money(fixedAmount)} />}
                 {allParts.length > 0 && (partsWaiting === allParts.length ? (
                   <Row label={t('estimates.parts', 'Parts')} value={t('estimates.priced_by_store', 'Priced by the Store')} muted />
                 ) : pref.map(c => (
@@ -1015,6 +1033,37 @@ function RaiseNotice({ t, check, woId, onClose, onKind }) {
  * (pending or approved there) says which and cannot be ticked — it would be
  * billed twice.
  */
+/**
+ * Point 4 (18 Nov 2026): "If the main estimation is empty, we should have an
+ * option in the sup estimation to check the box, and it adds the fixed cost
+ * which goes to the customer for approval." The amount and its wording are
+ * the workshop's (Settings → Estimates); the server prices the line.
+ */
+function FixedFeeBox({ t, fee, on, onChange, money, vatRate, mainEmpty, manager }) {
+  const ready = fee?.amount > 0;
+  return (
+    <label style={{ ...st.reportRow, ...(on ? st.reportRowOn : null), ...(ready ? null : st.reportRowOff), marginBottom: 12, alignItems: 'flex-start' }}>
+      <input type="checkbox" checked={on && ready} disabled={!ready} onChange={e => onChange(e.target.checked)} style={st.reportCheck} />
+      <span style={st.reportMain}>
+        <span style={st.reportJob}>
+          {ready
+            ? t('estimates.fixed_fee_tick', 'Add the fixed cost — {{label}}: {{amount}} (+{{v}}% VAT)', { label: fee.label, amount: money(fee.amount), v: vatRate })
+            : t('estimates.fixed_fee_unset', 'Add the fixed cost')}
+        </span>
+        <span style={st.reportMeta}>
+          {!ready
+            ? (manager
+              ? t('estimates.fixed_fee_unset_mgr', 'Not set up yet — set the amount in Settings → Estimates.')
+              : t('estimates.fixed_fee_unset_staff', 'Not set up yet — ask a manager to set the amount in Settings → Estimates.'))
+            : mainEmpty
+              ? t('estimates.fixed_fee_main_empty', 'The main estimate is empty: tick to share the technical report at the fixed cost. The customer approves it with their consent.')
+              : t('estimates.fixed_fee_hint', 'One line at the fixed cost; the customer approves it with their consent. It is a charge, not a job for a technician.')}
+        </span>
+      </span>
+    </label>
+  );
+}
+
 function ReportPicker({ t, report, jobs, onToggle }) {
   const ticked = new Set(jobs.map(j => j.reportKey).filter(k => k !== null && k !== undefined));
   const free = report.jobs.filter(rj => !rj.on_estimate || ticked.has(rj.key)).length;

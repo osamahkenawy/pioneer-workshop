@@ -86,10 +86,9 @@ const navSections = [
   {
     titleKey: 'operations',
     items: [
-      // One module, two tabs (client point 12, 3 Nov 2026): Enquiries and
-      // Customers. Shown when the role has either tab's key; opens the first
-      // tab it has (getNavForRole). The keys stay separate, so a role with
-      // only one of them sees only that tab (CustomersTabs).
+      // One module (client point 12, 3 Nov 2026; feedback 18 Nov, point 2):
+      // the Customers page holds enquiries too. Shown when the role has either
+      // key; /enquiries redirects to it (CustomersTabs.jsx).
       { path: '/customers',          labelKey: 'customers',       iconKey: 'customers',        moduleKey: 'customers',         roles: ['admin', 'dispatcher'], tabs: CUSTOMER_TABS },
       { path: '/work-orders',        labelKey: 'orders',          iconKey: 'orders',           moduleKey: 'work-orders',       roles: ['admin', 'dispatcher'] },
       // The job after the physical inspection (client meeting, 3 Nov 2026): Steps 4–7.

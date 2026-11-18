@@ -12,7 +12,7 @@ import './CrmSurface.css';
 
 // Where a task's record lives, so the follow-up is one click from the work.
 const RELATED_LINK = {
-  enquiry:    { label: 'Open the enquiry', to: id => `/enquiries?id=${id}` },
+  enquiry:    { label: 'Open the enquiry', to: id => `/customers?enquiry=${id}` },
   quote:      { label: 'Open the estimate', to: id => `/estimates?id=${id}` },
   work_order: { label: 'Open the job card', to: id => `/work-orders/${id}` },
   reminder:   { label: 'Open service reminders', to: () => '/crm/reminders' },

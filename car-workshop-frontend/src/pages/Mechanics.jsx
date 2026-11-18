@@ -13,6 +13,7 @@ import { JOB_TYPES, jobTypeLabel } from '../lib/intakeOptions';
 import usePlanUsage from '../hooks/usePlanUsage';
 import { dispatchPlanUpdate } from '../hooks/usePlanUsage';
 import UpgradeModal from '../components/dashboard/UpgradeModal';
+import SkillsMatrix from '../components/SkillsMatrix';
 import { woLabel, woTone } from '../lib/statusLabels';
 import './CRMPages.css';
 import PhoneInput, { PHONE_CODES } from '../components/PhoneInput';
@@ -268,6 +269,7 @@ export default function Mechanics() {
   const { isAtUserLimit, usage, refresh: refreshPlan } = usePlanUsage();
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [mechanics,    setMechanics]    = useState([]);
+  const [skillsOpen,   setSkillsOpen]   = useState(false); // the skills matrix (18 Nov, point 8)
   const [loading,    setLoading]    = useState(true);
   const [viewMechanic, setViewMechanic] = useState(null);
   const [viewDetail, setViewDetail] = useState(null); /* full detail with recent orders */
@@ -499,6 +501,11 @@ export default function Mechanics() {
   return (
     <div className="page-container">
 
+      {skillsOpen && (
+        <SkillsMatrix technicians={mechanics} canEdit={canDo(user, 'job.assign')} onClose={() => setSkillsOpen(false)}
+          onSaved={saved => setMechanics(ms => ms.map(m => (saved[m.id] ? { ...m, skills: saved[m.id] } : m)))} />
+      )}
+
       {/* ── Header ── */}
       <div className="module-hero">
         <div className="module-hero-left">
@@ -508,6 +515,11 @@ export default function Mechanics() {
         <div className="module-hero-actions">
           <button className="module-btn module-btn-outline" onClick={fetchMechanics}>
             <Refresh width={15} height={15} /> {t('common.refresh')}
+          </button>
+          <button className="module-btn module-btn-outline" onClick={() => setSkillsOpen(true)} disabled={!mechanics.length}>
+            <Wrench width={15} height={15} /> {t('skillsMatrix.open', 'Skills')}
+            {(() => { const n = mechanics.filter(m => m.is_active !== 0 && m.is_active !== false && !(m.skills || []).length).length;
+              return n ? <span style={{ marginInlineStart: 6, background: '#fef3c7', color: '#92400e', borderRadius: 999, padding: '0 7px', fontSize: 11, fontWeight: 700 }}>{n}</span> : null; })()}
           </button>
           <button className="module-btn module-btn-primary" onClick={openNew}
             style={isAtUserLimit ? { background: '#9ca3af', cursor: 'not-allowed' } : undefined}

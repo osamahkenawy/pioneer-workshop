@@ -96,7 +96,7 @@ const NAVY = '#1e3a6b';
 
 const EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
 
-const EMPTY_VEHICLE = {
+export const EMPTY_VEHICLE = {
   make: '', model: '', year: '', plate_number: '', plate_code: '', plate_emirate: '',
   vin: '', engine_no: '', fleet_code: '', color: '', vehicle_type: '',
   fuel_type: 'petrol', transmission: 'automatic',
@@ -351,6 +351,12 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   const [customers, setCustomers] = useState([]);
   const [customersTotal, setCustomersTotal] = useState(0);
   const [customersLoading, setCustomersLoading] = useState(false);
+  // Client feedback (18 Nov 2026), point 1: a list that failed to load says so
+  // (with Try again) instead of looking like an empty customer book.
+  const [customersError, setCustomersError] = useState('');
+  // Internal accounts by group entity (Aman Taxi, …) under the subcategory (18 Nov, point 2).
+  const [internalEntity, setInternalEntity] = useState('');
+  const [customersNonce, setCustomersNonce] = useState(0);
 
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
@@ -438,7 +444,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
   const resetAll = useCallback(() => {
     setStep(1); setSubmitting(false); submittingRef.current = false;
     setError(''); setInvalid([]); setNotice(null);
-    setCustomerClass('external'); setInternalSub(''); setExternalOpt('existing'); setExternalSub('');
+    setCustomerClass('external'); setInternalSub(''); setInternalEntity(''); setExternalOpt('existing'); setExternalSub('');
     setNewExternalSub('walkin'); setClassifySub('');
     setCustomerId(''); setSelectedCustomer(null); setCustomerSearch('');
     setCustomers([]); setCustomersTotal(0); setDupMatches([]);
@@ -656,23 +662,30 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
     if (customerClass === 'internal' && !internalSub) { setCustomers([]); setCustomersTotal(0); return undefined; }
     let cancelled = false;
     setCustomersLoading(true);
+    setCustomersError('');
     const id = setTimeout(() => {
       const q = customerSearch.trim();
       const params = new URLSearchParams({ limit: '50', active_only: '1', customer_class: customerClass });
       if (customerClass === 'internal') params.set('customer_subcategory', internalSub);
+      if (customerClass === 'internal' && internalEntity) params.set('entity_id', internalEntity);
       else if (externalSub) params.set('customer_subcategory', externalSub);
       if (q) params.set('search', q);
       api.get(`/customers?${params.toString()}`)
         .then(res => {
-          if (cancelled || !res.success) return;
+          if (cancelled) return;
+          if (!res?.success) {
+            setCustomers([]); setCustomersTotal(0);
+            setCustomersError(res?.message || 'The customer list could not be loaded.');
+            return;
+          }
           setCustomers(res.data || []);
           setCustomersTotal(Number(res.total ?? res.pagination?.total ?? (res.data || []).length));
         })
-        .catch(() => {})
+        .catch(() => { if (!cancelled) { setCustomers([]); setCustomersTotal(0); setCustomersError('The customer list could not be loaded — check the connection.'); } })
         .finally(() => { if (!cancelled) setCustomersLoading(false); });
     }, 250);
     return () => { cancelled = true; clearTimeout(id); };
-  }, [open, step, customerMode, customerSearch, customerClass, internalSub, externalSub]);
+  }, [open, step, customerMode, customerSearch, customerClass, internalSub, externalSub, customersNonce, internalEntity]);
 
   // "New customer" duplicate check, keyed on the phone being typed. Re-run
   // every time page 1 is shown (and after a 409), not only when the phone
@@ -1611,6 +1624,16 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                             // Client point 12 (3 Nov 2026): Staff, internal-only like Asset.
                             { v: 'staff', label: t('orders.form.sub_staff', 'Staff'), Icon: User },
                           ]} />
+                        {internalSub && entities.length > 0 && (
+                          <>
+                            <div style={st.blockLabel}>{t('orders.form.entity', 'Entity')}</div>
+                            <div style={st.blockHint}>{t('orders.form.entity_hint', 'The group company the account belongs to — choose one to narrow the list, or keep All.')}</div>
+                            <PillGroup label={t('orders.form.entity', 'Entity')} value={internalEntity}
+                              onChange={(v) => { setInternalEntity(v); clearCustomer(); }}
+                              options={[{ v: '', label: t('orders.form.entity_all', 'All'), Icon: Building },
+                                ...entities.map(en => ({ v: String(en.id), label: en.name, Icon: Building }))]} />
+                          </>
+                        )}
                       </>
                     )}
 
@@ -1679,8 +1702,14 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                             </div>
                             <div style={st.custListTall} className={bad('customer') ? 'nwo-invalid-group' : undefined}
                               role="listbox" aria-label="Customers" tabIndex={-1} data-field="customer">
-                              {customersLoading && <div style={st.emptyHint}>Searching…</div>}
-                              {!customersLoading && customers.length === 0 && (
+                              {customersLoading && <div style={st.emptyHint}>{customerSearch.trim() ? 'Searching…' : 'Loading customers…'}</div>}
+                              {!customersLoading && customersError && (
+                                <div style={{ ...st.emptyHint, color: '#b91c1c' }} role="alert">
+                                  {customersError}{' '}
+                                  <button type="button" style={st.linkBtn} onClick={() => setCustomersNonce(n => n + 1)}>Try again</button>
+                                </div>
+                              )}
+                              {!customersLoading && !customersError && customers.length === 0 && (
                                 <div style={st.emptyHint}>
                                   {customerSearch.trim()
                                     ? 'No customers match.'
@@ -1691,7 +1720,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                                             sub: subLabel(externalSub),
                                             defaultValue: 'No external {{sub}} accounts are set up yet. Classify them from the Customers page, or choose All.',
                                           })
-                                        : 'Type a name, code, phone, plate or VIN to search.'}
+                                        : 'No customers on file yet — choose New Customer above.'}
                                 </div>
                               )}
                               {customers.map(c => {
@@ -1934,7 +1963,7 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     </div>
                     <VehicleFormFields newVehicle={newVehicle} setNewVehicle={setNewVehicle} badCls={badCls} bad={bad} />
                     {customerMode === 'existing' && (
-                      <button type="button" style={st.linkBtn} onClick={() => { setAddingVehicle(false); setNewVehicle({ ...EMPTY_VEHICLE }); setOdometerIn(''); }}>
+                      <button type="button" style={st.linkBtn} onClick={() => { setAddingVehicle(false); setNewVehicle({ ...EMPTY_VEHICLE }); }}>
                         <NavArrowLeft width={15} height={15} className="nwo-flip" /> Choose an existing vehicle instead
                       </button>
                     )}
@@ -1968,8 +1997,9 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                           tabIndex={tabStop(String(v.id) === vehicleId, !vehicles.some(x => String(x.id) === vehicleId), i === 0)}
                           onPick={() => {
                             if (String(v.id) === vehicleId) return;
-                            // Another car: its own details and its own reading.
-                            setPickedVehicle(v); setOdometerIn('');
+                            // Another car: its own details. A reading already typed stays (it is
+                            // checked against this car's previous reading on Next).
+                            setPickedVehicle(v);
                           }} />
                       ))}
                     </div>
@@ -1991,7 +2021,9 @@ export default function NewWorkOrderModal({ open, presetCustomerId = null, prese
                     )}
                     <button type="button" style={st.addVehicleBtn}
                       onClick={() => {
-                        setPickedVehicle(null); setOdometerIn(''); setAddingVehicle(true);
+                        // Client feedback (18 Nov 2026), point 9: the odometer is typed once —
+                        // a reading already entered stays for the new vehicle (and when a car is picked).
+                        setPickedVehicle(null); setAddingVehicle(true);
                         // Make, model and year as asked at the enquiry, unless already typed.
                         const car = editInfo?.enquiryCar;
                         if (car) setNewVehicle(v => (v.make || v.model || v.year ? v : { ...v, ...car }));
@@ -2434,7 +2466,7 @@ function TotalsBox({ totals, fmt, compact }) {
  * "Other". Make, model, plate and VIN are required — VIN because a chassis
  * number is captured while the car is in front of someone.
  */
-function VehicleFormFields({ newVehicle, setNewVehicle, badCls, bad }) {
+export function VehicleFormFields({ newVehicle, setNewVehicle, badCls, bad }) {
   const set = (k, v) => setNewVehicle(prev => ({ ...prev, [k]: v }));
   return (
     <div className="nwo-stack">

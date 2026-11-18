@@ -159,15 +159,35 @@ function countedPartPrice(row, pref, fallback) {
  * the categories of the preference only; an alternative is offered through
  * PATCH /:id/lines/:lineId/pricing and carried over on an edit.
  */
-async function insertEstimateLines(estimateId, workshopId, lines, { user, pref = DEFAULT_PREFERENCE, existingById = new Map() }) {
+/**
+ * The supplementary estimate's fixed cost (client feedback 18 Nov 2026,
+ * point 4): Settings → supplementary_fixed_cost (AED, before VAT) and its
+ * label. A tick box on a supplementary estimate adds it as one service line
+ * (estimate_lines.is_fixed_fee) — it goes to the customer for approval with
+ * the rest, and never becomes a technician's job. { amount, label }; amount
+ * 0 = not set up.
+ */
+export async function fixedFeeOf(workshopId) {
+  const rows = await query("SELECT `key`, `value` FROM settings WHERE workshop_id = ? AND `key` IN ('supplementary_fixed_cost', 'supplementary_fixed_cost_label')", [workshopId]);
+  const v = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const amount = Math.round((Number(v.supplementary_fixed_cost) || 0) * 100) / 100;
+  const label = String(v.supplementary_fixed_cost_label || '').trim().slice(0, 200) || 'Technical inspection report';
+  return { amount: amount > 0 ? amount : 0, label };
+}
+
+async function insertEstimateLines(estimateId, workshopId, lines, { user, pref = DEFAULT_PREFERENCE, existingById = new Map(), fixedFee = null }) {
   const mayPriceParts = can(user, 'estimate.price_parts');
   const mayPriceLabour = can(user, 'estimate.raise');
   const emptyPricing = () => Object.fromEntries([...CATEGORY_FIELDS, ...ALTERNATIVE_FIELDS, 'priced_by', 'priced_at'].map(f => [f, null]));
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const old = l.id ? existingById.get(Number(l.id)) : null;
-    const type = ['labour', 'parts', 'sublet', 'consumable', 'discount'].includes(l.line_type) ? l.line_type : 'labour';
-    let unitPrice = Number(l.unit_price) || 0;
+    // The fixed cost line: only on a supplementary estimate with the cost set
+    // up; its price and wording come from Settings, never from the request.
+    const isFixedFee = !!(l.is_fixed_fee || old?.is_fixed_fee);
+    if (isFixedFee && !(fixedFee?.amount > 0)) continue;
+    const type = isFixedFee ? 'labour' : ['labour', 'parts', 'sublet', 'consumable', 'discount'].includes(l.line_type) ? l.line_type : 'labour';
+    let unitPrice = isFixedFee ? fixedFee.amount : Number(l.unit_price) || 0;
     let pricing = emptyPricing();
     let partOption = PART_CATEGORIES.includes(l.part_option) ? l.part_option : (old?.part_option || null);
     if (type === 'parts') {
@@ -193,7 +213,7 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
       }
       tidyAlternative(pricing, pref);
       unitPrice = countedPartPrice({ ...pricing, part_option: partOption }, pref, unitPrice);
-    } else if (type === 'labour' && !mayPriceLabour) {
+    } else if (type === 'labour' && !mayPriceLabour && !isFixedFee) {
       // Labour is priced by the Service Advisor (Step 5).
       unitPrice = old ? (Number(old.unit_price) || 0) : 0;
     }
@@ -207,11 +227,12 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
           used_price, used_available, used_expected_date,
           genuine_part_number, aftermarket_part_number, used_part_number,
           part_option, alternative_option, alternative_for, alternative_approved, priced_by, priced_at, discount_pct,
-          payer_direction, insurance_ref, warranty_ref, urgency, customer_status, sort_order)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          payer_direction, insurance_ref, warranty_ref, urgency, customer_status, sort_order, is_fixed_fee)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [estimateId, workshopId, type, l.operation_id || null,
-       l.description, (l.job_name ? String(l.job_name).trim().slice(0, 200) : null) || null,
-       l.part_number || null, parseFloat(l.quantity || 1),
+       isFixedFee ? fixedFee.label : l.description,
+       isFixedFee ? fixedFee.label : (l.job_name ? String(l.job_name).trim().slice(0, 200) : null) || null,
+       isFixedFee ? null : l.part_number || null, isFixedFee ? 1 : parseFloat(l.quantity || 1),
        parseFloat(l.unit_cost || 0), unitPrice,
        pricing.genuine_price, pricing.genuine_available, pricing.genuine_expected_date,
        pricing.aftermarket_price, pricing.aftermarket_available, pricing.aftermarket_expected_date,
@@ -224,7 +245,7 @@ async function insertEstimateLines(estimateId, workshopId, lines, { user, pref =
        // urgency was never in this column list, so every line silently took
        // the table's DEFAULT 'now' regardless of what was actually passed.
        ['now', 'soon', 'can_wait'].includes(l.urgency) ? l.urgency : 'now',
-       l.customer_status || old?.customer_status || 'pending', i]
+       l.customer_status || old?.customer_status || 'pending', i, isFixedFee ? 1 : 0]
     );
   }
 }
@@ -1266,6 +1287,11 @@ router.get('/raise-check', async (req, res) => {
         // The type a supplementary estimate is priced in unless the advisor picks another.
         fixed_type: kind === 'supplementary' && r.ok ? await defaultFixedType(r.main, wo) : null,
         report: r.ok ? await reportJobs(wo.id, req.workshopId) : null,
+        // Point 4 (18 Nov): the fixed cost a supplementary estimate can add, and
+        // whether the main estimate has no work on it (not raised, or no lines).
+        fixed_fee: kind === 'supplementary' && r.ok ? await fixedFeeOf(req.workshopId) : null,
+        main_empty: kind === 'supplementary' && r.ok ? !r.main || !(await query(
+          "SELECT 1 FROM estimate_lines WHERE estimate_id = ? AND line_type IN ('labour','parts','sublet','consumable') LIMIT 1", [r.main.id])).length : null,
       },
     });
   } catch (err) {
@@ -1386,6 +1412,8 @@ router.get('/:id', async (req, res) => {
         kind: e.kind || 'main',
         kind_label: KIND_LABEL[e.kind] || KIND_LABEL.main,
         fixed_cost: supplementary,
+        // Point 4 (18 Nov): the fixed cost the edit form's tick box adds.
+        fixed_fee: supplementary ? await fixedFeeOf(req.workshopId) : null,
         parent_estimate: parent || null,
         customer_type_label: CUSTOMER_TYPE_LABEL[e.customer_type] || e.customer_type,
         is_external: external,
@@ -1571,7 +1599,7 @@ router.post('/', requireCapability('estimate.raise'), async (req, res) => {
     // Raising the estimate does not open the job card (D2): an external
     // job's is open already (checked above), an internal job's opened with it.
     const estimateId = result.insertId;
-    await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user, pref });
+    await insertEstimateLines(estimateId, req.workshopId, lines, { user: req.user, pref, fixedFee: supplementary ? await fixedFeeOf(req.workshopId) : null });
     const totals = await recalcEstimateTotals(estimateId);
     if (enquiry && !supplementary) await markEnquiryQuoted({ workshopId: req.workshopId, enquiryId: enquiry.id, amount: totals.total_amount, userId: req.user?.id });
 
@@ -1650,7 +1678,8 @@ router.put('/:id', requireCapability('estimate.raise'), async (req, res) => {
 
     // Replace lines (prices the editor may not set are carried over by id)
     await execute('DELETE FROM estimate_lines WHERE estimate_id = ?', [req.params.id]);
-    await insertEstimateLines(req.params.id, req.workshopId, lines, { user: req.user, pref, existingById });
+    await insertEstimateLines(req.params.id, req.workshopId, lines, { user: req.user, pref, existingById,
+      fixedFee: isSupplementary(est) ? await fixedFeeOf(req.workshopId) : null });
     await recalcEstimateTotals(req.params.id);
 
     // New part lines, or a category the Store has not priced yet: tell the Store.

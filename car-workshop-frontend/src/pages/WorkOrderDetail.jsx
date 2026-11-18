@@ -496,7 +496,7 @@ export default function WorkOrderDetail({ mode = 'work-order' }) {
                       {order.vehicle_vin && <InfoRow icon={Hashtag} label="VIN" value={order.vehicle_vin} mono />}
                     </>
                   ) : (
-                    <div style={{ fontSize: 13, color: '#94a3b8', padding: '8px 0' }}>{t('orderDetail.no_vehicle', 'No vehicle linked to this job card.')}</div>
+                    <div style={{ fontSize: 13, color: '#94a3b8', padding: '8px 0' }}>{t('orderDetail.no_vehicle', 'No vehicle on this work order yet — add it in Step 2.')}</div>
                   )}
                 </div>
               </div>

@@ -2201,7 +2201,7 @@
     "cash_amount_label": "Montant en espèces",
     "color": "Couleur",
     "email": "E-mail",
-    "no_vehicle": "Aucun véhicule associé à cette fiche de travail.",
+    "no_vehicle": "Aucun véhicule sur l'ordre de travail — ajoutez-le à l'étape 2.",
     "vehicle_make_model": "Marque / Modèle",
     "copy_customer_link": "Lien client",
     "copy_link_hint": "Copiez le lien que le client utilise pour suivre l'avancement des travaux",
@@ -3435,7 +3435,8 @@
       "roles": "Définir les rôles et configurer les permissions par module",
       "subscription": "Voir votre plan actuel, les limites d'utilisation et les options de mise à niveau",
       "users": "Utilisateurs",
-      "surveys": "Enquête automatique à la clôture du travail"
+      "surveys": "Enquête automatique à la clôture du travail",
+      "estimates": "Coût fixe sur les devis complémentaires"
     },
     "tabs": {
       "categories": "Catégories",
@@ -3446,7 +3447,8 @@
       "roles": "Rôles",
       "subscription": "Abonnement",
       "users": "Utilisateurs",
-      "surveys": "Enquêtes"
+      "surveys": "Enquêtes",
+      "estimates": "Devis"
     },
     "tax": {
       "apply_on_delivery": "Appliquer la TVA sur les frais de service",
@@ -4829,14 +4831,14 @@
     "internal": "Interne",
     "issue_gatepass": "Émettre le bon de sortie",
     "issued": "Délivrée",
-    "jc_opened": "Fiche de travail principale ouverte",
+    "jc_opened": "Fiche de travail d'inspection ouverte",
     "job": "Intervention",
     "job_done": "Intervention terminée",
     "labour": "Main-d'œuvre",
     "later": "Affecter plus tard",
     "load_failed": "Impossible de charger le processus.",
     "log_call": "Enregistrer l'appel",
-    "main": "Fiche de travail principale",
+    "main": "Fiche de travail d'inspection",
     "method": "Mode",
     "move_items": "Déplacer les travaux approuvés vers cette fiche",
     "network": "Erreur réseau — vérifiez la connexion.",
@@ -4844,7 +4846,7 @@
     "no_customer": "Cette intervention n'a aucun dossier client à classer.",
     "no_invoice": "La facture est émise automatiquement ; elle apparaîtra ici.",
     "no_parts": "Aucune pièce demandée.",
-    "no_vehicle": "Aucun véhicule lié — modifiez la fiche de travail pour l'ajouter.",
+    "no_vehicle": "Aucun véhicule sur l'ordre de travail — ajoutez-le à l'étape 2.",
     "not_available": "Non disponible",
     "not_on_shelf": "Pas en rayon",
     "not_started": "Non démarré",
@@ -4855,7 +4857,7 @@
     "on_account": "Facturé en compte (client interne / client à crédit).",
     "on_shelf": "En rayon — délivrer",
     "open_estimate": "Ouvrir le devis",
-    "open_jc": "Ouvrir la fiche de travail principale",
+    "open_jc": "Ouvrir la fiche de travail d'inspection",
     "paid": "Paiement enregistré",
     "part_desc": "Description de la pièce",
     "part_no": "Réf. pièce",
@@ -4922,11 +4924,12 @@
     "steps": {
       "classification": "Classification du client",
       "intake": "Informations véhicule et problème",
-      "job_card": "Fiche de travail (JC)",
+      "job_card": "Inspection physique et fiche de travail d'inspection",
       "inspection_pricing": "Inspection et chiffrage",
       "estimate": "Devis au client",
       "work": "Décision du client et travaux",
-      "closure": "Contrôle qualité, récupération et clôture"
+      "closure": "Contrôle qualité, récupération et clôture",
+      "physical_inspection": "Inspection physique et fiche de travail d'inspection"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4970,7 +4973,7 @@
       "reported_issue": "Problème signalé",
       "odometer": "Compteur kilométrique",
       "received_via": "Reçu via",
-      "main_jc_opened": "Fiche de travail principale ouverte",
+      "main_jc_opened": "Fiche de travail d'inspection ouverte",
       "floor_notified": "Superviseur, chef d'atelier et chef d'équipe notifiés",
       "technical_inspection": "Inspection technique",
       "parts_priced": "Pièces chiffrées par le magasinier (Origine / Adaptable)",
@@ -4988,7 +4991,8 @@
       "pickup_contacted": "Client contacté pour la récupération",
       "payment": "Paiement et facture",
       "gate_pass": "Bon de sortie final",
-      "job_closed": "Intervention clôturée"
+      "job_closed": "Intervention clôturée",
+      "inspection_jc_opened": "Fiche de travail d'inspection ouverte"
     },
     "val": {
       "class_internal": "Interne",
@@ -5036,7 +5040,7 @@
       "rejected_all": "Le client a refusé le devis. L'e-mail de regret a été envoyé — enregistrez son motif et clôturez l'intervention.",
       "classify": "Classez le client : Interne ou Externe, puis Flotte, Assurance, Actif ou Client de passage.",
       "intake": "Enregistrez le véhicule et le problème signalé.",
-      "open_job_card": "Ouvrez la fiche de travail principale.",
+      "open_job_card": "Ouvrir la fiche de travail d'inspection.",
       "create_estimate": "Effectuez l'inspection technique et établissez le devis avec les constats.",
       "price_parts": "Chiffrez les pièces — Origine et Adaptable, ou marquez un type N/A.",
       "price_labour": "Chiffrez la main-d'œuvre sur le devis.",
@@ -5115,7 +5119,10 @@
       "title": "Vos tâches"
     },
     "time_by_floor": "Le temps est pointé par le technicien (ou le chef d'équipe / superviseur / chef d'atelier).",
-    "your_turn": "À vous"
+    "your_turn": "À vous",
+    "inspection_card": "Fiche de travail d'inspection",
+    "job_card": "Fiche de travail",
+    "inspection_card_opened": "Fiche de travail d'inspection ouverte"
   },
   "bookings": {
     "err_load": "Impossible de charger les réservations.",

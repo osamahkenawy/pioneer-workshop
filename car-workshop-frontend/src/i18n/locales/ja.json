@@ -2201,7 +2201,7 @@
     "cash_amount_label": "現金額",
     "color": "色",
     "email": "メールアドレス",
-    "no_vehicle": "この作業伝票に紐付けられた車両はありません。",
+    "no_vehicle": "作業指示に車両がまだありません — ステップ2で追加してください。",
     "vehicle_make_model": "メーカー / 車種",
     "copy_customer_link": "顧客用リンク",
     "copy_link_hint": "顧客がこの作業の進捗確認に使うリンクをコピー",
@@ -3435,7 +3435,8 @@
       "roles": "ロールを定義しモジュールレベルの権限を設定",
       "subscription": "現在のプラン、使用量制限、アップグレードオプションを表示",
       "users": "ユーザー",
-      "surveys": "作業完了時に自動でアンケート"
+      "surveys": "作業完了時に自動でアンケート",
+      "estimates": "追加見積の固定費"
     },
     "tabs": {
       "categories": "カテゴリ",
@@ -3446,7 +3447,8 @@
       "roles": "役割",
       "subscription": "サブスクリプション",
       "users": "ユーザー",
-      "surveys": "アンケート"
+      "surveys": "アンケート",
+      "estimates": "見積"
     },
     "tax": {
       "apply_on_delivery": "サービス料金にVATを適用",
@@ -4829,14 +4831,14 @@
     "internal": "内部",
     "issue_gatepass": "出庫票を発行",
     "issued": "出庫済み",
-    "jc_opened": "メイン作業伝票を起票しました",
+    "jc_opened": "点検作業伝票を起票しました",
     "job": "作業",
     "job_done": "作業完了",
     "labour": "工賃",
     "later": "後で割り当てる",
     "load_failed": "ワークフローを読み込めませんでした。",
     "log_call": "通話を記録",
-    "main": "メイン作業伝票",
+    "main": "点検作業伝票",
     "method": "方法",
     "move_items": "承認済みの作業をこの作業伝票に移動",
     "network": "ネットワークエラー — 接続を確認してください。",
@@ -4844,7 +4846,7 @@
     "no_customer": "この作業には、分類する顧客情報がありません。",
     "no_invoice": "請求書は自動で発行され、ここに表示されます。",
     "no_parts": "部品の請求はありません。",
-    "no_vehicle": "車両が紐付けられていません — 作業伝票を編集して追加してください。",
+    "no_vehicle": "作業指示に車両がまだありません — ステップ2で追加してください。",
     "not_available": "取り扱いなし",
     "not_on_shelf": "在庫なし",
     "not_started": "未開始",
@@ -4855,7 +4857,7 @@
     "on_account": "掛け売り（内部 / 掛け取引の顧客）。",
     "on_shelf": "在庫あり — 出庫",
     "open_estimate": "見積もりを開く",
-    "open_jc": "メイン作業伝票を起票",
+    "open_jc": "点検作業伝票を起票",
     "paid": "支払いを記録しました",
     "part_desc": "部品の説明",
     "part_no": "部品番号",
@@ -4922,11 +4924,12 @@
     "steps": {
       "classification": "顧客分類",
       "intake": "車両情報と不具合内容",
-      "job_card": "作業伝票（JC）",
+      "job_card": "目視点検と点検作業伝票",
       "inspection_pricing": "点検と価格設定",
       "estimate": "顧客への見積もり",
       "work": "顧客の判断と作業",
-      "closure": "品質検査・引き取り・終了"
+      "closure": "品質検査・引き取り・終了",
+      "physical_inspection": "目視点検と点検作業伝票"
     },
     "sum": {
       "raw": "{{v}}",
@@ -4970,7 +4973,7 @@
       "reported_issue": "申告された不具合",
       "odometer": "走行距離",
       "received_via": "受領方法",
-      "main_jc_opened": "メイン作業伝票の起票",
+      "main_jc_opened": "点検作業伝票を起票しました",
       "floor_notified": "スーパーバイザー・職長・チームリーダーへの通知",
       "technical_inspection": "技術点検",
       "parts_priced": "部品庫担当による部品の価格設定（純正 / 社外品）",
@@ -4988,7 +4991,8 @@
       "pickup_contacted": "引き取りについて顧客に連絡",
       "payment": "支払いと請求書",
       "gate_pass": "最終出庫票",
-      "job_closed": "作業終了"
+      "job_closed": "作業終了",
+      "inspection_jc_opened": "点検作業伝票を起票しました"
     },
     "val": {
       "class_internal": "内部",
@@ -5036,7 +5040,7 @@
       "rejected_all": "顧客が見積もりを却下しました。お詫びメールは送信済みです — 理由を記録して作業を終了してください。",
       "classify": "顧客を分類してください：内部または外部、次にフリート、保険、資産、一般客（飛び込み）のいずれか。",
       "intake": "車両と申告された不具合を記録してください。",
-      "open_job_card": "メイン作業伝票を起票してください。",
+      "open_job_card": "点検作業伝票を起票。",
       "create_estimate": "技術点検を行い、点検結果をもとに見積もりを作成してください。",
       "price_parts": "部品の価格を設定してください — 純正と社外品、またはいずれかの種類をN/Aにします。",
       "price_labour": "見積もりの工賃を設定してください。",
@@ -5115,7 +5119,10 @@
       "title": "あなたのタスク"
     },
     "time_by_floor": "時間は整備士（またはチームリーダー / スーパーバイザー / 職長）が記録します。",
-    "your_turn": "あなたの番"
+    "your_turn": "あなたの番",
+    "inspection_card": "点検作業伝票",
+    "job_card": "作業伝票",
+    "inspection_card_opened": "点検作業伝票を起票しました"
   },
   "bookings": {
     "err_load": "予約を読み込めませんでした。",

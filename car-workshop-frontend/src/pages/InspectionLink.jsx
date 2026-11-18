@@ -247,7 +247,7 @@ export default function InspectionLink() {
           ) : insp.entry_mode === 'document' ? (
             <p className="il-muted">{t('inspectionLink.paper_signed', 'You signed the paper form at the workshop — it is attached above.')}</p>
           ) : insp.can_sign ? (
-            <SignForm t={t} token={token} handover={handover}
+            <SignForm t={t} token={token} handover={handover} customerName={insp.customer_name}
               onSigned={sig => { setInsp(i => ({ ...i, signature: sig, can_sign: false })); setJustSigned(true); }}
               onStale={load} />
           ) : (
@@ -267,11 +267,12 @@ export default function InspectionLink() {
 }
 
 /** Name + signature pad (touch and mouse) + the confirmation, then Sign. */
-function SignForm({ t, token, handover, onSigned, onStale }) {
+function SignForm({ t, token, handover, customerName, onSigned, onStale }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const [hasInk, setHasInk] = useState(false);
-  const [name, setName] = useState('');
+  // The name on the job card, filled in (client feedback 18 Nov, point 6); they can change it.
+  const [name, setName] = useState(() => String(customerName || '').trim());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
